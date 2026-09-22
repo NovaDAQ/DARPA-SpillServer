@@ -35,7 +35,7 @@ The modules are layered so each can be used on its own:
     The HTTP surface.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 #: Copyright notice shown on every page this server serves: the query page,
 #: the generated API documentation, and the OpenAPI schema. Defined once here

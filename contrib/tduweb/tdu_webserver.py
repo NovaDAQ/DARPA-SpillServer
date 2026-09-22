@@ -1,9 +1,19 @@
 """TDU embedded web server, with a bulk spill-history route.
 
-This is a drop-in replacement for ``TDUWeb/server/tdu_webserver.py``.  It keeps
-every existing route byte-for-byte compatible and adds one new route,
+.. note::
+   This is a **copy**.  The file that gets deployed lives at
+   ``server/tdu_webserver.py`` on the ``Darpa-Modifications`` branch of
+   https://github.com/NovaDAQ/TDUWeb and that copy is authoritative.  It is
+   mirrored here so this repository explains, in one place, what the TDU needs
+   in order to serve a real event history.  Change it there, then re-sync.
+
+This is a drop-in replacement for ``TDUWeb/server/tdu_webserver.py``.  Every
+existing route issues the same command as before, and one new route is added:
 ``/spill_history``, which is what the DARPA Spill Information Server needs in
 order to build a real event history.
+
+There is one intentional behavioural change, in ``/tcr_start`` --- it no longer
+blocks forever waiting for a process that never exits.  See that route.
 
 Why a new route is necessary
 ----------------------------
@@ -24,28 +34,47 @@ polls at whatever rate it likes and still misses nothing.
 
 Compatibility
 -------------
-This file runs on the TDU's stock Python 2.6/2.7 as well as Python 3: it uses
-no f-strings, no ``pathlib``, and no third-party modules beyond the vendored
-``bottle.py`` already present in ``TDUWeb/server/``.
+This file runs on the TDU's stock Python 2.5 as well as Python 3.  That floor
+is lower than it looks: 2.5 predates ``except X as e`` (it needs ``except X, e``),
+``str.format``, and the ``json`` module, so this file uses ``%`` formatting
+throughout and carries its own small JSON encoder.  bottle's ``json_dumps``
+is not usable: without ``simplejson`` installed it is a stub that raises
+``ImportError``.  Nothing is needed beyond the vendored ``bottle.py`` already
+present in ``TDUWeb/server/``.
 
 It also works with an **unpatched** ``DumpSpillHistory``.  That utility's bulk
 JSON is malformed --- it emits ``printf("{\\nEvents: [\\n")``, an unquoted key
 --- so this server parses the utility's CSV output instead, which has no such
-problem.  Applying ``patches/0001-DumpSpillHistory-json-and-time-window.patch``
+problem.  Applying the DumpSpillHistory patch in the DARPA-SpillServer repository
+(``contrib/tduweb/patches/0001-DumpSpillHistory-json-and-time-window.patch``)
 makes the utility filter by time itself, which is faster on a full ring, but
 is not required.
 
 Usage
 -----
-Install as ``TDUWeb/server/tdu_webserver.py`` on the TDU and restart the
-service.  See README.md in this directory for the deployment steps.
+Install on the TDU in place of the previous ``tdu_webserver.py`` and restart
+the service.  See ``README.md`` beside this file, and ``server/README-DARPA.md``
+on the TDUWeb ``Darpa-Modifications`` branch, for deployment and rollback.
+
+It listens on ``0.0.0.0:8080`` by default, as the previous server did.  To use
+another port, pass it as the first argument or set ``TDU_WEB_PORT``;
+``TDU_WEB_HOST`` sets the address::
+
+    python2.5 ./tdu_webserver.py 8081
+    TDU_WEB_PORT=8081 python2.5 ./tdu_webserver.py
 """
 
+import os
 import re
 import subprocess
 import sys
 
 from bottle import route, run, request, response
+
+#: Where to listen.  Override with the TDU_WEB_HOST / TDU_WEB_PORT
+#: environment variables, or by passing the port as the first argument.
+DEFAULT_HOST = '0.0.0.0'
+DEFAULT_PORT = 8080
 
 #: Shared-memory segment identifier the DAQ uses for accelerator events.
 MEMORY_SEGMENT = 'BEAM'
@@ -100,7 +129,7 @@ def _run(command):
     failures are detected from the output instead, by _check_output below.
 
     subprocess.Popen is used rather than check_output so that this file keeps
-    working on the Python 2.6 that some TDUs still carry.
+    working on the Python 2.5 the TDUs carry.
     """
     process = subprocess.Popen(command, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE)
@@ -166,16 +195,121 @@ def _parse_history(text):
     return events
 
 
+# ---------------------------------------------------------------------------
+# JSON encoding.
+#
+# Python 2.5 has no json module -- it arrived in 2.6 -- and the TDU has no
+# simplejson either.  bottle's json_dumps falls back to a stub that raises
+# ImportError("JSON support requires Python 2.6 or simplejson."), so it cannot
+# be used here.  Rather than add a dependency to a machine that is deliberately
+# minimal, the few shapes this server emits are serialised directly.
+#
+# The encoder is used on every interpreter, not only on 2.5, so that the output
+# is identical wherever this runs and the code path is exercised by every test
+# rather than only in production.
+# ---------------------------------------------------------------------------
+
+# Text and byte types, named without relying on anything newer than 2.5.
+# `bytes` cannot be used directly: it is a 2.6 addition (an alias for str), so
+# referring to it raises NameError on the TDU while working fine on 2.6+.
+try:
+    _TEXT_TYPE = unicode          # noqa: F821  (Python 2)
+    _BYTE_TYPE = str
+except NameError:                 # pragma: no cover  (Python 3)
+    _TEXT_TYPE = str
+    _BYTE_TYPE = bytes        # py25-ok
+
+try:
+    _INTEGER_TYPES = (int, long)  # noqa: F821  (Python 2)
+except NameError:                 # pragma: no cover  (Python 3)
+    _INTEGER_TYPES = (int,)
+
+_JSON_STRING_ESCAPES = {
+    '"':  '\\"',
+    '\\': '\\\\',
+    '\b': '\\b',
+    '\f': '\\f',
+    '\n': '\\n',
+    '\r': '\\r',
+    '\t': '\\t',
+}
+
+
+def _json_text(value):
+    """Return *value* as a text string, on either Python 2 or 3."""
+    if isinstance(value, _TEXT_TYPE):
+        return value
+    if isinstance(value, _BYTE_TYPE):
+        return value.decode('utf-8', 'replace')
+    return _TEXT_TYPE(value)
+
+
+def _json_string(value):
+    """Encode a string as a JSON string literal, escaped to plain ASCII.
+
+    Everything outside printable ASCII becomes a \\uXXXX escape, so the body
+    is valid JSON whatever encoding the client assumes.
+    """
+    parts = ['"']
+    for character in _json_text(value):
+        if character in _JSON_STRING_ESCAPES:
+            parts.append(_JSON_STRING_ESCAPES[character])
+            continue
+        code = ord(character)
+        if code < 0x20 or code > 0x7E:
+            if code > 0xFFFF:
+                # Encode astral characters as a UTF-16 surrogate pair, which
+                # is what the JSON specification requires.
+                code = code - 0x10000
+                parts.append('\\u%04x' % (0xD800 + (code >> 10)))
+                parts.append('\\u%04x' % (0xDC00 + (code & 0x3FF)))
+            else:
+                parts.append('\\u%04x' % code)
+        else:
+            parts.append(character)
+    parts.append('"')
+    return ''.join(parts)
+
+
+def _json_encode(value):
+    """Serialise *value* as JSON.
+
+    Handles the shapes this server produces: None, booleans, integers,
+    floats, strings, lists, tuples and dicts.  Anything else is rendered as
+    its string form rather than raising, so a diagnostic response can never
+    fail to serialise.
+    """
+    if value is None:
+        return 'null'
+    if value is True:
+        return 'true'
+    if value is False:
+        return 'false'
+    # bool is a subclass of int, so it must be tested before this.
+    if isinstance(value, _INTEGER_TYPES):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return '[' + ', '.join([_json_encode(item) for item in value]) + ']'
+    if isinstance(value, dict):
+        pairs = []
+        for key in value:
+            pairs.append('%s: %s' % (_json_string(key), _json_encode(value[key])))
+        return '{' + ', '.join(pairs) + '}'
+    return _json_string(value)
+
+
 def _json_response(payload):
-    """Serialise *payload* as JSON without depending on bottle's encoder."""
-    import json
+    """Serialise *payload* as JSON and set the response headers."""
     _allow_cors()
     response.content_type = 'application/json'
-    return json.dumps(payload)
+    return _json_encode(payload)
 
 
 # ---------------------------------------------------------------------------
-# Existing routes, unchanged in behaviour.
+# Existing routes. Every one issues the same command as before; see
+# README-DARPA.md for the single behavioural difference, in /tcr_start.
 # ---------------------------------------------------------------------------
 
 @route('/tcr_status')
@@ -225,6 +359,15 @@ def tdu_errors2():
 
 @route('/tcr_start')
 def tcr_start():
+    """Start TCRMonitor in the background.
+
+    The previous version called .communicate() on this process. With -D 0
+    TCRMonitor does not daemonize (daemon_flag = 0 in TCRMonitor.cc), so it
+    never exits, and .communicate() blocked forever -- hanging the request and,
+    with bottle's single-threaded default server, every later request too.
+    The process is launched and left alone here; the route already returned a
+    fixed string rather than its output, so nothing is lost.
+    """
     _allow_cors()
     subprocess.Popen(['TCRMonitor', '-D', '0', '-S', '0'],
                      stdout=subprocess.PIPE)
@@ -272,7 +415,7 @@ def spill_history():
         since = _int_param('since', None, minimum=0)
         until = _int_param('until', None, minimum=0)
         limit = _int_param('limit', DEFAULT_LIMIT, minimum=1, maximum=MAX_LIMIT)
-    except ValueError as exc:
+    except ValueError, exc:
         response.status = 400
         return _json_response({'error': str(exc)})
 
@@ -293,7 +436,7 @@ def spill_history():
                '--booster', '--numi', '--onehertz', '--tcr']
     try:
         raw = _check_output(_run(command), command)
-    except (RuntimeError, OSError) as exc:
+    except (RuntimeError, OSError), exc:
         response.status = 500
         return _json_response({'error': str(exc)})
 
@@ -335,14 +478,59 @@ def spill_history_info():
         'note': ('Records carry the decoded spill type only. The shared-memory '
                  'layout does not preserve the raw 16-bit event word, so $1D '
                  'cannot be distinguished from $1F, nor $A9 from $AD. See '
-                 'patches/0002 for the change that would add it.'),
+                 'server/README-DARPA.md for the change that would add it.'),
     })
 
 
-if __name__ == '__main__':
-    port = 8080
+def server_host():
+    """Address to bind: TDU_WEB_HOST, else every interface."""
+    return os.environ.get('TDU_WEB_HOST') or DEFAULT_HOST
+
+
+def server_port():
+    """Port to bind.
+
+    Checked in order: the first command-line argument, then TDU_WEB_PORT,
+    then DEFAULT_PORT.  Both mechanisms exist because they suit different
+    callers -- an argument is natural in a shell, while an environment
+    variable is what an init script can set when the launch command itself
+    is not easily edited.
+    """
+    candidates = []
     if len(sys.argv) > 1:
-        port = int(sys.argv[1])
-    run(host='0.0.0.0', port=port, debug=True)
-else:
-    run(host='0.0.0.0', port=8080, debug=True)
+        candidates.append(('argument', sys.argv[1]))
+    if os.environ.get('TDU_WEB_PORT'):
+        candidates.append(('TDU_WEB_PORT', os.environ['TDU_WEB_PORT']))
+
+    for origin, value in candidates:
+        try:
+            port = int(value)
+        except ValueError:
+            sys.stderr.write('tdu_webserver: ignoring %s %r: not a number\n'
+                             % (origin, value))
+            continue
+        if port < 1 or port > 65535:
+            sys.stderr.write('tdu_webserver: ignoring %s %r: out of range\n'
+                             % (origin, value))
+            continue
+        return port
+    return DEFAULT_PORT
+
+
+def serve():
+    """Start the web server on the configured address."""
+    run(host=server_host(), port=server_port(), debug=True)
+
+
+# The original tdu_webserver.py called run() at the end of the module with no
+# __main__ guard, so merely importing it started the server.  That is preserved
+# here, because the TDU's service may launch the file either way -- but it now
+# goes through serve(), so the port is honoured in both cases rather than only
+# when the file is executed directly.
+#
+# Set TDU_WEB_NO_SERVE=1 to import the module without starting anything, which
+# is what a linter or a test needs.
+if __name__ == '__main__':
+    serve()
+elif os.environ.get('TDU_WEB_NO_SERVE', '').lower() not in ('1', 'true', 'yes'):
+    serve()

@@ -1,5 +1,12 @@
 # Upstream changes needed on the TDU
 
+> **The deployable copy lives elsewhere.** `tdu_webserver.py`, `selftest.py`
+> and the two compatibility checkers in this directory are mirrors of
+> `server/` on the [`Darpa-Modifications`](https://github.com/NovaDAQ/TDUWeb/tree/Darpa-Modifications)
+> branch of TDUWeb, which is authoritative and is what gets installed. They are
+> duplicated here so this repository explains, in one place, what the TDU needs
+> in order to serve a real event history. Change them there, then re-sync.
+
 This directory holds the changes to **other** NOvA DAQ packages that the DARPA
 Spill Information Server depends on. Nothing here is installed by
 `bootstrap.sh`; each change is deployed deliberately, by hand, after review.
@@ -86,8 +93,26 @@ keeps its behaviour; one route is added.
   word (change 4).
 
 It works against an **unpatched** `DumpSpillHistory` by parsing that tool's CSV
-output, avoiding the malformed JSON described below. It runs on the TDU's stock
-Python 2.6/2.7 as well as Python 3, and needs no module the TDU lacks.
+output, avoiding the malformed JSON described below.
+
+It targets the TDU's stock **Python 2.5**, which rules out more than it first
+appears — `except X as e`, `str.format`, the `json` module and the `bytes`
+builtin are all 2.6 or later. It therefore carries its own small JSON encoder
+rather than using `bottle.json_dumps`, which is a stub that raises
+`ImportError` when neither `simplejson` nor `json` is installed, as on the TDU.
+
+Two checkers guard that floor, neither needing a 2.5 interpreter:
+
+```console
+$ python2 check_python25.py tdu_webserver.py selftest.py
+$ TDU_WEB_NO_SERVE=1 python2 run_as_python25.py selftest.py
+```
+
+The first scans source for 2.6+ syntax and names. The second runs the code with
+the 2.6+ builtins hidden, which is what catches a name like `bytes` that exists
+on a development machine's 2.7 and not on the TDU. Running `selftest.py` needs
+`bottle.py` on the path, so from this directory pass
+`PYTHONPATH=/path/to/TDUWeb/server`.
 
 ```console
 # On the TDU, as root:
