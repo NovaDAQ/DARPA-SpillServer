@@ -1,8 +1,10 @@
 """Tests for the HTTP API."""
 
 import csv
+import html
 import io
 import json
+import re
 
 import pytest
 
@@ -306,6 +308,35 @@ def test_index_page_renders(client):
     assert response.status_code == 200
     assert "DARPA Spill Information Server" in response.text
     assert "$8F" in response.text, "the signal chips should be rendered"
+
+
+def test_query_page_shows_the_logo(client):
+    """The masthead art is served from the package, not from a CDN."""
+    body = client.get("/").text
+    assert '/static/novadaq-logo.png' in body
+
+    logo = client.get("/static/novadaq-logo.png")
+    assert logo.status_code == 200
+    assert logo.headers["content-type"] == "image/png"
+
+
+def test_query_page_links_a_bug_report(client, config):
+    """The report link reaches the repository's issue tracker, prefilled."""
+    from urllib.parse import parse_qs, urlparse
+
+    from darpa_spillserver import ISSUES_URL, PROJECT_URL, __version__
+
+    body = client.get("/").text
+    assert PROJECT_URL in body
+    assert "report a bug" in body
+
+    match = re.search(r'href="({}[^"]*)"'.format(re.escape(ISSUES_URL)), body)
+    assert match, "no link to the issue tracker on the query page"
+
+    query = parse_qs(urlparse(html.unescape(match.group(1))).query)
+    assert query["labels"] == ["bug"]
+    assert __version__ in query["body"][0]
+    assert config.tdu.base_url in query["body"][0]
 
 
 def test_openapi_schema_is_served(client):

@@ -49,4 +49,18 @@ COPYRIGHT = (
 COPYRIGHT_HOLDER = "Fermi Forward Discovery Group LLC"
 COPYRIGHT_YEARS = "2010-2026"
 
-__all__ = ["__version__", "COPYRIGHT", "COPYRIGHT_HOLDER", "COPYRIGHT_YEARS"]
+#: Where the source lives, and where a user of the served pages is sent to
+#: report a defect. Defined here for the same reason as the copyright: the
+#: query page, the OpenAPI contact block and the documentation all quote it,
+#: and a fork that moves the repository should only have to edit one place.
+PROJECT_URL = "https://github.com/NovaDAQ/DARPA-SpillServer"
+ISSUES_URL = PROJECT_URL + "/issues/new"
+
+__all__ = [
+    "__version__",
+    "COPYRIGHT",
+    "COPYRIGHT_HOLDER",
+    "COPYRIGHT_YEARS",
+    "PROJECT_URL",
+    "ISSUES_URL",
+]

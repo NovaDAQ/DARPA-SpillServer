@@ -15,6 +15,7 @@
   --warn-bg: #fff4d6;
   --warn-ink: #6b4a00;
   --warn-line: #e0b84d;
+  --logo-plate: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -28,6 +29,9 @@
     --warn-bg: #3a3218;
     --warn-ink: #f2d98a;
     --warn-line: #7a6522;
+    /* The logo art is opaque and light-grounded; keep its plate light in dark
+       mode rather than letting a dark panel halo it. */
+    --logo-plate: #eef2f7;
   }
 }
 
@@ -45,6 +49,43 @@ header { padding: 24px 0 12px; border-bottom: 1px solid var(--line); }
 header h1 { margin: 0 0 4px; font-size: 1.4rem; font-weight: 600; }
 .sub { margin: 0; color: var(--muted); font-size: 0.88rem; }
 a { color: var(--accent); }
+
+/* Title block left, logo pinned to the upper right of the same band. */
+.masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.masthead-text { min-width: 0; }
+/* The TDU URL is one long unbreakable token; let it wrap rather than force the
+   masthead wider than the viewport and push the logo off a phone screen. */
+.masthead-text code { overflow-wrap: anywhere; }
+
+.logo {
+  flex: 0 0 auto;
+  display: block;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--logo-plate);
+  line-height: 0;
+}
+.logo:hover { border-color: var(--accent); }
+.logo img {
+  display: block;
+  width: 84px;
+  height: auto;   /* the source is square; keep it so if the art is replaced */
+  border-radius: 4px;
+}
+
+@media (max-width: 640px) {
+  .logo { padding: 4px; }
+  .logo img { width: 56px; }
+}
 
 .banner {
   margin: 16px 0 0;

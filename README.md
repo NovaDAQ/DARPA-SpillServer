@@ -122,25 +122,35 @@ src/darpa_spillserver/
     api.py, app.py  the HTTP surface
     cli.py          darpa-spill-server
     query_cli.py    darpa-spill-query
-    web/            browser UI
+    web/            browser UI (templates, CSS, masthead logo)
 config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              237 tests
+tests/              245 tests
+novadaq-logo.png    full-resolution masthead artwork; the served copy under
+                    src/darpa_spillserver/web/static/ is scaled from it
 ```
 
 ## Tests
 
 ```console
 $ python -m pytest -q
-237 passed
+245 passed
 ```
 
 The time conversions are checked against values read live from
 `tdu-near-master-ppc-01`, and the signal decode table is transcribed from
 `NssSpillInfo::getSpillTypeFromEvent`, so a divergence from the DAQ shows up as
 a test failure rather than as a mislabelled event months later.
+
+## Reporting bugs
+
+Open an issue at
+<https://github.com/NovaDAQ/DARPA-SpillServer/issues>. The *report a bug* link
+in the query page's masthead and footer opens a prefilled issue carrying the
+server version and the TDU it was polling, which is what a report usually
+lacks.
 
 ## Related packages
 

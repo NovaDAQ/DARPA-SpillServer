@@ -19,13 +19,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import COPYRIGHT, __version__
+from . import COPYRIGHT, ISSUES_URL, PROJECT_URL, __version__
 from .api import build_router
 from .auth import AuthError, build_authenticator
 from .config import Config
@@ -123,7 +124,7 @@ def create_app(
         version=__version__,
         root_path=config.server.root_path,
         lifespan=lifespan,
-        contact={"name": "NOvA DAQ", "url": "https://github.com/NovaDAQ/DARPA-SpillServer"},
+        contact={"name": "NOvA DAQ", "url": PROJECT_URL},
         license_info={"name": COPYRIGHT},
     )
     app.state.spill = state
@@ -162,9 +163,28 @@ def create_app(
     return app
 
 
+def _bug_report_url(config: Config) -> str:
+    """The "report a bug" target, with the deployment's own details filled in.
+
+    GitHub prefills a new issue from the query string, so the report arrives
+    already carrying the server version and the TDU it was talking to --- the
+    two facts a bug report from an operator is most often missing.
+    """
+    body = (
+        "<!-- Describe what you did, what you expected, and what happened. -->\n"
+        "\n"
+        "**Server version:** {version}\n"
+        "**TDU:** {tdu}\n"
+        "**Page:** browser query UI\n"
+    ).format(version=__version__, tdu=config.tdu.base_url)
+    query = urlencode({"labels": "bug", "body": body})
+    return "{}?{}".format(ISSUES_URL, query)
+
+
 def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
     """Attach the browser-facing pages."""
     templates = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+    bug_report_url = _bug_report_url(config)
     static_dir = _WEB_DIR / "static"
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -192,6 +212,8 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
                 "default_timezone": config.query.timezone,
                 "auth_enabled": config.auth.enabled,
                 "root_path": config.server.root_path,
+                "project_url": PROJECT_URL,
+                "bug_report_url": bug_report_url,
             },
         )
 

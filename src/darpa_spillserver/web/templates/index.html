@@ -9,14 +9,25 @@
 </head>
 <body>
 <header>
-  <h1>DARPA Spill Information Server</h1>
-  <p class="sub">
-    NOvA accelerator event timestamps from <code>{{ tdu_url }}</code>
-    &middot; v{{ version }}
-    &middot; <a href="{{ root_path }}/docs">API docs</a>
-    &middot; <a href="{{ root_path }}/api/status">status</a>
-    {% if auth_enabled %}&middot; <a href="{{ root_path }}/auth/whoami">account</a>{% endif %}
-  </p>
+  <div class="masthead">
+    <div class="masthead-text">
+      <h1>DARPA Spill Information Server</h1>
+      <p class="sub">
+        NOvA accelerator event timestamps from <code>{{ tdu_url }}</code>
+        &middot; v{{ version }}
+        &middot; <a href="{{ root_path }}/docs">API docs</a>
+        &middot; <a href="{{ root_path }}/api/status">status</a>
+        {% if auth_enabled %}&middot; <a href="{{ root_path }}/auth/whoami">account</a>{% endif %}
+        &middot; <a href="{{ bug_report_url }}" target="_blank" rel="noopener noreferrer"
+                    >report a bug</a>
+      </p>
+    </div>
+    <a class="logo" href="{{ project_url }}" target="_blank" rel="noopener noreferrer"
+       title="NOvA DAQ &mdash; DARPA-SpillServer on GitHub">
+      <img src="{{ root_path }}/static/novadaq-logo.png"
+           alt="NOvA DAQ" width="256" height="256">
+    </a>
+  </div>
 </header>
 
 <div id="banner" class="banner" hidden></div>
@@ -93,8 +104,11 @@
 <footer>
   <p>
     NOvA DAQ &middot;
-    <a href="https://github.com/NovaDAQ/DARPA-SpillServer">DARPA-SpillServer</a>
+    <a href="{{ project_url }}" target="_blank" rel="noopener noreferrer"
+       >DARPA-SpillServer</a>
     &middot; v{{ version }}
+    &middot; <a href="{{ bug_report_url }}" target="_blank" rel="noopener noreferrer"
+                >report a bug</a>
   </p>
   <p class="copyright">{{ copyright }}</p>
 </footer>
