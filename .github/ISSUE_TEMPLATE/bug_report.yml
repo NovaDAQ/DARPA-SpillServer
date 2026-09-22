@@ -1,0 +1,44 @@
+# The field ids below are the prefill keys the server writes into the "report a
+# bug" link it renders on the query page (see _bug_report_url in app.py).
+# Renaming an id here silently drops that field's prefill; the query-page test
+# in tests/test_api.py pins the pairing.
+name: Bug report
+description: Something in the spill server or its query page is wrong
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Server version
+      description: The v… shown in the page masthead, or `darpa-spill-server -V`.
+    validations:
+      required: true
+  - type: input
+    id: tdu
+    attributes:
+      label: TDU
+      description: The base URL shown in the masthead, e.g. http://tdu-near-master-ppc-01:8080
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      options:
+        - browser query page
+        - HTTP API (/api/...)
+        - darpa-spill-query
+        - ingest / poller
+        - deployment or bootstrap
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines or API response
+      render: text

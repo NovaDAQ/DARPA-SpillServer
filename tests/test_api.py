@@ -4,6 +4,7 @@ import csv
 import html
 import io
 import json
+import pathlib
 import re
 
 import pytest
@@ -320,23 +321,64 @@ def test_query_page_shows_the_logo(client):
     assert logo.headers["content-type"] == "image/png"
 
 
-def test_query_page_links_a_bug_report(client, config):
-    """The report link reaches the repository's issue tracker, prefilled."""
+#: The issue form the report link drives. It ships with the repository rather
+#: than the package, so the tests reach for it by path.
+ISSUE_FORM = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
+)
+
+
+def _bug_report_query(body):
+    """The parsed query string of the report link rendered into *body*."""
     from urllib.parse import parse_qs, urlparse
 
-    from darpa_spillserver import ISSUES_URL, PROJECT_URL, __version__
+    from darpa_spillserver import ISSUES_URL
+
+    match = re.search(r'href="({}[^"]*)"'.format(re.escape(ISSUES_URL)), body)
+    assert match, "no link to the issue tracker on the query page"
+    return parse_qs(urlparse(html.unescape(match.group(1))).query)
+
+
+def test_query_page_links_a_bug_report(client, config):
+    """The report link reaches the repository's issue tracker, prefilled."""
+    from darpa_spillserver import PROJECT_URL, __version__
+    from darpa_spillserver.app import BUG_REPORT_SURFACE, BUG_REPORT_TEMPLATE
 
     body = client.get("/").text
     assert PROJECT_URL in body
     assert "report a bug" in body
 
-    match = re.search(r'href="({}[^"]*)"'.format(re.escape(ISSUES_URL)), body)
-    assert match, "no link to the issue tracker on the query page"
+    query = _bug_report_query(body)
+    assert query["template"] == [BUG_REPORT_TEMPLATE]
+    assert query["version"] == [__version__]
+    assert query["tdu"] == [config.tdu.base_url]
+    assert query["surface"] == [BUG_REPORT_SURFACE]
 
-    query = parse_qs(urlparse(html.unescape(match.group(1))).query)
-    assert query["labels"] == ["bug"]
-    assert __version__ in query["body"][0]
-    assert config.tdu.base_url in query["body"][0]
+
+def test_bug_report_link_carries_no_permissioned_parameter(client):
+    """A query parameter that acts needs the permission for that action.
+
+    GitHub answers 404 when the visitor lacks it, so labels, assignees and
+    milestones must not appear in a link a reader outside the organisation is
+    invited to click. The form declares the label instead.
+    """
+    query = _bug_report_query(client.get("/").text)
+    assert not {"labels", "assignees", "milestone", "projects"} & set(query)
+
+
+def test_bug_report_prefill_matches_the_issue_form():
+    """The prefill keys are the form's field ids; a rename must break here."""
+    import yaml
+
+    form = yaml.safe_load(ISSUE_FORM.read_text())
+    from darpa_spillserver.app import BUG_REPORT_SURFACE
+
+    assert "bug" in form["labels"], "the form must apply the label itself"
+
+    fields = {field["id"]: field for field in form["body"] if "id" in field}
+    assert {"version", "tdu", "surface"} <= set(fields)
+    assert BUG_REPORT_SURFACE in fields["surface"]["attributes"]["options"]
 
 
 def test_openapi_schema_is_served(client):

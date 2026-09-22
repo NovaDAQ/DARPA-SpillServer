@@ -1,0 +1,8 @@
+# Blank issues stay enabled deliberately: with them off, GitHub redirects a
+# bare /issues/new?... to the template chooser and discards the query string,
+# which would throw away the version and TDU the server prefills.
+blank_issues_enabled: true
+contact_links:
+  - name: NOvA DAQ operations
+    url: https://fermi.servicenowservices.com/
+    about: Beam or DAQ operational problems that are not a defect in this server.

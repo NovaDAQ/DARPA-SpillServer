@@ -163,21 +163,38 @@ def create_app(
     return app
 
 
+#: Form fields the report link fills in, keyed by the ``id`` of the matching
+#: field in .github/ISSUE_TEMPLATE/bug_report.yml. GitHub addresses issue-form
+#: fields by that id, so renaming one there without renaming it here silently
+#: drops the prefill rather than failing.
+BUG_REPORT_TEMPLATE = "bug_report.yml"
+
+#: Value of the form's "Where" dropdown; it has to match the option text.
+BUG_REPORT_SURFACE = "browser query page"
+
+
 def _bug_report_url(config: Config) -> str:
     """The "report a bug" target, with the deployment's own details filled in.
 
-    GitHub prefills a new issue from the query string, so the report arrives
+    GitHub prefills an issue form from the query string, so the report arrives
     already carrying the server version and the TDU it was talking to --- the
     two facts a bug report from an operator is most often missing.
+
+    The ``bug`` label is declared by the form rather than passed here on
+    purpose. A query parameter that performs an action needs the permission for
+    that action, and GitHub answers 404 when the visitor lacks it: on a public
+    repository ``labels=bug`` would turn the link into a dead end for anyone
+    outside the organisation. A label the form declares is applied whoever
+    files.
     """
-    body = (
-        "<!-- Describe what you did, what you expected, and what happened. -->\n"
-        "\n"
-        "**Server version:** {version}\n"
-        "**TDU:** {tdu}\n"
-        "**Page:** browser query UI\n"
-    ).format(version=__version__, tdu=config.tdu.base_url)
-    query = urlencode({"labels": "bug", "body": body})
+    query = urlencode(
+        {
+            "template": BUG_REPORT_TEMPLATE,
+            "version": __version__,
+            "tdu": config.tdu.base_url,
+            "surface": BUG_REPORT_SURFACE,
+        }
+    )
     return "{}?{}".format(ISSUES_URL, query)
 
 
