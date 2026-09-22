@@ -6,12 +6,20 @@
 
 :root {
   color-scheme: light dark;
-  --bg: #f7f7f8;
+  /* The palette is taken from the masthead logo: its deep blue #0B3D9D, the
+     mid blue #5D8EDB, the pale tints #C5D9F9 / #E8EFFC and the page-white
+     ground #F3F6FC it sits on. */
+  --bg: #f1f5fc;
   --panel: #ffffff;
-  --ink: #16181d;
-  --muted: #5c6370;
-  --line: #d9dce1;
-  --accent: #1c5d99;
+  --head: #e8effc;
+  --ink: #0f1b2e;
+  --muted: #4a5a75;
+  --line: #ccdcf3;
+  --accent: #0b3d9d;
+  --accent-soft: #5d8edb;
+  /* Text drawn on an --accent fill. It has to flip with the theme: the dark
+     theme's accent is a light blue, on which white would sit at 2.4:1. */
+  --on-accent: #ffffff;
   --warn-bg: #fff4d6;
   --warn-ink: #6b4a00;
   --warn-line: #e0b84d;
@@ -20,18 +28,22 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14161a;
-    --panel: #1c1f25;
-    --ink: #e8eaed;
-    --muted: #9aa2ad;
-    --line: #2f343d;
-    --accent: #6fb3e8;
+    /* The same blues, carried onto a navy ground rather than a neutral one. */
+    --bg: #0b1220;
+    --panel: #141d2f;
+    --head: #1a2440;
+    --ink: #e6edf8;
+    --muted: #94a6c4;
+    --line: #26344d;
+    --accent: #79a9f0;
+    --accent-soft: #3f6db8;
+    --on-accent: #0b1220;
     --warn-bg: #3a3218;
     --warn-ink: #f2d98a;
     --warn-line: #7a6522;
     /* The logo art is opaque and light-grounded; keep its plate light in dark
        mode rather than letting a dark panel halo it. */
-    --logo-plate: #eef2f7;
+    --logo-plate: #e8effc;
   }
 }
 
@@ -45,8 +57,8 @@ body {
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
-header { padding: 24px 0 12px; border-bottom: 1px solid var(--line); }
-header h1 { margin: 0 0 4px; font-size: 1.4rem; font-weight: 600; }
+header { padding: 24px 0 12px; border-bottom: 2px solid var(--accent-soft); }
+header h1 { margin: 0 0 4px; font-size: 1.4rem; font-weight: 600; color: var(--accent); }
 .sub { margin: 0; color: var(--muted); font-size: 0.88rem; }
 a { color: var(--accent); }
 
@@ -115,7 +127,7 @@ fieldset {
   background: var(--panel);
 }
 
-legend { padding: 0 6px; font-weight: 600; font-size: 0.86rem; color: var(--muted); }
+legend { padding: 0 6px; font-weight: 600; font-size: 0.86rem; color: var(--accent); }
 
 label { display: block; margin-bottom: 10px; font-size: 0.86rem; color: var(--muted); }
 
@@ -151,9 +163,20 @@ input[type="text"], input[type="number"], select {
   font-size: 0.82rem;
   color: var(--ink);
 }
-.chip:hover { border-color: var(--accent); }
+.chip:hover { border-color: var(--accent); background: var(--head); }
+.chip:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--head);
+  color: var(--accent);
+}
 .chip small { color: var(--muted); font-family: inherit; font-size: 0.72rem; }
 .chip input { margin: 0; }
+
+:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 
@@ -162,7 +185,7 @@ button {
   border: 1px solid var(--accent);
   border-radius: 4px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font: inherit;
   font-size: 0.86rem;
   cursor: pointer;
@@ -192,8 +215,8 @@ th, td {
 th {
   position: sticky;
   top: 0;
-  background: var(--panel);
-  color: var(--muted);
+  background: var(--head);
+  color: var(--accent);
   font-weight: 600;
   font-size: 0.76rem;
   text-transform: uppercase;
@@ -201,13 +224,13 @@ th {
 }
 
 tbody tr:last-child td { border-bottom: none; }
-tbody tr:hover { background: var(--bg); }
+tbody tr:hover { background: var(--head); }
 
 footer {
   max-width: 1200px;
   margin: 32px auto 0;
   padding-top: 14px;
-  border-top: 1px solid var(--line);
+  border-top: 2px solid var(--accent-soft);
   color: var(--muted);
   font-size: 0.8rem;
 }
