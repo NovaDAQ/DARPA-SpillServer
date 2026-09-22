@@ -80,8 +80,24 @@ def _allow_cors():
     response.set_header('Access-Control-Allow-Origin', '*')
 
 
+#: Text DumpSpillHistory prints to stdout when it cannot reach the segment.
+#: It is reported as an error rather than parsed as an empty result.
+_SHM_FAILURE_MARKERS = (
+    'Failed to attach',
+    'Unable to stat shared memory',
+    'Error finding last event',
+)
+
+
 def _run(command):
     """Run *command* and return its stdout as text.
+
+    The exit status is deliberately ignored, matching the original
+    tdu_webserver.py. It is not a success indicator for these tools:
+    DumpSpillHistory ends ``return 1;`` on the normal path (see
+    SHM_Utilities/cxx/src/DumpSpillHistory.cc lines 420 and 472), so treating
+    a non-zero status as failure would reject every successful call. Real
+    failures are detected from the output instead, by _check_output below.
 
     subprocess.Popen is used rather than check_output so that this file keeps
     working on the Python 2.6 that some TDUs still carry.
@@ -91,12 +107,24 @@ def _run(command):
     out, err = process.communicate()
     if not isinstance(out, str):
         out = out.decode('utf-8', 'replace')
-    if process.returncode != 0:
-        if not isinstance(err, str):
-            err = err.decode('utf-8', 'replace')
-        raise RuntimeError('%s exited %d: %s' % (
-            ' '.join(command), process.returncode, err.strip()))
+    if not isinstance(err, str):
+        err = err.decode('utf-8', 'replace')
+
+    # Nothing on stdout and something on stderr is the one unambiguous
+    # failure: the tool produced no result and said why.
+    if not out.strip() and err.strip():
+        raise RuntimeError('%s produced no output: %s' % (
+            ' '.join(command), err.strip()))
     return out
+
+
+def _check_output(text, command):
+    """Raise if *text* is a shared-memory failure message rather than data."""
+    for marker in _SHM_FAILURE_MARKERS:
+        if marker in text:
+            raise RuntimeError('%s could not read shared memory: %s' % (
+                ' '.join(command), text.strip().splitlines()[0]))
+    return text
 
 
 def _int_param(name, default, minimum=None, maximum=None):
@@ -264,7 +292,7 @@ def spill_history():
     command = [DUMP_SPILL_HISTORY, '-m', MEMORY_SEGMENT,
                '--booster', '--numi', '--onehertz', '--tcr']
     try:
-        raw = _run(command)
+        raw = _check_output(_run(command), command)
     except (RuntimeError, OSError) as exc:
         response.status = 500
         return _json_response({'error': str(exc)})
