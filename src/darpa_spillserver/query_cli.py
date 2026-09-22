@@ -109,20 +109,20 @@ def _list_signals() -> int:
 
 def _print_table(events, stream) -> None:
     """Render events as an aligned text table."""
-    header = "{:<20} {:<28} {:<8} {:<18} {:>14} {:>12}".format(
-        "NOVA TIME", "UTC", "SIGNAL", "TYPE", "GPS SECONDS", "DELTA")
+    header = "{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}".format(
+        "NOVA TIME", "UTC", "SIGNAL", "TYPE", "GPS TIME", "DELTA")
     print(header, file=stream)
     print("-" * len(header), file=stream)
 
     count = 0
     for event in events:
         row = event_row(event)
-        print("{:<20} {:<28} {:<8} {:<18} {:>14} {:>12}".format(
+        print("{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}".format(
             row["nova_time"],
             row["utc"][:27],
             row["signal"] or "-",
             row["spill_type_name"],
-            row["gps_seconds"],
+            row["gps"],
             row["delta"] if row["delta"] is not None else "-",
         ), file=stream)
         count += 1

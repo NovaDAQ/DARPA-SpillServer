@@ -120,9 +120,33 @@ class ConvertedTime:
     """The DAQ's own rendering, e.g. ``2026-Sep-22 15:53:33.229378890625 UTC``."""
 
     gps_seconds: int
+    """Whole GPS seconds since the GPS epoch."""
+
     gps_nsec: int
+    """Sub-second remainder in nanoseconds, as :mod:`nova_time_decoder`
+    reports it.  A NOvA tick is 15.625 ns, so this *truncates*: it cannot
+    land on a tick boundary.  Use :attr:`gps_psec` or :attr:`gps` when the
+    exact instant matters."""
+
+    gps_psec: int
+    """Sub-second remainder in picoseconds, exact.  1e12 / 64e6 is 15625
+    exactly, so every NOvA tick maps to a whole number of picoseconds with
+    nothing lost.  This is the same unit the DAQ's own ``utc_string`` uses."""
+
     gps_week: int
     gps_tow: int
+    """Whole-second GPS time-of-week; the sub-second part is in
+    :attr:`gps_psec`."""
+
+    gps: str
+    """Full-precision GPS seconds, e.g. ``1474127631.229378890625``."""
+
+    gps_tow_exact: str
+    """Full-precision GPS time-of-week, e.g. ``230031.229378890625``."""
+
+    gps_string: str
+    """Both together, e.g.
+    ``week 2437, TOW 230031.229378890625 (1474127631.229378890625 s)``."""
 
     def as_dict(self) -> dict:
         return {
@@ -133,8 +157,12 @@ class ConvertedTime:
             "utc_string": self.utc_string,
             "gps_seconds": self.gps_seconds,
             "gps_nsec": self.gps_nsec,
+            "gps_psec": self.gps_psec,
             "gps_week": self.gps_week,
             "gps_tow": self.gps_tow,
+            "gps": self.gps,
+            "gps_tow_exact": self.gps_tow_exact,
+            "gps_string": self.gps_string,
         }
 
 
@@ -203,6 +231,17 @@ def convert(nova: int) -> ConvertedTime:
     moment = datetime.fromtimestamp(unix.sec, tz=UTC)
     iso = "{}.{:09d}Z".format(moment.strftime("%Y-%m-%dT%H:%M:%S"), unix.nsec)
 
+    # GPS is a leap-second-free offset from NOvA time, so the sub-second part
+    # of the two is the same value. Deriving it from the tick remainder rather
+    # than from gps.nsec keeps it exact: 1e12 / 64e6 == 15625, so a tick is a
+    # whole number of picoseconds, while nanoseconds truncate 625 ps of it.
+    whole_ticks = nova // NOVA_TIME_FACTOR
+    frac_ticks = nova - whole_ticks * NOVA_TIME_FACTOR
+    picoseconds = frac_ticks * 1_000_000_000_000 // NOVA_TIME_FACTOR
+
+    gps_exact = "{:d}.{:012d}".format(gps.seconds, picoseconds)
+    gps_tow_exact = "{:d}.{:012d}".format(gps.tow, picoseconds)
+
     return ConvertedTime(
         nova=nova,
         unix_sec=unix.sec,
@@ -211,8 +250,14 @@ def convert(nova: int) -> ConvertedTime:
         utc_string=nova_to_string(nova),
         gps_seconds=gps.seconds,
         gps_nsec=gps.nsec,
+        gps_psec=picoseconds,
         gps_week=gps.week,
         gps_tow=gps.tow,
+        gps=gps_exact,
+        gps_tow_exact=gps_tow_exact,
+        gps_string="week {:d}, TOW {} ({} s)".format(
+            gps.week, gps_tow_exact, gps_exact
+        ),
     )
 
 

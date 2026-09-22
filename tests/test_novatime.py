@@ -52,7 +52,8 @@ def test_conversion_reports_every_timescale():
     assert result.gps_tow == result.gps_seconds % 604800
     assert set(result.as_dict()) == {
         "nova", "unix_sec", "unix_nsec", "utc", "utc_string",
-        "gps_seconds", "gps_nsec", "gps_week", "gps_tow",
+        "gps", "gps_seconds", "gps_nsec", "gps_psec",
+        "gps_week", "gps_tow", "gps_tow_exact", "gps_string",
     }
 
 

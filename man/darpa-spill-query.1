@@ -129,9 +129,21 @@ Ranges are half-open,
 so adjacent queries tile without reporting an event twice.
 .SH OUTPUT COLUMNS
 .BR nova_time ", " utc ", " utc_string ", " unix_sec ", " unix_nsec ", "
-.BR gps_seconds ", " gps_nsec ", " gps_week ", " gps_tow ", " spill_type ", "
-.BR spill_type_name ", " signal ", " signal_name ", " event_number ", "
-.BR delta ", " pps_offset ", " source .
+.BR gps ", " gps_seconds ", " gps_nsec ", " gps_psec ", " gps_week ", "
+.BR gps_tow ", " gps_tow_exact ", " spill_type ", " spill_type_name ", "
+.BR signal ", " signal_name ", " event_number ", " delta ", " pps_offset ", "
+.BR source .
+.PP
+Prefer
+.B gps
+over
+.BR gps_seconds / gps_nsec :
+a NOvA tick is 15.625 ns, so a nanosecond field cannot represent one exactly
+and truncates 625 ps of every tick.
+.B gps
+is good to the picosecond, which is exact, and its fractional part matches the
+one the DAQ prints in
+.BR utc_string .
 .PP
 An empty
 .B signal

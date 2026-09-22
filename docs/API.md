@@ -171,8 +171,11 @@ Liveness only. Never requires authentication.
 | `utc` | ISO 8601 UTC, nanosecond precision |
 | `utc_string` | the DAQ's own rendering, picosecond precision |
 | `unix_sec`, `unix_nsec` | UNIX time |
-| `gps_seconds`, `gps_nsec` | GPS time, continuous (no leap seconds) |
-| `gps_week`, `gps_tow` | the same instant as GPS week and time-of-week |
+| `gps` | GPS seconds at full precision, e.g. `1474127631.229378890625` |
+| `gps_seconds`, `gps_nsec` | GPS time as whole seconds plus a nanosecond remainder |
+| `gps_psec` | the sub-second remainder in picoseconds, exact |
+| `gps_week`, `gps_tow` | the same instant as GPS week and whole-second time-of-week |
+| `gps_tow_exact` | time-of-week at full precision, e.g. `230031.229378890625` |
 | `spill_type`, `spill_type_name` | decoded type, as stored by the hardware |
 | `signal`, `signal_name` | raw signal, when preserved; empty otherwise |
 | `event_number` | the TDU's sequence counter |
@@ -182,6 +185,19 @@ Liveness only. Never requires authentication.
 
 Every row carries all four timescales rather than making you choose, because a
 saved table that omitted GPS would be useless to the next person who needed it.
+
+### GPS precision
+
+Prefer **`gps`** over `gps_seconds` / `gps_nsec`. A NOvA tick is 15.625 ns, so
+a nanosecond field cannot land on a tick boundary and truncates 625 ps of every
+one. `gps` is a decimal string good to the picosecond, and `1e12 / 64e6` is
+exactly 15625, so every tick maps to a whole number of picoseconds with nothing
+lost. Its fractional part is identical to the one in `utc_string`, which is
+what the DAQ's own tooling prints.
+
+`gps_nsec` is retained because it is what `nova_time_decoder` reports, and
+`gps_psec` carries the same exact remainder as an integer for callers that
+would rather not parse a decimal.
 
 ## Errors
 

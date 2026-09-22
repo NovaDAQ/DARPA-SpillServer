@@ -91,7 +91,7 @@
     <table id="table">
       <thead>
         <tr>
-          <th>UTC</th><th>NOvA time</th><th>GPS seconds</th>
+          <th>UTC</th><th>NOvA time</th><th>GPS time</th>
           <th>Signal</th><th>Type</th><th>Delta</th><th>Event no.</th>
         </tr>
       </thead>
@@ -157,7 +157,7 @@
       var tr = document.createElement("tr");
       cell(tr, event.utc);
       cell(tr, event.nova_time);
-      cell(tr, event.gps_seconds);
+      cell(tr, event.gps);
       cell(tr, event.signal);
       cell(tr, event.spill_type_name);
       cell(tr, event.delta);

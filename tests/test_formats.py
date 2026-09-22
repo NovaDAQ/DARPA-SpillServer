@@ -150,3 +150,71 @@ def test_no_note_for_unambiguous_types():
 
 def test_no_note_for_an_empty_selection():
     assert ambiguity_note([]) is None
+
+
+# ------------------------------------------------- GPS full precision
+
+
+def test_gps_is_rendered_at_full_precision():
+    """The displayed GPS value must carry the sub-second part, not just
+    whole seconds."""
+    row = event_row(make_event())
+    assert row["gps"] == "1474127631.229378890625"
+    assert "." in row["gps"]
+
+
+def test_gps_fraction_is_exact_and_matches_utc():
+    """GPS is a leap-second-free offset from NOvA time, so its sub-second
+    part is identical to the one the DAQ prints in utc_string. Any drift
+    between them means a rounding bug."""
+    row = event_row(make_event())
+    utc_fraction = row["utc_string"].split(".")[1].split()[0]
+    gps_fraction = row["gps"].split(".")[1]
+    assert gps_fraction == utc_fraction == "229378890625"
+
+
+def test_gps_picoseconds_are_exact_where_nanoseconds_truncate():
+    """A NOvA tick is 15.625 ns, so nanoseconds cannot represent one."""
+    row = event_row(make_event())
+    assert row["gps_psec"] == 229378890625
+    assert row["gps_nsec"] == 229378890
+    assert row["gps_psec"] != row["gps_nsec"] * 1000, "nsec loses 625 ps here"
+
+
+def test_gps_time_of_week_also_carries_the_fraction():
+    row = event_row(make_event())
+    assert row["gps_tow_exact"] == "230031.229378890625"
+    assert row["gps_tow"] == 230031
+
+
+def test_gps_fraction_always_has_twelve_digits():
+    """Zero-padded, so values sort and align in a table."""
+    from darpa_spillserver.novatime import convert
+    from nova_time_decoder import NOVA_TIME_FACTOR
+    # An instant one tick past a whole second.
+    row = convert(2000 * NOVA_TIME_FACTOR + 1)
+    assert row.gps.split(".")[1] == "000000015625"
+    assert len(row.gps.split(".")[1]) == 12
+
+
+def test_gps_on_an_exact_second_has_a_zero_fraction():
+    from darpa_spillserver.novatime import convert
+    from nova_time_decoder import NOVA_TIME_FACTOR
+    row = convert(2000 * NOVA_TIME_FACTOR)
+    assert row.gps.endswith(".000000000000")
+    assert row.gps_psec == 0
+
+
+def test_gps_string_combines_week_and_time_of_week():
+    from darpa_spillserver.novatime import convert
+    result = convert(33778458638680249)
+    assert result.gps_string == (
+        "week 2437, TOW 230031.229378890625 (1474127631.229378890625 s)"
+    )
+
+
+def test_legacy_gps_columns_are_still_present():
+    """Kept so anything already reading gps_seconds/gps_nsec keeps working."""
+    row = event_row(make_event())
+    for name in ("gps_seconds", "gps_nsec", "gps_week", "gps_tow"):
+        assert name in row

@@ -14,6 +14,13 @@ Every row carries the timestamp in all four timescales at once --- NOvA ticks,
 UNIX, UTC and GPS --- rather than making the client choose up front.  The
 conversions are cheap integer arithmetic, and a saved CSV that omitted GPS
 would be useless to the next person who needed it.
+
+GPS appears both as ``gps``, a full-precision decimal string good to the
+picosecond, and as the separate ``gps_seconds`` / ``gps_nsec`` / ``gps_week``
+/ ``gps_tow`` integers.  Prefer ``gps``: a NOvA tick is 15.625 ns, so
+``gps_nsec`` cannot land on a tick boundary and truncates 625 ps of every
+one.  ``gps_psec`` carries the same exact remainder as an integer for callers
+that would rather not parse a decimal.
 """
 
 from __future__ import annotations
@@ -43,10 +50,13 @@ COLUMNS: Sequence[str] = (
     "utc_string",
     "unix_sec",
     "unix_nsec",
+    "gps",
     "gps_seconds",
     "gps_nsec",
+    "gps_psec",
     "gps_week",
     "gps_tow",
+    "gps_tow_exact",
     "spill_type",
     "spill_type_name",
     "signal",
@@ -79,10 +89,13 @@ def event_row(event: SpillEvent) -> Dict[str, Any]:
         "utc_string": times.utc_string,
         "unix_sec": times.unix_sec,
         "unix_nsec": times.unix_nsec,
+        "gps": times.gps,
         "gps_seconds": times.gps_seconds,
         "gps_nsec": times.gps_nsec,
+        "gps_psec": times.gps_psec,
         "gps_week": times.gps_week,
         "gps_tow": times.gps_tow,
+        "gps_tow_exact": times.gps_tow_exact,
         "spill_type": int(event.spill_type),
         "spill_type_name": event.spill_type.name,
         "signal": signal.hex if signal else "",
