@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import __version__
+from . import COPYRIGHT, __version__
 from .api import build_router
 from .auth import AuthError, build_authenticator
 from .config import Config
@@ -52,7 +52,14 @@ Timestamps are returned in NOvA base time, UNIX, UTC and GPS together.
 * `/api/signals`, `/api/types` &mdash; what can be asked for
 * `/api/time/convert`, `/api/time/help` &mdash; timescale conversion
 * `/api/status` &mdash; archive extent and ingest health
+
+---
+
+{copyright}
 """
+
+
+DESCRIPTION = DESCRIPTION.format(copyright=COPYRIGHT)
 
 
 def create_app(
@@ -117,7 +124,7 @@ def create_app(
         root_path=config.server.root_path,
         lifespan=lifespan,
         contact={"name": "NOvA DAQ", "url": "https://github.com/NovaDAQ/DARPA-SpillServer"},
-        license_info={"name": "MIT"},
+        license_info={"name": COPYRIGHT},
     )
     app.state.spill = state
 
@@ -170,6 +177,7 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
             "index.html",
             {
                 "version": state.version,
+                "copyright": COPYRIGHT,
                 "signals": SIGNALS,
                 "types": [
                     {

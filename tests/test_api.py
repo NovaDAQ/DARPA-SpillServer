@@ -317,3 +317,41 @@ def test_unknown_api_path_gives_json_not_html(client):
     response = client.get("/api/nope")
     assert response.status_code == 404
     assert "error" in response.json()
+
+
+# ------------------------------------------------------------- copyright
+
+COPYRIGHT_TEXT = (
+    "Copyright 2010-2026 Andrew Norman for Fermi Forward Discovery Group LLC. "
+    "All rights reserved."
+)
+
+
+def test_copyright_constant_is_exact():
+    """Pinned here so a well-meaning reword cannot quietly alter the notice."""
+    from darpa_spillserver import COPYRIGHT
+    assert COPYRIGHT == COPYRIGHT_TEXT
+
+
+def test_query_page_shows_the_copyright(client):
+    body = client.get("/").text
+    assert COPYRIGHT_TEXT in body
+
+
+def test_query_page_has_a_copyright_meta_tag(client):
+    body = client.get("/").text
+    assert '<meta name="copyright" content="{}">'.format(COPYRIGHT_TEXT) in body
+
+
+def test_openapi_schema_carries_the_copyright(client):
+    """Covers the /docs and /redoc pages, which render from this schema."""
+    schema = client.get("/openapi.json").json()
+    assert schema["info"]["license"]["name"] == COPYRIGHT_TEXT
+    assert COPYRIGHT_TEXT in schema["info"]["description"]
+
+
+def test_no_conflicting_licence_claim_remains(client):
+    """The notice reserves all rights; an MIT grant would contradict it."""
+    schema = client.get("/openapi.json").json()
+    assert "MIT" not in schema["info"]["license"]["name"]
+    assert "MIT" not in schema["info"]["description"]

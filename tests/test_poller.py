@@ -17,8 +17,15 @@ from darpa_spillserver.signals import SpillType
 from darpa_spillserver.storage import SpillEvent, SpillStore
 from darpa_spillserver.tdu_client import HISTORY_ROUTE, FetchResult, TDUUnavailable
 
-BASE = 33778458638680249
 SECOND = TICKS_PER_SECOND
+
+#: Events are anchored to the current time rather than to a fixed timestamp.
+#: The poller backfills `ingest.backfill` seconds on a cold start, so events
+#: stamped with a literal date fall outside that window as soon as enough wall
+#: time has passed -- a test written at 15:53 with a one-hour backfill starts
+#: failing at 16:53 and never passes again. Ten minutes back sits comfortably
+#: inside the default hour.
+ANCHOR_OFFSET = 600 * SECOND
 
 
 class StubClient:
@@ -53,7 +60,10 @@ class StubClient:
                            truncated=self.truncated, raw_count=len(selected))
 
 
-def make_events(count, start=BASE, step=SECOND):
+def make_events(count, start=None, step=SECOND):
+    """Build *count* consecutive events, by default ending ten minutes ago."""
+    if start is None:
+        start = nova_now() - ANCHOR_OFFSET
     return [
         SpillEvent(
             nova_time=start + index * step,
@@ -246,3 +256,18 @@ async def test_ingest_log_records_each_pass(config, store):
     assert len(rows) == 1
     assert rows[0]["inserted"] == 3
     assert rows[0]["source"] == HISTORY_ROUTE
+
+
+async def test_default_events_sit_inside_the_cold_start_backfill(config, store):
+    """Guard against time-dependent flakiness in this file.
+
+    make_events() anchors to the current time for a reason: a fixed timestamp
+    drifts out of the backfill window as wall time passes, and every test that
+    relies on a cold-start poll then fails -- silently correct code, failing
+    tests. This asserts the anchor stays inside the default window.
+    """
+    events = make_events(10)
+    window_start = nova_now() - int(config.ingest.backfill * TICKS_PER_SECOND)
+
+    assert events[0].nova_time >= window_start
+    assert events[-1].nova_time <= nova_now()

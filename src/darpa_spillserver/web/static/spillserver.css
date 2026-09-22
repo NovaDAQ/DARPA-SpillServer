@@ -1,5 +1,8 @@
 /* DARPA Spill Information Server -- browser UI.
-   Self-contained: no web fonts, no CDN, nothing the DAQ network must reach. */
+   Self-contained: no web fonts, no CDN, nothing the DAQ network must reach.
+
+   Copyright 2010-2026 Andrew Norman for Fermi Forward Discovery Group LLC.
+   All rights reserved. */
 
 :root {
   color-scheme: light dark;
@@ -167,3 +170,6 @@ footer {
   color: var(--muted);
   font-size: 0.8rem;
 }
+
+footer p { margin: 0 0 4px; }
+footer .copyright { font-size: 0.76rem; }

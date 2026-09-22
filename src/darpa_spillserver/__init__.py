@@ -37,4 +37,16 @@ The modules are layered so each can be used on its own:
 
 __version__ = "1.0.0"
 
-__all__ = ["__version__"]
+#: Copyright notice shown on every page this server serves: the query page,
+#: the generated API documentation, and the OpenAPI schema. Defined once here
+#: and referenced from the template and the application factory, so the pages
+#: cannot drift apart from each other.
+COPYRIGHT = (
+    "Copyright 2010-2026 Andrew Norman for Fermi Forward Discovery Group LLC. "
+    "All rights reserved."
+)
+
+COPYRIGHT_HOLDER = "Fermi Forward Discovery Group LLC"
+COPYRIGHT_YEARS = "2010-2026"
+
+__all__ = ["__version__", "COPYRIGHT", "COPYRIGHT_HOLDER", "COPYRIGHT_YEARS"]

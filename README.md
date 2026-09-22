@@ -152,6 +152,7 @@ a test failure rather than as a mislabelled event months later.
 | [TDUControl](https://github.com/NovaDAQ/TDUControl), [TDUUtilities](https://github.com/NovaDAQ/TDUUtilities) | TDU register access and operational scripts |
 | [nova-time-decoder](https://github.com/normanajn/nova-time-decoder) | NOvA ↔ UNIX ↔ GPS timestamp conversion |
 
-## License
+## Copyright
 
-MIT.
+Copyright 2010-2026 Andrew Norman for Fermi Forward Discovery Group LLC.
+All rights reserved.
