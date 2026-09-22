@@ -1,0 +1,122 @@
+# DARPA Spill Information Server -- default configuration.
+#
+# Every setting here can also be given on the command line or through an
+# environment variable named DARPA_SPILL_<SECTION>_<KEY>, e.g.
+# DARPA_SPILL_TDU_BASE_URL. Later layers win: defaults, then this file, then
+# the environment, then the command line.
+#
+# Check what a given invocation actually ends up with:
+#     darpa-spill-server -c config/spillserver.yaml --print-config
+#
+# Unknown keys are an error rather than a warning, so a typo is caught at
+# startup instead of quietly doing nothing.
+
+server:
+  # 0.0.0.0 serves every interface. Bind 127.0.0.1 instead when a reverse
+  # proxy in front of this process is what should be reachable.
+  host: 0.0.0.0
+  port: 8080
+
+  # Set when mounted under a path by a proxy, e.g. /spills.
+  root_path: ""
+
+  # Browser origins allowed to call the API. "*" suits an unauthenticated
+  # read-only service on a closed network; narrow it once auth is enabled.
+  cors_origins:
+    - "*"
+
+tdu:
+  # The TDU's embedded bottle server. Reachable only from inside the NOvA DAQ
+  # network; the gateway node is on it.
+  base_url: http://tdu-near-master-ppc-01:8080
+  timeout: 10.0
+  retries: 2
+  retry_backoff: 0.5
+
+ingest:
+  enabled: true
+
+  # Seconds between polls. With the /spill_history route this only bounds how
+  # stale the archive can be. WITHOUT that route the server can read just the
+  # single newest event per poll, so this bounds how many events are lost --
+  # measured on a live TDU, a 1 s interval captures about 20% of them. See
+  # contrib/tduweb/README.md.
+  interval: 1.0
+
+  # Maximum records requested per poll.
+  batch_limit: 5000
+
+  # Seconds of already-archived time re-read each poll. Inserts are
+  # idempotent, so this costs nothing and closes the gap a slow poll,
+  # a restart, or clock skew would otherwise leave.
+  overlap: 5.0
+
+  # Seconds of history to ask for on a cold start, when the archive is empty.
+  backfill: 3600.0
+
+  # Stop polling after this many consecutive failures. 0 means never give up,
+  # which is what an unattended deployment wants.
+  max_consecutive_errors: 0
+
+storage:
+  # SQLite archive. Use an absolute path under a directory that survives
+  # reboots; /var/lib/darpa-spillserver is the conventional choice.
+  path: ./spills.db
+  timeout: 15.0
+
+  # Delete events older than this many days. 0 keeps everything, which is the
+  # default: the archive is small and losing it cannot be undone.
+  retention_days: 0
+
+  prune_interval: 3600.0
+  ingest_log_keep: 1000
+
+query:
+  # Zone assumed for client inputs that carry none, such as "09:15". UTC by
+  # default so an unconfigured server never shifts a result silently. Set
+  # America/Chicago for a deployment whose operators speak Fermilab local
+  # time. Inputs with an explicit offset always win over this.
+  timezone: UTC
+
+  default_limit: 10000
+  max_limit: 1000000
+  max_export_rows: 5000000
+
+auth:
+  # Design.md specifies starting with no authentication. Every setting the
+  # Fermilab SSO integration needs is present below, so enabling it is a
+  # configuration change and a restart, not a code change.
+  #
+  # Before enabling:
+  #   1. pip install -e '.[oidc]'
+  #   2. Register this service with the Fermilab identity provider and obtain
+  #      a client id and secret.
+  #   3. Generate a session secret:  openssl rand -hex 32
+  #   4. Put the client secret in a root-owned file and point
+  #      client_secret_file at it, rather than writing it here.
+  enabled: false
+
+  provider: oidc
+  issuer: ""            # e.g. https://pingprod.fnal.gov/idp
+  client_id: ""
+  client_secret: ""     # prefer client_secret_file
+  client_secret_file: ""
+  redirect_url: ""      # e.g. https://novadaq-near-gateway-01.fnal.gov/auth/callback
+
+  scopes:
+    - openid
+    - profile
+    - email
+
+  # Leave empty to admit any successfully authenticated account; list groups
+  # to restrict further.
+  allowed_groups: []
+
+  session_secret: ""
+  session_cookie: darpa_spill_session
+  session_max_age: 28800
+
+logging:
+  level: INFO
+  file: ""
+  format: "%(asctime)s %(levelname)-8s %(name)s: %(message)s"

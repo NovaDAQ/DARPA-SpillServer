@@ -1,0 +1,199 @@
+.TH DARPA-SPILL-QUERY 1 "September 2026" "darpa_spillserver 1.0.0" "User Commands"
+.SH NAME
+darpa-spill-query \- query NOvA accelerator event timestamps from the command line
+.SH SYNOPSIS
+.B darpa-spill-query
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B darpa-spill-query
+answers the same questions as the server's
+.I /api/events
+endpoint without a browser, reading either a local archive file or a running
+.BR darpa-spill-server (1).
+.PP
+Results print as an aligned table by default, or as CSV or JSON for piping and
+saving.
+.SS Quoting hex signals
+Accelerator signals are conventionally written with a leading dollar sign,
+.BR $74 ", " $8F .
+A shell expands an unquoted
+.B $74
+to nothing, so quote it:
+.BR "\-\-signal '$74'" .
+The spellings
+.BR 74 ", " 0x74
+and the registry names
+.RB ( numi ", " one-hertz )
+work unquoted.
+.SH OPTIONS
+.SS General
+.TP
+.BR \-V ", " \-\-version
+Show version information and exit.
+.TP
+.B \-\-list\-signals
+List every accelerator signal this tool accepts, with its carrier, decoded
+type and meaning, then exit.
+.SS Data source
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Read the archive path from this configuration file.
+.TP
+.BR \-d ", " \-\-database " " \fIFILE\fR
+Read this SQLite archive directly.
+.TP
+.BR \-s ", " \-\-server " " \fIURL\fR
+Query a running server instead of a local file, e.g.
+.BR http://localhost:8080 .
+.PP
+With none of these, the archive path comes from the configuration file found by
+the usual search.
+.SS Selection
+.TP
+.BI \-\-start " TIME"
+Start of the range, inclusive.
+.TP
+.BI \-\-end " TIME"
+End of the range, exclusive. A date-only value covers that whole day.
+.TP
+.BI \-\-signal " SIG"
+Accelerator signal such as
+.BR '$74' .
+May be repeated; repeats form a union.
+.TP
+.BI \-\-type " TYPE"
+Decoded spill type, by name
+.RB ( NUMI ", " BNB_TCLK )
+or number. May be repeated.
+.TP
+.B \-\-last
+Show only the most recent matching event.
+.TP
+.BI \-\-limit " N"
+Maximum rows to return.
+.TP
+.B \-\-desc
+Newest first.
+.TP
+.BI \-\-timezone " ZONE"
+Zone for times that carry none. Default \fBUTC\fR.
+.SS Output
+.TP
+.BR \-f ", " \-\-format " " \fIFORMAT\fR
+One of \fBtable\fR (default), \fBcsv\fR, \fBjson\fR.
+.TP
+.BI \-\-columns " LIST"
+Comma-separated subset of columns.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write to \fIFILE\fR instead of standard output.
+.TP
+.B \-\-no\-header
+Omit the CSV header row.
+.SH TIME EXPRESSIONS
+Anywhere a
+.I TIME
+is accepted:
+.TP
+.B now
+The current instant.
+.TP
+.BR today ", " yesterday
+Midnight starting that day.
+.TP
+.BR \-2h ", " \-30m ", " \-7d ", " \-1w
+Relative to now.
+.TP
+.BR 09:15 ", " 11:34:22
+That clock time today.
+.TP
+.BR 2026\-07\-01 ", " "Jul 1, 2026" ", " 01\-Jul\-2026
+A calendar date.
+.TP
+.B 2026\-07\-01T09:15:00Z
+ISO 8601. An explicit offset always overrides \fB\-\-timezone\fR.
+.TP
+.BI nova: TICKS
+NOvA base time, in 64 MHz ticks.
+.TP
+.BI unix: SECONDS
+UNIX time.
+.TP
+.BI gps: SECONDS
+.TQ
+.IB gps: WEEK : TOW
+GPS time.
+.PP
+Ranges are half-open,
+.IR "start <= t < end" ,
+so adjacent queries tile without reporting an event twice.
+.SH OUTPUT COLUMNS
+.BR nova_time ", " utc ", " utc_string ", " unix_sec ", " unix_nsec ", "
+.BR gps_seconds ", " gps_nsec ", " gps_week ", " gps_tow ", " spill_type ", "
+.BR spill_type_name ", " signal ", " signal_name ", " event_number ", "
+.BR delta ", " pps_offset ", " source .
+.PP
+An empty
+.B signal
+means the hardware preserved only the decoded spill type. That mapping is
+many-to-one \(em
+.B $1D
+and
+.B $1F
+both decode to
+.B BNB_TCLK
+\(em so the exact signal is unrecoverable and is left blank rather than
+guessed.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The server could not be reached, or returned an error.
+.TP
+.B 2
+A malformed argument: an unknown signal, column, timezone, or time.
+.SH EXAMPLES
+.PP
+Every
+.B $74
+NuMI spill between 1 July 2026 and today:
+.PP
+.RS
+.EX
+darpa\-spill\-query \-\-signal '$74' \-\-start 2026\-07\-01 \-\-end today
+.EE
+.RE
+.PP
+The 1 Hz events between 09:15 and 11:34 today, saved as CSV:
+.PP
+.RS
+.EX
+darpa\-spill\-query \-\-signal '$8f' \-\-start 09:15 \-\-end 11:34 \\
+                   \-\-format csv \-o spills.csv
+.EE
+.RE
+.PP
+The most recent event, from a running server:
+.PP
+.RS
+.EX
+darpa\-spill\-query \-\-server http://localhost:8080 \-\-last
+.EE
+.RE
+.PP
+Just the timestamps, for a pipeline:
+.PP
+.RS
+.EX
+darpa\-spill\-query \-\-signal '$8f' \-\-start \-1h \\
+                   \-\-format csv \-\-columns gps_seconds \-\-no\-header
+.EE
+.RE
+.SH SEE ALSO
+.BR darpa-spill-server (1),
+.BR darpa_spillserver (3),
+.BR nova-time-convert (1)
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

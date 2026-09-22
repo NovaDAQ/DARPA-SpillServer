@@ -1,0 +1,32 @@
+# Site configuration for the NOvA Near Detector gateway,
+# novadaq-near-gateway-01.fnal.gov.
+#
+# Only the settings that differ from config/spillserver.yaml appear here.
+#     darpa-spill-server -c config/spillserver-near.yaml
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+tdu:
+  base_url: http://tdu-near-master-ppc-01:8080
+
+ingest:
+  enabled: true
+  interval: 1.0
+  backfill: 86400.0
+
+storage:
+  path: /var/lib/darpa-spillserver/spills-near.db
+  # The Near Detector TDU produces a few hundred thousand events a day, which
+  # is tens of megabytes a year -- small enough to keep indefinitely.
+  retention_days: 0
+
+query:
+  # Near Detector operators quote shift times in Fermilab local time, so an
+  # unqualified "09:15" means Chicago here rather than UTC.
+  timezone: America/Chicago
+
+logging:
+  level: INFO
+  file: /var/log/darpa-spillserver/server.log

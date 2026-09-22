@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+venv/
+.venv/
+
+# Build
+build/
+dist/
+*.so
+*.o
+*.a
+
+# Test and coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data -- the event archive and its WAL companions
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Local configuration overrides; the committed ones live in config/
+/spillserver.yaml
+
+# Core dumps
+core/
+*.core
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# NFS silly-rename artefacts (a deleted file still held open)
+.nfs*

@@ -1,0 +1,216 @@
+.TH DARPA-SPILL-SERVER 1 "September 2026" "darpa_spillserver 1.0.0" "User Commands"
+.SH NAME
+darpa-spill-server \- serve NOvA accelerator event timestamps collected from a TDU
+.SH SYNOPSIS
+.B darpa-spill-server
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B darpa-spill-server
+polls the embedded web server running on a NOvA Timing Distribution Unit (TDU),
+archives the decoded accelerator events it reports into a local SQLite
+database, and serves them over HTTP as a structured table.
+.PP
+Clients select events by time range and by accelerator signal in the operators'
+hex notation
+.RB ( $74 ", " $8F ),
+and receive CSV or JSON in which every timestamp is rendered in NOvA base time,
+UNIX time, UTC and GPS together.
+.PP
+A browser interface is served at
+.IR / ,
+a generated API reference at
+.IR /docs ,
+and the API itself under
+.IR /api .
+.SS Degraded operation
+Where the TDU does not expose the
+.I /spill_history
+route, the server can read only the single most recent event per poll. Since
+accelerator events arrive at roughly 6 to 15 Hz, the resulting archive is a
+sample rather than a complete history \(em about 20% of events, measured on a
+live TDU. The server detects this, logs it at startup, reports it as
+.I ingest.degraded
+in
+.IR /api/status ,
+and attaches a warning to every affected response. See
+.B contrib/tduweb/README.md
+in the source distribution.
+.SH OPTIONS
+.SS General
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Read configuration from \fIFILE\fR. Without this, the first of
+.IR ./spillserver.yaml ,
+.IR ~/.config/darpa\-spillserver/spillserver.yaml ,
+.I /etc/darpa\-spillserver/spillserver.yaml
+that exists is used.
+.TP
+.BR \-V ", " \-\-version
+Show version information for the server and its key dependencies, then exit.
+.TP
+.B \-\-print\-config
+Print the merged configuration as JSON and exit. Contacts nothing \(em no TDU,
+no database \(em so it is safe to run against a production configuration.
+Secrets are redacted.
+.SS Server
+.TP
+.BI \-\-host " ADDRESS"
+Address to bind. Default \fB0.0.0.0\fR.
+.TP
+.BI \-\-port " PORT"
+Port to bind. Default \fB8080\fR.
+.TP
+.BI \-\-root\-path " PATH"
+Mount prefix when running behind a reverse proxy, e.g. \fI/spills\fR.
+.TP
+.BI \-\-cors\-origin " ORIGIN"
+Allowed CORS origin. May be repeated.
+.SS TDU data source
+.TP
+.BI \-\-tdu\-url " URL"
+Base URL of the TDU's web server. Default
+\fBhttp://tdu\-near\-master\-ppc\-01:8080\fR.
+.TP
+.BI \-\-tdu\-timeout " SECONDS"
+Per-request timeout. Default \fB10.0\fR.
+.TP
+.BI \-\-tdu\-retries " N"
+Retries per failed request. Default \fB2\fR.
+.SS Ingest
+.TP
+.B \-\-no\-ingest
+Serve the existing archive without polling the TDU.
+.TP
+.BI \-\-interval " SECONDS"
+Seconds between polls. Default \fB1.0\fR. With the \fI/spill_history\fR route
+this bounds only staleness; without it, it bounds how many events are lost.
+.TP
+.BI \-\-batch\-limit " N"
+Maximum records requested per poll. Default \fB5000\fR.
+.TP
+.BI \-\-overlap " SECONDS"
+Seconds of already-archived time re-read on each poll. Default \fB5.0\fR.
+Inserts are idempotent, so this costs nothing and closes the gap a slow poll or
+a restart would leave.
+.TP
+.BI \-\-backfill " SECONDS"
+History to request on a cold start. Default \fB3600.0\fR.
+.SS Storage
+.TP
+.BR \-d ", " \-\-database " " \fIFILE\fR
+SQLite archive file. Default \fB./spills.db\fR. Parent directories are created.
+.TP
+.BI \-\-retention\-days " DAYS"
+Delete events older than \fIDAYS\fR. Default \fB0\fR, which keeps everything.
+.SS Query defaults
+.TP
+.BI \-\-timezone " ZONE"
+Zone assumed for client times that carry none, such as \fB09:15\fR. Default
+\fBUTC\fR. Set \fBAmerica/Chicago\fR where operators speak Fermilab local time.
+.TP
+.BI \-\-default\-limit " N"
+Rows returned when a client does not specify. Default \fB10000\fR.
+.TP
+.BI \-\-max\-limit " N"
+Hard ceiling on rows per query. Default \fB1000000\fR.
+.SS Authentication
+.TP
+.BR \-\-auth ", " \-\-no\-auth
+Require, or do not require, OIDC single sign-on. Off by default.
+.TP
+.BI \-\-oidc\-issuer " URL"
+OIDC issuer, e.g. \fBhttps://pingprod.fnal.gov/idp\fR.
+.TP
+.BI \-\-oidc\-client\-id " ID"
+Registered client identifier.
+.TP
+.BI \-\-oidc\-client\-secret\-file " FILE"
+File holding the client secret. Preferred over writing it into the
+configuration file.
+.TP
+.BI \-\-oidc\-redirect\-url " URL"
+Redirect URI, which must match the one registered with the provider.
+.SS Logging
+.TP
+.BR \-l ", " \-\-log\-level " " \fILEVEL\fR
+One of \fBDEBUG\fR, \fBINFO\fR, \fBWARNING\fR, \fBERROR\fR, \fBCRITICAL\fR.
+.TP
+.BI \-\-log\-file " FILE"
+Also write logs to \fIFILE\fR. A file that cannot be opened produces a warning
+and console-only logging rather than a failure to start.
+.TP
+.BR \-v ", " \-\-verbose
+Shorthand for \fB\-\-log\-level DEBUG\fR.
+.SH CONFIGURATION
+Four layers merge, each overriding the previous: built-in defaults, the YAML
+file, environment variables, then command-line options.
+.PP
+Environment variables are named
+.BI DARPA_SPILL_ SECTION _ KEY
+in upper case, for example
+.BR DARPA_SPILL_TDU_BASE_URL ", " DARPA_SPILL_STORAGE_PATH .
+.PP
+Unknown keys in the YAML file are an error rather than a warning, so a
+misspelling is caught at startup instead of quietly doing nothing.
+.SH FILES
+.TP
+.I ./spillserver.yaml
+.TQ
+.I ~/.config/darpa\-spillserver/spillserver.yaml
+.TQ
+.I /etc/darpa\-spillserver/spillserver.yaml
+Configuration files, searched in this order.
+.TP
+.I ./spills.db
+Default SQLite archive.
+.SH ENVIRONMENT
+.TP
+.B DARPA_SPILL_CONFIG
+Path to the configuration file, equivalent to \fB\-\-config\fR.
+.TP
+.BI DARPA_SPILL_ SECTION _ KEY
+Overrides any single setting.
+.SH EXIT STATUS
+.TP
+.B 0
+Normal termination, or \fB\-\-version\fR / \fB\-\-print\-config\fR completed.
+.TP
+.B 1
+A runtime failure, such as a missing dependency.
+.TP
+.B 2
+The configuration is missing, malformed, or inconsistent.
+.SH EXAMPLES
+.PP
+Check the merged configuration without starting anything:
+.PP
+.RS
+.EX
+darpa\-spill\-server \-c config/spillserver.yaml \-\-print\-config
+.EE
+.RE
+.PP
+Run against the Near Detector TDU:
+.PP
+.RS
+.EX
+darpa\-spill\-server \-c config/spillserver\-near.yaml
+.EE
+.RE
+.PP
+Serve an existing archive read-only, on another port:
+.PP
+.RS
+.EX
+darpa\-spill\-server \-\-no\-ingest \-\-database /backup/spills.db \-\-port 9090
+.EE
+.RE
+.SH SEE ALSO
+.BR darpa-spill-query (1),
+.BR darpa_spillserver (3),
+.BR nova-time-convert (1)
+.PP
+Full documentation in the source distribution under
+.IR docs/ .
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

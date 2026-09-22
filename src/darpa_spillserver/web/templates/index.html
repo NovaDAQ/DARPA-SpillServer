@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DARPA Spill Information Server</title>
+<link rel="stylesheet" href="{{ root_path }}/static/spillserver.css">
+</head>
+<body>
+<header>
+  <h1>DARPA Spill Information Server</h1>
+  <p class="sub">
+    NOvA accelerator event timestamps from <code>{{ tdu_url }}</code>
+    &middot; v{{ version }}
+    &middot; <a href="{{ root_path }}/docs">API docs</a>
+    &middot; <a href="{{ root_path }}/api/status">status</a>
+    {% if auth_enabled %}&middot; <a href="{{ root_path }}/auth/whoami">account</a>{% endif %}
+  </p>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main>
+<form id="query" autocomplete="off">
+  <fieldset>
+    <legend>Time range</legend>
+    <label>Start
+      <input type="text" name="start" id="start" placeholder="2026-07-01, 09:15, -2h">
+    </label>
+    <label>End
+      <input type="text" name="end" id="end" placeholder="today, now, 11:34">
+    </label>
+    <label>Timezone
+      <input type="text" name="tz" id="tz" value="{{ default_timezone }}"
+             placeholder="UTC">
+    </label>
+    <p class="hint">
+      Times without a zone are read in the timezone above. A date-only end
+      covers that whole day. <a href="{{ root_path }}/api/time/help">All accepted forms</a>.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Signals</legend>
+    <div class="signals">
+      {% for signal in signals %}
+      <label class="chip" title="{{ signal.description }}">
+        <input type="checkbox" name="signal" value="{{ signal.hex }}">
+        <span>{{ signal.hex }}</span>
+        <small>{{ signal.name }}</small>
+      </label>
+      {% endfor %}
+    </div>
+    <p class="hint">Select none to return every signal.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Output</legend>
+    <label>Rows
+      <input type="number" name="limit" id="limit" value="500" min="1">
+    </label>
+    <label>Order
+      <select name="order" id="order">
+        <option value="desc">Newest first</option>
+        <option value="asc">Oldest first</option>
+      </select>
+    </label>
+    <div class="actions">
+      <button type="submit">Query</button>
+      <button type="button" id="download-csv">Download CSV</button>
+      <button type="button" id="download-json">Download JSON</button>
+    </div>
+  </fieldset>
+</form>
+
+<section id="results">
+  <p id="summary" class="summary">Set a range and press Query.</p>
+  <div class="tablewrap">
+    <table id="table">
+      <thead>
+        <tr>
+          <th>UTC</th><th>NOvA time</th><th>GPS seconds</th>
+          <th>Signal</th><th>Type</th><th>Delta</th><th>Event no.</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p>
+    NOvA DAQ &middot;
+    <a href="https://github.com/NovaDAQ/DARPA-SpillServer">DARPA-SpillServer</a>
+  </p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROOT = {{ root_path | tojson }};
+  var form = document.getElementById("query");
+  var tbody = document.querySelector("#table tbody");
+  var summary = document.getElementById("summary");
+  var banner = document.getElementById("banner");
+
+  function params(extra) {
+    var data = new URLSearchParams();
+    ["start", "end", "tz", "limit", "order"].forEach(function (name) {
+      var value = document.getElementById(name).value.trim();
+      if (value) { data.append(name, value); }
+    });
+    form.querySelectorAll('input[name="signal"]:checked').forEach(function (box) {
+      data.append("signal", box.value);
+    });
+    Object.keys(extra || {}).forEach(function (key) {
+      data.set(key, extra[key]);
+    });
+    return data;
+  }
+
+  function showBanner(messages) {
+    if (!messages || !messages.length) { banner.hidden = true; return; }
+    banner.textContent = messages.join("  ");
+    banner.hidden = false;
+  }
+
+  function cell(row, text) {
+    var td = document.createElement("td");
+    td.textContent = (text === null || text === undefined || text === "") ? "—" : text;
+    row.appendChild(td);
+  }
+
+  function render(payload) {
+    tbody.textContent = "";
+    var events = payload.events || [];
+    events.forEach(function (event) {
+      var tr = document.createElement("tr");
+      cell(tr, event.utc);
+      cell(tr, event.nova_time);
+      cell(tr, event.gps_seconds);
+      cell(tr, event.signal);
+      cell(tr, event.spill_type_name);
+      cell(tr, event.delta);
+      cell(tr, event.event_number);
+      tbody.appendChild(tr);
+    });
+
+    var meta = payload.meta || {};
+    var parts = [events.length + " event(s) shown"];
+    if (typeof meta.total === "number") { parts.push("of " + meta.total + " matching"); }
+    if (meta.range) { parts.push("from " + meta.range.start.utc + " to " + meta.range.end.utc); }
+    summary.textContent = parts.join(" · ");
+    showBanner(meta.warnings);
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    summary.textContent = "Querying…";
+    fetch(ROOT + "/api/events?" + params({format: "json"}).toString(), {
+      headers: {"Accept": "application/json"}
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          return response.json().then(function (body) {
+            var detail = body.detail || body;
+            throw new Error(detail.error || JSON.stringify(detail));
+          });
+        }
+        return response.json();
+      })
+      .then(render)
+      .catch(function (error) {
+        tbody.textContent = "";
+        summary.textContent = "Error: " + error.message;
+      });
+  });
+
+  function download(format) {
+    window.location = ROOT + "/api/events?" + params({format: format}).toString();
+  }
+  document.getElementById("download-csv").addEventListener("click", function () {
+    download("csv");
+  });
+  document.getElementById("download-json").addEventListener("click", function () {
+    download("json");
+  });
+
+  // Surface a degraded ingest before the user runs a query and wonders why
+  // the history has holes.
+  fetch(ROOT + "/api/status")
+    .then(function (response) { return response.json(); })
+    .then(function (status) {
+      if (status.ingest && status.ingest.degraded) {
+        showBanner([status.ingest.degraded_reason]);
+      }
+    })
+    .catch(function () { /* status is advisory; a failure here is not fatal */ });
+})();
+</script>
+</body>
+</html>

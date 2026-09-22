@@ -1,0 +1,89 @@
+--- a/cxx/src/DumpSpillHistory.cc
++++ b/cxx/src/DumpSpillHistory.cc
+@@ -83,6 +83,8 @@
+   printf("-o\t\t--onehertz\tShow 1Hz accelerator events\n");
+   printf("-t\t\t--tcr\tShow the TCR reference events\n");
+   printf("  \t\t--last\tShow only the last event\n");
++  printf("  \t\t--since=ticks\tOnly events at or after this NOvA time\n");
++  printf("  \t\t--until=ticks\tOnly events strictly before this NOvA time\n");
+ 
+   exit(TRUE);
+   return TRUE;
+@@ -107,7 +109,7 @@
+ 
+   if(start_flag){      
+     if(json_flag){
+-      printf("{\nEvents: [\n");
++      printf("{\n\"Events\": [\n");
+     }else{
+       printf("Type, No., Time, Time Hex, Delta Prev.\n");
+       printf("===========================================================\n");
+@@ -163,7 +165,7 @@
+ 
+   if(start_flag){
+     if(json_flag){
+-//      printf("{\nEvents: [\n");
++//      printf("{\n\"Events\": [\n");
+     }else{
+       printf("Type, No., Time, Time Hex, Delta Prev.\n");
+       printf("===========================================================\n");
+@@ -221,6 +223,9 @@
+   int last_flag        = FALSE;
+   int json_flag        = FALSE;
+ 
++  uint64_t since_time  = 0;           /* Lower bound, inclusive (NOvA ticks) */
++  uint64_t until_time  = 0;           /* Upper bound, exclusive; 0 = no bound */
++
+   unsigned int basesize = 0x0000400;  /* Base size for the initial shm query (1k)       */
+ 
+   int memsize = -1;		      /* Memory size in bytes                           */ 
+@@ -248,6 +253,10 @@
+       {"tcr",         no_argument,           &tcr_flag,        TRUE},
+       {"json",        no_argument,           &json_flag,       TRUE},
+       {"last",        no_argument,           &last_flag,       TRUE},
++      /* Time window, in NOvA 64 MHz ticks. Filtering here rather than in the
++         caller avoids serialising the whole ring buffer on every request. */
++      {"since",       required_argument,     0,                'S'},
++      {"until",       required_argument,     0,                'U'},
+       /* These options don't set a flag. We distinguish them by their values.  */
+       {"mem",         required_argument,     0,                'm'},
+       {"size",        required_argument,     0,                's'},
+@@ -257,7 +266,7 @@
+   /*************************************/
+   /* Parse the commandline for options */
+   while(TRUE){
+-    option_number = getopt_long(argc,argv,"h?vqcbtjnom:s:",long_options,&option_index);
++    option_number = getopt_long(argc,argv,"h?vqcbtjnom:s:S:U:",long_options,&option_index);
+ 
+     if(option_number == -1){    /* We are out of commandline options */
+       break;                    /* Jump out of the options loops     */
+@@ -297,6 +306,12 @@
+     case 'j':
+       json_flag = TRUE;                                   /* Set the json flag */
+       break;
++    case 'S':
++      since_time = strtoull(optarg,NULL,0);               /* Lower time bound */
++      break;
++    case 'U':
++      until_time = strtoull(optarg,NULL,0);               /* Upper time bound */
++      break;
+     case 's':
+       scanf(optarg,"%d",&memsize);
+       // memsize = atoi(optarg);                           /* Set the size of the memory segment        */
+@@ -445,6 +460,16 @@
+       break;
+     }
+ 
++    // Skip events outside the requested time window. The bounds are
++    // half-open (since <= t < until) so that successive queries tile without
++    // reporting an event on the boundary twice.
++    if(since_time != 0 && (*AccelData).time < since_time){
++      skip_evt = true;
++    }
++    if(until_time != 0 && (*AccelData).time >= until_time){
++      skip_evt = true;
++    }
++
+     // Skip printing out the event if it doesn't match a trigger
+     // of interest
+     if(skip_evt){

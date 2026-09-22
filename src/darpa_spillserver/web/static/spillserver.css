@@ -1,0 +1,169 @@
+/* DARPA Spill Information Server -- browser UI.
+   Self-contained: no web fonts, no CDN, nothing the DAQ network must reach. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f8;
+  --panel: #ffffff;
+  --ink: #16181d;
+  --muted: #5c6370;
+  --line: #d9dce1;
+  --accent: #1c5d99;
+  --warn-bg: #fff4d6;
+  --warn-ink: #6b4a00;
+  --warn-line: #e0b84d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --ink: #e8eaed;
+    --muted: #9aa2ad;
+    --line: #2f343d;
+    --accent: #6fb3e8;
+    --warn-bg: #3a3218;
+    --warn-ink: #f2d98a;
+    --warn-line: #7a6522;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 16px 48px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header { padding: 24px 0 12px; border-bottom: 1px solid var(--line); }
+header h1 { margin: 0 0 4px; font-size: 1.4rem; font-weight: 600; }
+.sub { margin: 0; color: var(--muted); font-size: 0.88rem; }
+a { color: var(--accent); }
+
+.banner {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--warn-line);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 0.88rem;
+}
+
+main { max-width: 1200px; margin: 0 auto; }
+
+form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+fieldset {
+  margin: 0;
+  padding: 12px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+legend { padding: 0 6px; font-weight: 600; font-size: 0.86rem; color: var(--muted); }
+
+label { display: block; margin-bottom: 10px; font-size: 0.86rem; color: var(--muted); }
+
+input[type="text"], input[type="number"], select {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+}
+
+.hint { margin: 6px 0 0; color: var(--muted); font-size: 0.78rem; }
+
+.signals { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chip {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+.chip:hover { border-color: var(--accent); }
+.chip small { color: var(--muted); font-family: inherit; font-size: 0.72rem; }
+.chip input { margin: 0; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+button {
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 0.86rem;
+  cursor: pointer;
+}
+button[type="button"] { background: transparent; color: var(--accent); }
+button:hover { filter: brightness(1.08); }
+
+.summary { margin: 0 0 10px; color: var(--muted); font-size: 0.86rem; }
+
+.tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+
+th, td {
+  padding: 7px 12px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--bg); }
+
+footer {
+  max-width: 1200px;
+  margin: 32px auto 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.8rem;
+}

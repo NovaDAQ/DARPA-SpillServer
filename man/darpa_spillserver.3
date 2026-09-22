@@ -1,0 +1,118 @@
+.TH DARPA_SPILLSERVER 3 "September 2026" "darpa_spillserver 1.0.0" "Library Functions"
+.SH NAME
+darpa_spillserver \- Python library for NOvA accelerator event timestamps
+.SH SYNOPSIS
+.EX
+.B from darpa_spillserver.config import load_config
+.B from darpa_spillserver.app import create_app
+.B from darpa_spillserver.storage import SpillStore
+.B from darpa_spillserver.signals import parse_signal, decode_event_word
+.B from darpa_spillserver.novatime import parse_range, convert
+.EE
+.SH DESCRIPTION
+The
+.B darpa_spillserver
+package implements the DARPA Spill Information Server. Its modules are layered
+so that each is useful on its own, without running a server.
+.SH MODULES
+.SS darpa_spillserver.signals
+The accelerator signal registry and the hardware's decode rules, ported from
+.I NssSpillInfo::getSpillTypeFromEvent
+in the
+.B NovaSpillServer
+package.
+.TP
+.BI decode_event_word( evt )
+Decode a raw 16-bit event word to a
+.BR SpillType .
+.TP
+.BI parse_signal( text )
+Resolve
+.BR $74 ", " 74 ", " 0x74
+or a registry name to a
+.B Signal
+record.
+.TP
+.BI signals_for_type( spill_type )
+Every signal decoding to that type. More than one means a stored record
+carrying only the type is ambiguous.
+.SS darpa_spillserver.novatime
+Parsing human time expressions and converting between timescales. The
+arithmetic is delegated to
+.BR nova_time_decoder (3);
+nothing here reimplements a conversion.
+.TP
+.BI parse_instant( text ", " now ", " tz ", " end_of_day )
+Parse one time expression to NOvA ticks.
+.TP
+.BI parse_range( start ", " end ", " now ", " tz )
+Resolve a pair into a half-open
+.RI ( start ", " end )
+tick range.
+.TP
+.BI convert( nova )
+Render one tick count as a
+.B ConvertedTime
+carrying NOvA, UNIX, UTC and GPS forms.
+.SS darpa_spillserver.storage
+The SQLite archive.
+.B SpillStore
+is synchronous and thread-safe through per-thread connections; async callers
+should wrap calls in
+.IR asyncio.to_thread .
+Inserts are idempotent on
+.RI ( nova_time ", " spill_type ", " signal_code ).
+.SS darpa_spillserver.tdu_client
+An async HTTP client for the TDU's embedded web server, speaking both the
+legacy single-event routes and the bulk
+.I /spill_history
+route, and tolerating the malformed JSON that
+.B DumpSpillHistory
+emits.
+.SS darpa_spillserver.poller
+The background ingest loop.
+.SS darpa_spillserver.formats
+CSV and JSON rendering, as streaming generators.
+.SS darpa_spillserver.config
+Configuration merged from defaults, a YAML file, the environment, and the
+command line.
+.SS darpa_spillserver.api ", " darpa_spillserver.app
+The FastAPI routes and the application factory.
+.SH EXAMPLES
+Read an archive directly:
+.PP
+.RS
+.EX
+from darpa_spillserver.storage import SpillStore
+from darpa_spillserver.novatime import parse_range, convert
+from darpa_spillserver.signals import parse_signal
+
+store = SpillStore("spills.db")
+start, end = parse_range("2026-07-01", "today")
+signal = parse_signal("$74")
+
+page = store.query(start_nova=start, end_nova=end,
+                   spill_types=[signal.spill_type])
+for event in page.events:
+    print(convert(event.nova_time).utc)
+.EE
+.RE
+.PP
+Build an application for testing, without contacting a TDU:
+.PP
+.RS
+.EX
+from darpa_spillserver.app import create_app
+from darpa_spillserver.config import Config
+
+config = Config()
+config.storage.path = ":memory:"
+app = create_app(config, start_ingest=False)
+.EE
+.RE
+.SH SEE ALSO
+.BR darpa-spill-server (1),
+.BR darpa-spill-query (1),
+.BR nova_time_decoder (3)
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.
