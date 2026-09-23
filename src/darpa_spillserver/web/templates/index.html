@@ -13,10 +13,12 @@
     <div class="masthead-text">
       <h1>DARPA Spill Information Server</h1>
       <p class="sub">
-        NOvA accelerator event timestamps from <code>{{ tdu_url }}</code>
+        NOvA accelerator event timestamps from
+        {% for name in sources %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
         &middot; v{{ version }}
         &middot; <a href="{{ root_path }}/docs">API docs</a>
         &middot; <a href="{{ root_path }}/api/status">status</a>
+        &middot; <a href="{{ root_path }}/config">sources</a>
         {% if auth_enabled %}&middot; <a href="{{ root_path }}/auth/whoami">account</a>{% endif %}
         &middot; <a href="{{ bug_report_url }}" target="_blank" rel="noopener noreferrer"
                     >report a bug</a>
@@ -67,6 +69,20 @@
   </fieldset>
 
   <fieldset>
+    <legend>Sources</legend>
+    <div class="signals" id="source-chips">
+      {% for name in sources %}
+      <label class="chip">
+        <input type="checkbox" name="source" value="{{ name }}">
+        <span>{{ name }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    <p class="hint">Select none to return every source.
+      <a href="{{ root_path }}/config">Manage sources</a>.</p>
+  </fieldset>
+
+  <fieldset>
     <legend>Output</legend>
     <label>Rows
       <input type="number" name="limit" id="limit" value="500" min="1">
@@ -93,6 +109,7 @@
         <tr>
           <th>UTC</th><th>NOvA time</th><th>GPS time</th>
           <th>Signal</th><th>Type</th><th>Delta</th><th>Event no.</th>
+          <th>Source</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -129,8 +146,10 @@
       var value = document.getElementById(name).value.trim();
       if (value) { data.append(name, value); }
     });
-    form.querySelectorAll('input[name="signal"]:checked').forEach(function (box) {
-      data.append("signal", box.value);
+    ["signal", "source"].forEach(function (name) {
+      form.querySelectorAll('input[name="' + name + '"]:checked').forEach(function (box) {
+        data.append(name, box.value);
+      });
     });
     Object.keys(extra || {}).forEach(function (key) {
       data.set(key, extra[key]);
@@ -162,6 +181,7 @@
       cell(tr, event.spill_type_name);
       cell(tr, event.delta);
       cell(tr, event.event_number);
+      cell(tr, event.source);
       tbody.appendChild(tr);
     });
 

@@ -23,9 +23,11 @@ import argparse
 import copy
 import logging
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import (
     Any, Dict, List, Mapping, Optional, Sequence,
     get_origin, get_type_hints,
@@ -33,12 +35,16 @@ from typing import (
 
 __all__ = [
     "Config",
+    "Source",
+    "parse_source",
+    "DEFAULT_TDU_URL",
     "ServerConfig",
     "TDUConfig",
     "IngestConfig",
     "StorageConfig",
     "QueryConfig",
     "AuthConfig",
+    "AdminConfig",
     "LoggingConfig",
     "ConfigError",
     "DEFAULT_CONFIG_PATHS",
@@ -76,15 +82,105 @@ class ServerConfig:
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
     """Origins allowed to call the API from a browser."""
 
+    ssl_certfile: str = ""
+    """PEM certificate (with any intermediates) to serve HTTPS directly.
+    Empty serves plain HTTP, which is right when a TLS-terminating proxy
+    fronts the server."""
+
+    ssl_keyfile: str = ""
+    """PEM private key matching ``ssl_certfile``."""
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.ssl_certfile else "http"
+
+
+#: Polled when neither ``tdu.sources`` nor ``tdu.base_url`` is configured.
+DEFAULT_TDU_URL = "http://tdu-near-master-ppc-01:8080"
+
+#: What a source name may look like. It appears in URLs (``?source=``), in CSV
+#: cells and in the archive, so it is kept to characters none of them escape.
+_SOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+@dataclass
+class Source:
+    """One TDU the server records from.
+
+    *name* tags every event ingested from it, and is what a query selects
+    with ``source=``.  It stays fixed while *base_url* may change: pointing a
+    source at a replacement TDU keeps its history under the same name.
+    """
+
+    name: str
+    base_url: str
+    enabled: bool = True
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"name": self.name, "base_url": self.base_url,
+                "enabled": self.enabled}
+
+
+def check_source_url(url: str, where: str = "source URL") -> str:
+    """Return *url* normalised, or raise :class:`ConfigError`."""
+    url = str(url).strip().rstrip("/")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ConfigError(
+            "{} must be an http:// or https:// URL with a host, got {!r}".format(
+                where, url
+            )
+        )
+    return url
+
+
+def check_source_name(name: str) -> str:
+    if not _SOURCE_NAME.match(name):
+        raise ConfigError(
+            "source name {!r} must be 1-64 letters, digits, '.', '_' or '-', "
+            "starting with a letter or digit".format(name)
+        )
+    return name
+
+
+def parse_source(spec: str) -> Source:
+    """Parse one ``tdu.sources`` entry: ``URL`` or ``NAME=URL``.
+
+    A bare URL is named after its host, so
+    ``http://tdu-near-master-ppc-02:8080`` becomes ``tdu-near-master-ppc-02``.
+    """
+    spec = str(spec).strip()
+    name, sep, url = spec.partition("=")
+    if not sep or "://" in name:
+        # No name given, or the "=" belongs to the URL's query string.
+        name, url = "", spec
+    url = check_source_url(url, "tdu.sources entry {!r}".format(spec))
+    if not name:
+        name = urlsplit(url).hostname or ""
+    return Source(name=check_source_name(name.strip()), base_url=url)
+
 
 @dataclass
 class TDUConfig:
-    """How to reach the TDU's embedded bottle server."""
+    """How to reach the TDUs' embedded bottle servers."""
 
-    base_url: str = "http://tdu-near-master-ppc-01:8080"
+    sources: List[str] = field(default_factory=list)
+    """TDUs to record from, each ``URL`` or ``NAME=URL``."""
+
+    base_url: str = ""
+    """A single TDU, as configured before ``sources`` existed.  Kept so older
+    configuration files keep working; it cannot be combined with
+    ``sources``."""
+
     timeout: float = 10.0
     retries: int = 2
     retry_backoff: float = 0.5
+
+    def resolved_sources(self) -> List[Source]:
+        """The configured sources, in order, as :class:`Source` objects."""
+        if self.sources:
+            return [parse_source(spec) for spec in self.sources]
+        return [parse_source(self.base_url or DEFAULT_TDU_URL)]
 
 
 @dataclass
@@ -185,6 +281,30 @@ class AuthConfig:
 
 
 @dataclass
+class AdminConfig:
+    """Who may change sources at runtime, from the /config page or the API.
+
+    Nobody, until one of these is set.  The server binds every interface by
+    default, and a source URL decides what ends up in the archive, so editing
+    is opt-in.
+    """
+
+    token: str = ""
+    """Shared secret sent as ``X-Admin-Token``.  Prefer ``token_file``."""
+
+    token_file: str = ""
+
+    allowed_groups: List[str] = field(default_factory=list)
+    """With ``auth.enabled``, signed-in members of these groups may edit
+    without the token.  Empty means the token is the only way in."""
+
+    def resolved_token(self) -> str:
+        if self.token_file:
+            return Path(self.token_file).expanduser().read_text().strip()
+        return self.token
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     file: str = ""
@@ -201,6 +321,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     #: Path the configuration was loaded from, for the /status endpoint.
@@ -213,6 +334,8 @@ class Config:
             for key in ("client_secret", "session_secret"):
                 if data["auth"].get(key):
                     data["auth"][key] = "***redacted***"
+            if data["admin"].get("token"):
+                data["admin"]["token"] = "***redacted***"
         return data
 
     def validate(self) -> None:
@@ -224,12 +347,33 @@ class Config:
             raise ConfigError(
                 "server.port must be 1..65535, got {}".format(self.server.port)
             )
-        if not self.tdu.base_url.startswith(("http://", "https://")):
+        if bool(self.server.ssl_certfile) != bool(self.server.ssl_keyfile):
             raise ConfigError(
-                "tdu.base_url must start with http:// or https://, got {!r}".format(
-                    self.tdu.base_url
-                )
+                "server.ssl_certfile and server.ssl_keyfile must be set "
+                "together; HTTPS needs both the certificate and its key"
             )
+        if self.tdu.sources and self.tdu.base_url:
+            raise ConfigError(
+                "tdu.base_url and tdu.sources are both set; list every TDU "
+                "under tdu.sources and remove tdu.base_url"
+            )
+        if self.tdu.base_url:
+            check_source_url(self.tdu.base_url, "tdu.base_url")
+        sources = self.tdu.resolved_sources()
+        for attribute in ("name", "base_url"):
+            seen = set()
+            for source in sources:
+                value = getattr(source, attribute)
+                if value in seen:
+                    raise ConfigError(
+                        "tdu.sources lists {} {!r} twice{}".format(
+                            "the name" if attribute == "name" else "the URL",
+                            value,
+                            "; give one of them an explicit NAME=URL"
+                            if attribute == "name" else "",
+                        )
+                    )
+                seen.add(value)
         if self.ingest.interval <= 0:
             raise ConfigError("ingest.interval must be positive")
         if self.ingest.batch_limit < 1:
@@ -279,6 +423,7 @@ _SECTIONS = {
     "storage": StorageConfig,
     "query": QueryConfig,
     "auth": AuthConfig,
+    "admin": AdminConfig,
     "logging": LoggingConfig,
 }
 
@@ -447,10 +592,18 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
     group.add_argument("--cors-origin", action="append", dest="cors_origins",
                        metavar="ORIGIN",
                        help="allowed CORS origin; repeatable")
+    group.add_argument("--ssl-certfile", metavar="FILE",
+                       help="PEM certificate; serves HTTPS when given")
+    group.add_argument("--ssl-keyfile", metavar="FILE",
+                       help="PEM private key for --ssl-certfile")
 
     group = parser.add_argument_group("TDU data source")
+    group.add_argument("--tdu-source", action="append", dest="tdu_sources",
+                       metavar="[NAME=]URL",
+                       help="a TDU to record from; repeatable. The name "
+                            "defaults to the URL's host")
     group.add_argument("--tdu-url", dest="tdu_base_url", metavar="URL",
-                       help="base URL of the TDU bottle server")
+                       help="a single TDU; use --tdu-source for several")
     group.add_argument("--tdu-timeout", dest="tdu_timeout", type=float,
                        metavar="SECONDS", help="per-request timeout")
     group.add_argument("--tdu-retries", dest="tdu_retries", type=int,
@@ -496,6 +649,12 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
                        help="file holding the client secret")
     group.add_argument("--oidc-redirect-url", dest="auth_redirect_url", metavar="URL")
 
+    group = parser.add_argument_group("runtime configuration")
+    group.add_argument("--admin-token-file", dest="admin_token_file",
+                       metavar="FILE",
+                       help="file holding the token that allows changing "
+                            "sources from the /config page")
+
     group = parser.add_argument_group("logging")
     group.add_argument("-l", "--log-level", dest="logging_level",
                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -514,6 +673,9 @@ _ARG_MAP = {
     "port": ("server", "port"),
     "root_path": ("server", "root_path"),
     "cors_origins": ("server", "cors_origins"),
+    "ssl_certfile": ("server", "ssl_certfile"),
+    "ssl_keyfile": ("server", "ssl_keyfile"),
+    "tdu_sources": ("tdu", "sources"),
     "tdu_base_url": ("tdu", "base_url"),
     "tdu_timeout": ("tdu", "timeout"),
     "tdu_retries": ("tdu", "retries"),
@@ -531,6 +693,7 @@ _ARG_MAP = {
     "auth_client_id": ("auth", "client_id"),
     "auth_client_secret_file": ("auth", "client_secret_file"),
     "auth_redirect_url": ("auth", "redirect_url"),
+    "admin_token_file": ("admin", "token_file"),
     "logging_level": ("logging", "level"),
     "logging_file": ("logging", "file"),
 }
@@ -565,7 +728,9 @@ def load_config(
         if not config_path.is_file():
             raise ConfigError("config file not found: {}".format(config_path))
     else:
-        for candidate in (search_paths or DEFAULT_CONFIG_PATHS):
+        # An empty list means "search nowhere", not "use the defaults".
+        for candidate in (DEFAULT_CONFIG_PATHS if search_paths is None
+                          else search_paths):
             path = Path(candidate).expanduser()
             if path.is_file():
                 config_path = path

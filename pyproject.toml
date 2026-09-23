@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "darpa-spillserver"
-version = "1.1.0"
+version = "1.2.0"
 description = "Web and API server for NOvA accelerator event timestamps collected from a TDU"
 readme = "README.md"
 requires-python = ">=3.9"

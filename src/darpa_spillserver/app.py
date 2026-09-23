@@ -29,8 +29,8 @@ from fastapi.templating import Jinja2Templates
 from . import COPYRIGHT, ISSUES_URL, PROJECT_URL, __version__
 from .api import build_router
 from .auth import AuthError, build_authenticator
-from .config import Config
-from .poller import Poller
+from .config import Config, ConfigError
+from .poller import IngestManager
 from .signals import SIGNALS, SpillType, describe_type, signals_for_type
 from .storage import SpillStore
 
@@ -41,10 +41,10 @@ log = logging.getLogger(__name__)
 _WEB_DIR = Path(__file__).parent / "web"
 
 DESCRIPTION = """
-Serves the accelerator event timestamps recorded by a NOvA TDU.
+Serves the accelerator event timestamps recorded by NOvA TDUs.
 
-The server polls the TDU's embedded bottle server, stores decoded events in a
-local archive, and exposes them as a structured table selectable by time range
+The server polls each configured TDU's embedded bottle server, stores decoded
+events in a local archive tagged with the TDU they came from, and exposes them as a structured table selectable by time range
 and by accelerator signal in the operators' hex notation (`$74`, `$8F`).
 Timestamps are returned in NOvA base time, UNIX, UTC and GPS together.
 
@@ -52,6 +52,7 @@ Timestamps are returned in NOvA base time, UNIX, UTC and GPS together.
 * `/api/export` &mdash; stream a whole range, unpaged
 * `/api/signals`, `/api/types` &mdash; what can be asked for
 * `/api/time/convert`, `/api/time/help` &mdash; timescale conversion
+* `/api/sources` &mdash; the TDUs recorded from; changeable at runtime
 * `/api/status` &mdash; archive extent and ingest health
 
 ---
@@ -66,30 +67,44 @@ DESCRIPTION = DESCRIPTION.format(copyright=COPYRIGHT)
 def create_app(
     config: Config,
     store: Optional[SpillStore] = None,
-    poller: Optional[Poller] = None,
+    ingest: Optional[IngestManager] = None,
     start_ingest: Optional[bool] = None,
 ) -> FastAPI:
     """Build the FastAPI application.
 
     :param config: merged configuration.
     :param store: archive to use; one is opened from *config* if omitted.
-    :param poller: ingest poller; one is built from *config* if omitted.
+    :param ingest: the ingest manager; one is built from *config* if omitted.
     :param start_ingest: override ``config.ingest.enabled``.  Tests pass
         ``False`` so that creating an app never contacts a TDU.
+
+    :raises ConfigError: if the admin token file cannot be read.
     """
-    store = store or SpillStore(config.storage.path, timeout=config.storage.timeout)
+    store = store or SpillStore(
+        config.storage.path,
+        timeout=config.storage.timeout,
+        legacy_source=config.tdu.resolved_sources()[0].name,
+    )
     authenticator = build_authenticator(config.auth)
+
+    try:
+        admin_token = config.admin.resolved_token()
+    except OSError as exc:
+        raise ConfigError("admin.token_file: cannot read {}: {}".format(
+            config.admin.token_file, exc.strerror)) from None
 
     should_ingest = (
         config.ingest.enabled if start_ingest is None else bool(start_ingest)
     )
-    if poller is None and should_ingest:
-        poller = Poller(config, store)
+    # Built even when ingest is off, so that /config can show and change the
+    # sources; nothing is polled until start() is called.
+    ingest = ingest or IngestManager(config, store)
 
     state = SimpleNamespace(
         config=config,
         store=store,
-        poller=poller,
+        ingest=ingest,
+        admin_token=admin_token,
         authenticator=authenticator,
         version=__version__,
         started_at=time.time(),
@@ -105,16 +120,15 @@ def create_app(
             log.error("authentication setup failed: %s", exc)
             raise
 
-        if poller is not None and should_ingest:
-            await poller.start()
-        elif not should_ingest:
+        if should_ingest:
+            await ingest.start()
+        else:
             log.info("ingest disabled; serving the existing archive read-only")
 
         try:
             yield
         finally:
-            if poller is not None:
-                await poller.stop()
+            await ingest.stop()
             await authenticator.shutdown()
             store.close()
 
@@ -152,6 +166,8 @@ def create_app(
             CORSMiddleware,
             allow_origins=config.server.cors_origins,
             allow_credentials=True,
+            # GET only: the write routes behind /config are same-origin, and
+            # a cross-origin page must not be able to reach them.
             allow_methods=["GET"],
             allow_headers=["*"],
         )
@@ -178,7 +194,8 @@ def _bug_report_url(config: Config) -> str:
 
     GitHub prefills an issue form from the query string, so the report arrives
     already carrying the server version and the TDU it was talking to --- the
-    two facts a bug report from an operator is most often missing.
+    two facts a bug report from an operator is most often missing.  With
+    several sources, ``tdu`` lists every configured URL.
 
     The ``bug`` label is declared by the form rather than passed here on
     purpose. A query parameter that performs an action needs the permission for
@@ -191,7 +208,7 @@ def _bug_report_url(config: Config) -> str:
         {
             "template": BUG_REPORT_TEMPLATE,
             "version": __version__,
-            "tdu": config.tdu.base_url,
+            "tdu": ", ".join(s.base_url for s in config.tdu.resolved_sources()),
             "surface": BUG_REPORT_SURFACE,
         }
     )
@@ -225,12 +242,28 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
                     }
                     for t in SpillType
                 ],
-                "tdu_url": config.tdu.base_url,
+                "sources": state.ingest.names(),
                 "default_timezone": config.query.timezone,
                 "auth_enabled": config.auth.enabled,
                 "root_path": config.server.root_path,
                 "project_url": PROJECT_URL,
                 "bug_report_url": bug_report_url,
+            },
+        )
+
+    @app.get("/config", response_class=HTMLResponse, include_in_schema=False)
+    async def config_page(request: Request):
+        """View the sources, and change them with the admin token."""
+        return templates.TemplateResponse(
+            request,
+            "config.html",
+            {
+                "version": state.version,
+                "copyright": COPYRIGHT,
+                "root_path": config.server.root_path,
+                "project_url": PROJECT_URL,
+                "bug_report_url": bug_report_url,
+                "auth_enabled": config.auth.enabled,
             },
         )
 

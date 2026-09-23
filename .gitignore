@@ -27,6 +27,10 @@ htmlcov/
 # Local configuration overrides; the committed ones live in config/
 /spillserver.yaml
 
+# Local TLS certificate and private key, and the admin token
+/tls/
+/secrets/
+
 # Core dumps
 core/
 *.core
@@ -39,3 +43,4 @@ core/
 
 # NFS silly-rename artefacts (a deleted file still held open)
 .nfs*
+/run/

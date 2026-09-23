@@ -37,7 +37,7 @@ from urllib.parse import urljoin
 import httpx
 
 from .signals import SpillType, decode_event_word, signal_for_code
-from .storage import UNKNOWN_SIGNAL, SpillEvent
+from .storage import UNKNOWN_SIGNAL, UNKNOWN_SOURCE, SpillEvent
 
 __all__ = [
     "TDUError",
@@ -118,8 +118,15 @@ def _as_int(record: Dict[str, Any], *names: str) -> Optional[int]:
     return None
 
 
-def event_from_record(record: Dict[str, Any], source: str) -> Optional[SpillEvent]:
+def event_from_record(
+    record: Dict[str, Any],
+    route: str,
+    source: str = UNKNOWN_SOURCE,
+) -> Optional[SpillEvent]:
     """Build a :class:`SpillEvent` from one TDU JSON record.
+
+    *route* is the TDU route the record came from and *source* the name of
+    the TDU; both are stored with the event.
 
     Accepts both the legacy capitalised keys (``Type``, ``Time``, ``Number``)
     and the lower-case keys used by the history route, and tolerates either
@@ -161,6 +168,7 @@ def event_from_record(record: Dict[str, Any], source: str) -> Optional[SpillEven
         delta=_as_int(record, "Delta", "delta"),
         pps_offset=_as_int(record, "Offset", "offset", "pps_offset"),
         source=source,
+        route=route,
         ingested_at=int(time.time()),
     )
 
@@ -184,6 +192,7 @@ class TDUClient:
     """Async client for one TDU's bottle server.
 
     :param base_url: e.g. ``http://tdu-near-master-ppc-01:8080``.
+    :param name: the source name events from this TDU are tagged with.
     :param timeout: per-request timeout in seconds.
     :param retries: how many times to retry a failed request.
     :param retry_backoff: seconds to wait before the first retry; each
@@ -197,8 +206,10 @@ class TDUClient:
         retries: int = 2,
         retry_backoff: float = 0.5,
         client: Optional[httpx.AsyncClient] = None,
+        name: str = UNKNOWN_SOURCE,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
+        self.name = name
         self.timeout = timeout
         self.retries = max(0, int(retries))
         self.retry_backoff = retry_backoff
@@ -290,7 +301,8 @@ class TDUClient:
                     route, type(payload).__name__
                 )
             )
-        return event_from_record(payload, source=route.lstrip("/"))
+        return event_from_record(payload, route=route.lstrip("/"),
+                                 source=self.name)
 
     async def supports_history(self) -> bool:
         """Whether this TDU exposes the bulk-history route.
@@ -346,7 +358,8 @@ class TDUClient:
             events = [
                 event
                 for event in (
-                    event_from_record(record, source="spill_history")
+                    event_from_record(record, route="spill_history",
+                                      source=self.name)
                     for record in records
                 )
                 if event is not None

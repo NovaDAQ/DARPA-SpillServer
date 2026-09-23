@@ -9,7 +9,12 @@ server:
   port: 8080
 
 tdu:
-  base_url: http://tdu-near-master-ppc-01:8080
+  # Every Near Detector master TDU. Events are tagged with the host name, e.g.
+  # tdu-near-master-ppc-02.
+  sources:
+    - http://tdu-near-master-ppc-01:8080
+    - http://tdu-near-master-ppc-02:8080
+    - http://tdu-near-master-ppc-03:8080
 
 ingest:
   enabled: true
@@ -26,6 +31,10 @@ query:
   # Near Detector operators quote shift times in Fermilab local time, so an
   # unqualified "09:15" means Chicago here rather than UTC.
   timezone: America/Chicago
+
+admin:
+  # Lets /config enable, disable and re-point sources at runtime.
+  token_file: /etc/darpa-spillserver/admin_token
 
 logging:
   level: INFO

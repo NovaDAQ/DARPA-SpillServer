@@ -6,11 +6,17 @@ a good fit: the write rate is modest (tens of events per second at most), the
 read pattern is a range scan over a monotonically increasing key, and the whole
 archive stays a single file an operator can copy or back up.
 
+**Sources.** One archive holds events from several TDUs.  Each row carries
+``source``, the name of the TDU it came from, and ``route``, the TDU route
+that supplied it (``spill_history`` or ``tcr_status``).  Two TDUs that see
+the same accelerator event store it twice, once each, because they are two
+independent measurements of it.
+
 **Deduplication.** Ingest re-reads overlapping windows by design --- a poll
 that fetched the last 30 seconds will see events it already has, and a restart
 re-reads from the last watermark.  Every insert is therefore idempotent: the
-primary key is ``(nova_time, spill_type, signal_code)``, and inserts use
-``ON CONFLICT DO NOTHING``.  Re-ingesting the same window is always safe.
+primary key is ``(nova_time, spill_type, signal_code, source)``, and inserts
+use ``ON CONFLICT DO NOTHING``.  Re-ingesting the same window is always safe.
 
 ``signal_code`` is ``-1`` rather than ``NULL`` when the source could not supply
 a raw event word.  SQLite treats ``NULL`` values as distinct in a unique index,
@@ -20,6 +26,11 @@ so a nullable column here would silently defeat deduplication.
 across threads) and the database runs in WAL mode, so the ingest writer never
 blocks API readers.  The store itself is synchronous; async callers should
 wrap calls in :func:`asyncio.to_thread`.
+
+**Schema versions.** Version 1 archives predate sources: their ``source``
+column held the route, and there was one TDU.  Opening one migrates it in
+place, in a single transaction, tagging every existing row with the
+*legacy_source* name the caller supplies --- the TDU those events came from.
 """
 
 from __future__ import annotations
@@ -34,7 +45,8 @@ from typing import Iterable, Iterator, List, Optional, Sequence
 
 from .signals import SpillType, signal_for_code
 
-__all__ = ["SpillEvent", "QueryResult", "SpillStore", "UNKNOWN_SIGNAL"]
+__all__ = ["SpillEvent", "QueryResult", "SpillStore", "StoreError", "UNKNOWN_SOURCE",
+           "UNKNOWN_SIGNAL"]
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +54,14 @@ log = logging.getLogger(__name__)
 #: word.  A sentinel rather than NULL so the primary key still deduplicates.
 UNKNOWN_SIGNAL = -1
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
+#: Stored as the source of rows migrated from a version 1 archive when the
+#: caller cannot say which TDU they came from.
+UNKNOWN_SOURCE = "unknown"
+
+_EVENTS_TABLE = """
+CREATE TABLE events (
     nova_time    INTEGER NOT NULL,
     spill_type   INTEGER NOT NULL,
     signal_code  INTEGER NOT NULL DEFAULT -1,
@@ -53,33 +69,49 @@ CREATE TABLE IF NOT EXISTS events (
     event_number INTEGER,
     delta        INTEGER,
     pps_offset   INTEGER,
-    source       TEXT    NOT NULL DEFAULT 'unknown',
+    source       TEXT    NOT NULL,
+    route        TEXT    NOT NULL DEFAULT '',
     ingested_at  INTEGER NOT NULL,
-    PRIMARY KEY (nova_time, spill_type, signal_code)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS idx_events_time
-    ON events (nova_time);
-CREATE INDEX IF NOT EXISTS idx_events_type_time
-    ON events (spill_type, nova_time);
-CREATE INDEX IF NOT EXISTS idx_events_signal_time
-    ON events (signal_code, nova_time);
-
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-
-CREATE TABLE IF NOT EXISTS ingest_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at   INTEGER NOT NULL,
-    finished_at  INTEGER,
-    source       TEXT,
-    fetched      INTEGER DEFAULT 0,
-    inserted     INTEGER DEFAULT 0,
-    error        TEXT
-);
+    PRIMARY KEY (nova_time, spill_type, signal_code, source)
+) WITHOUT ROWID
 """
+
+_EVENT_INDEXES = (
+    "CREATE INDEX idx_events_time ON events (nova_time)",
+    "CREATE INDEX idx_events_type_time ON events (spill_type, nova_time)",
+    "CREATE INDEX idx_events_signal_time ON events (signal_code, nova_time)",
+    "CREATE INDEX idx_events_source_time ON events (source, nova_time)",
+)
+
+_OTHER_TABLES = (
+    """CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS ingest_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at   INTEGER NOT NULL,
+        finished_at  INTEGER,
+        source       TEXT,
+        route        TEXT,
+        fetched      INTEGER DEFAULT 0,
+        inserted     INTEGER DEFAULT 0,
+        error        TEXT
+    )""",
+    # Changes made at runtime from the /config page. They outlive a restart,
+    # and win over the configuration file until reset.
+    """CREATE TABLE IF NOT EXISTS source_overrides (
+        name        TEXT PRIMARY KEY,
+        base_url    TEXT    NOT NULL,
+        enabled     INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        updated_by  TEXT    NOT NULL DEFAULT ''
+    )""",
+)
+
+
+class StoreError(RuntimeError):
+    """The archive cannot be opened as this version expects."""
 
 
 @dataclass
@@ -93,7 +125,12 @@ class SpillEvent:
     event_number: Optional[int] = None
     delta: Optional[int] = None
     pps_offset: Optional[int] = None
-    source: str = "unknown"
+    source: str = UNKNOWN_SOURCE
+    """Name of the TDU the event was read from."""
+
+    route: str = ""
+    """TDU route that supplied it, e.g. ``spill_history``."""
+
     ingested_at: int = field(default_factory=lambda: int(time.time()))
 
     @property
@@ -121,6 +158,7 @@ class SpillEvent:
             delta=row["delta"],
             pps_offset=row["pps_offset"],
             source=row["source"],
+            route=row["route"],
             ingested_at=row["ingested_at"],
         )
 
@@ -145,11 +183,20 @@ class SpillStore:
     :param path: database file, or ``":memory:"`` for an ephemeral store.
         Parent directories are created as needed.
     :param timeout: seconds to wait for a write lock before raising.
+    :param legacy_source: source name given to the rows of a version 1
+        archive when it is migrated.  Those archives recorded one TDU, so
+        this is normally the first configured source.
     """
 
-    def __init__(self, path: str, timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        path: str,
+        timeout: float = 15.0,
+        legacy_source: Optional[str] = None,
+    ) -> None:
         self.path = str(path)
         self.timeout = timeout
+        self.legacy_source = legacy_source
         self._local = threading.local()
         # A shared in-memory database would otherwise be a different database
         # in every thread, silently losing every write.
@@ -207,13 +254,102 @@ class SpillStore:
 
     def _initialise(self) -> None:
         connection = self.connection
-        with connection:
-            connection.executescript(_SCHEMA)
+        version = self._existing_version(connection)
+        if version == _SCHEMA_VERSION:
+            # Tables added within a version are created IF NOT EXISTS.
+            with connection:
+                for statement in _OTHER_TABLES:
+                    connection.execute(statement)
+            return
+        if version is not None and version > _SCHEMA_VERSION:
+            raise StoreError(
+                "{} has schema version {}, newer than this server's {}; "
+                "upgrade darpa-spillserver to read it".format(
+                    self.path, version, _SCHEMA_VERSION
+                )
+            )
+
+        # DDL is not transactional under the sqlite3 module's default
+        # handling, so the transaction is opened by hand: a migration that
+        # fails halfway must leave the version 1 archive exactly as it was.
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in _OTHER_TABLES:
+                connection.execute(statement)
+            if version is None:
+                connection.execute(_EVENTS_TABLE)
+                for statement in _EVENT_INDEXES:
+                    connection.execute(statement)
+            else:
+                self._migrate_v1(connection)
             connection.execute(
                 "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-                "ON CONFLICT (key) DO NOTHING",
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 (str(_SCHEMA_VERSION),),
             )
+        except BaseException:
+            connection.rollback()
+            raise
+        connection.commit()
+
+    @staticmethod
+    def _existing_version(connection: sqlite3.Connection) -> Optional[int]:
+        """The archive's schema version, or ``None`` for a new database."""
+        tables = {
+            row["name"] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "events" not in tables:
+            return None
+        if "meta" in tables:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if row is not None:
+                return int(row["value"])
+        return 1
+
+    def _migrate_v1(self, connection: sqlite3.Connection) -> None:
+        """Rebuild a version 1 archive with per-source keys.
+
+        The primary key changes, which SQLite can only do by copying the
+        table.  The old ``source`` column held the route, so it moves to
+        ``route``, and every row is tagged with :attr:`legacy_source`.
+        """
+        name = self.legacy_source or UNKNOWN_SOURCE
+        connection.execute("ALTER TABLE events RENAME TO events_v1")
+        for index in ("idx_events_time", "idx_events_type_time",
+                      "idx_events_signal_time"):
+            connection.execute("DROP INDEX IF EXISTS {}".format(index))
+        connection.execute(_EVENTS_TABLE)
+        cursor = connection.execute(
+            "INSERT INTO events (nova_time, spill_type, signal_code, "
+            "  event_word, event_number, delta, pps_offset, source, route, "
+            "  ingested_at) "
+            "SELECT nova_time, spill_type, signal_code, event_word, "
+            "  event_number, delta, pps_offset, ?, source, ingested_at "
+            "FROM events_v1",
+            (name,),
+        )
+        migrated = cursor.rowcount
+        connection.execute("DROP TABLE events_v1")
+        for statement in _EVENT_INDEXES:
+            connection.execute(statement)
+
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(ingest_log)")
+        }
+        if "route" not in columns:
+            connection.execute("ALTER TABLE ingest_log ADD COLUMN route TEXT")
+            connection.execute(
+                "UPDATE ingest_log SET route = source, source = ?", (name,)
+            )
+        log.warning(
+            "migrated %s to schema version %d: tagged %d existing event(s) "
+            "with source %r",
+            self.path, _SCHEMA_VERSION, migrated, name,
+        )
 
     # -- metadata -----------------------------------------------------------
 
@@ -250,6 +386,7 @@ class SpillStore:
                 event.delta,
                 event.pps_offset,
                 event.source,
+                event.route,
                 event.ingested_at,
             )
             for event in events
@@ -263,9 +400,10 @@ class SpillStore:
             connection.executemany(
                 "INSERT INTO events ("
                 "  nova_time, spill_type, signal_code, event_word, "
-                "  event_number, delta, pps_offset, source, ingested_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT (nova_time, spill_type, signal_code) DO NOTHING",
+                "  event_number, delta, pps_offset, source, route, ingested_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (nova_time, spill_type, signal_code, source) "
+                "DO NOTHING",
                 rows,
             )
             return connection.total_changes - before
@@ -281,6 +419,7 @@ class SpillStore:
         limit: int = 10_000,
         offset: int = 0,
         descending: bool = False,
+        sources: Optional[Sequence[str]] = None,
     ) -> QueryResult:
         """Return events matching the given filters.
 
@@ -292,6 +431,8 @@ class SpillStore:
         request for signal ``$8F`` narrows to that signal's code *and* its
         type, while a request naming only a type matches every signal that
         decodes to it.
+
+        *sources* restricts to events from those TDUs; ``None`` means all.
         """
         where: List[str] = []
         params: List[object] = []
@@ -310,6 +451,10 @@ class SpillStore:
             placeholders = ", ".join("?" for _ in signal_codes)
             where.append("signal_code IN ({})".format(placeholders))
             params.extend(int(c) for c in signal_codes)
+        if sources:
+            placeholders = ", ".join("?" for _ in sources)
+            where.append("source IN ({})".format(placeholders))
+            params.extend(str(name) for name in sources)
 
         clause = (" WHERE " + " AND ".join(where)) if where else ""
 
@@ -319,8 +464,8 @@ class SpillStore:
 
         order = "DESC" if descending else "ASC"
         rows = self.connection.execute(
-            "SELECT * FROM events{} ORDER BY nova_time {}, spill_type {} "
-            "LIMIT ? OFFSET ?".format(clause, order, order),
+            "SELECT * FROM events{} ORDER BY nova_time {}, spill_type {}, "
+            "source {} LIMIT ? OFFSET ?".format(clause, order, order, order),
             (*params, int(limit), int(offset)),
         ).fetchall()
 
@@ -341,6 +486,7 @@ class SpillStore:
         signal_codes: Optional[Sequence[int]] = None,
         chunk: int = 5_000,
         descending: bool = False,
+        sources: Optional[Sequence[str]] = None,
     ) -> Iterator[SpillEvent]:
         """Stream every matching event, a page at a time.
 
@@ -358,6 +504,7 @@ class SpillStore:
                 limit=chunk,
                 offset=offset,
                 descending=descending,
+                sources=sources,
             )
             if not page.events:
                 return
@@ -366,23 +513,33 @@ class SpillStore:
             if offset >= page.total:
                 return
 
-    def latest(self, spill_type: Optional[SpillType] = None) -> Optional[SpillEvent]:
-        """The most recent stored event, optionally of one type."""
-        if spill_type is None:
-            row = self.connection.execute(
-                "SELECT * FROM events ORDER BY nova_time DESC LIMIT 1"
-            ).fetchone()
-        else:
-            row = self.connection.execute(
-                "SELECT * FROM events WHERE spill_type = ? "
-                "ORDER BY nova_time DESC LIMIT 1",
-                (int(spill_type),),
-            ).fetchone()
-        return SpillEvent.from_row(row) if row is not None else None
+    def latest(
+        self,
+        spill_type: Optional[SpillType] = None,
+        sources: Optional[Sequence[str]] = None,
+    ) -> Optional[SpillEvent]:
+        """The most recent stored event, optionally of one type or source."""
+        return self._extreme("DESC", spill_type, sources)
 
-    def earliest(self) -> Optional[SpillEvent]:
+    def earliest(
+        self, sources: Optional[Sequence[str]] = None
+    ) -> Optional[SpillEvent]:
+        return self._extreme("ASC", None, sources)
+
+    def _extreme(self, order, spill_type, sources) -> Optional[SpillEvent]:
+        where: List[str] = []
+        params: List[object] = []
+        if spill_type is not None:
+            where.append("spill_type = ?")
+            params.append(int(spill_type))
+        if sources:
+            where.append("source IN ({})".format(", ".join("?" for _ in sources)))
+            params.extend(sources)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
         row = self.connection.execute(
-            "SELECT * FROM events ORDER BY nova_time ASC LIMIT 1"
+            "SELECT * FROM events{} ORDER BY nova_time {} LIMIT 1".format(
+                clause, order),
+            params,
         ).fetchone()
         return SpillEvent.from_row(row) if row is not None else None
 
@@ -390,6 +547,29 @@ class SpillStore:
         return self.connection.execute(
             "SELECT COUNT(*) AS n FROM events"
         ).fetchone()["n"]
+
+    def counts_by_source(self) -> "dict[str, int]":
+        rows = self.connection.execute(
+            "SELECT source, COUNT(*) AS n FROM events GROUP BY source "
+            "ORDER BY source"
+        ).fetchall()
+        return {row["source"]: row["n"] for row in rows}
+
+    def source_names(self) -> List[str]:
+        """Every source that has at least one event in the archive."""
+        # A loose index scan: one probe per distinct source instead of a
+        # full pass over the index, which matters on a years-long archive.
+        names: List[str] = []
+        row = self.connection.execute(
+            "SELECT MIN(source) AS name FROM events"
+        ).fetchone()
+        while row is not None and row["name"] is not None:
+            names.append(row["name"])
+            row = self.connection.execute(
+                "SELECT MIN(source) AS name FROM events WHERE source > ?",
+                (row["name"],),
+            ).fetchone()
+        return names
 
     def counts_by_type(self) -> "dict[SpillType, int]":
         rows = self.connection.execute(
@@ -399,12 +579,21 @@ class SpillStore:
 
     # -- housekeeping -------------------------------------------------------
 
-    def prune_before(self, nova_time: int) -> int:
-        """Delete events older than *nova_time*; returns rows removed."""
+    def prune_before(self, nova_time: int, source: Optional[str] = None) -> int:
+        """Delete events older than *nova_time*, optionally from one source.
+
+        Returns the number of rows removed.
+        """
         with self.connection as connection:
-            cursor = connection.execute(
-                "DELETE FROM events WHERE nova_time < ?", (int(nova_time),)
-            )
+            if source is None:
+                cursor = connection.execute(
+                    "DELETE FROM events WHERE nova_time < ?", (int(nova_time),)
+                )
+            else:
+                cursor = connection.execute(
+                    "DELETE FROM events WHERE source = ? AND nova_time < ?",
+                    (source, int(nova_time)),
+                )
             return cursor.rowcount
 
     def vacuum(self) -> None:
@@ -414,6 +603,7 @@ class SpillStore:
     def record_ingest(
         self,
         source: str,
+        route: str,
         started_at: int,
         finished_at: int,
         fetched: int,
@@ -423,9 +613,10 @@ class SpillStore:
         with self.connection as connection:
             connection.execute(
                 "INSERT INTO ingest_log "
-                "(started_at, finished_at, source, fetched, inserted, error) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (started_at, finished_at, source, fetched, inserted, error),
+                "(started_at, finished_at, source, route, fetched, inserted, "
+                " error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (started_at, finished_at, source, route, fetched, inserted,
+                 error),
             )
 
     def recent_ingests(self, limit: int = 20) -> List[sqlite3.Row]:
@@ -442,3 +633,35 @@ class SpillStore:
                 (int(keep),),
             )
             return cursor.rowcount
+
+    # -- runtime source overrides --------------------------------------------
+
+    def source_overrides(self) -> "dict[str, sqlite3.Row]":
+        """Changes made to sources at runtime, keyed by source name."""
+        rows = self.connection.execute(
+            "SELECT * FROM source_overrides ORDER BY name"
+        ).fetchall()
+        return {row["name"]: row for row in rows}
+
+    def set_source_override(
+        self, name: str, base_url: str, enabled: bool, updated_by: str = ""
+    ) -> None:
+        with self.connection as connection:
+            connection.execute(
+                "INSERT INTO source_overrides "
+                "(name, base_url, enabled, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (name) DO UPDATE SET base_url = excluded.base_url, "
+                "enabled = excluded.enabled, updated_at = excluded.updated_at, "
+                "updated_by = excluded.updated_by",
+                (name, base_url, int(bool(enabled)), int(time.time()),
+                 updated_by),
+            )
+
+    def clear_source_override(self, name: str) -> bool:
+        """Drop a runtime override; returns whether there was one."""
+        with self.connection as connection:
+            cursor = connection.execute(
+                "DELETE FROM source_overrides WHERE name = ?", (name,)
+            )
+            return cursor.rowcount > 0

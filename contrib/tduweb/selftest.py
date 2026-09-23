@@ -157,6 +157,52 @@ check("host from TDU_WEB_HOST", tw.server_host(), '127.0.0.1')
 del os.environ['TDU_WEB_HOST']
 
 print
+print "Command timeout (a hung command must not hang the server)"
+import time as _time
+_start = _time.time()
+try:
+    tw._run(['sleep', '30'], timeout=1.0)
+    print "  FAIL  a hung command was not killed"
+    FAILURES.append("timeout")
+except RuntimeError, exc:
+    _elapsed = _time.time() - _start
+    if _elapsed < 5 and 'did not finish' in str(exc):
+        print "  ok    hung command killed after %.1fs" % _elapsed
+    else:
+        print "  FAIL  timeout took %.1fs: %s" % (_elapsed, exc)
+        FAILURES.append("timeout duration")
+
+check("a fast command still works", tw._run(['echo', 'hello']).strip(), 'hello')
+
+print
+print "Large output is capped, not read into memory"
+_saved_cap = tw.MAX_OUTPUT_BYTES
+tw.MAX_OUTPUT_BYTES = 1024
+try:
+    tw._run(['sh', '-c', 'yes abcdefghij | head -c 100000'], timeout=10.0)
+    print "  FAIL  oversized output was not rejected"
+    FAILURES.append("output cap")
+except RuntimeError, exc:
+    if 'more than' in str(exc):
+        print "  ok    oversized output rejected"
+    else:
+        print "  FAIL  wrong error: %s" % exc
+        FAILURES.append("output cap message")
+tw.MAX_OUTPUT_BYTES = _saved_cap
+
+print
+print "Empty ring slots are not events"
+_zeroed = (
+    "Type, No., Time, Time Hex, Delta Prev.\n"
+    "   0,        0, 0x0000000000000000,                    0          0 \n"
+    "   3,    10733, 0x0780f1e2c3d4e5f6,    33778458638680249    4266769 \n"
+)
+_parsed = tw._parse_history(_zeroed)
+check("zeroed slot dropped", len(_parsed), 1)
+if len(_parsed) == 1:
+    check("the real event survives", _parsed[0]['Number'], 10733)
+
+print
 if FAILURES:
     print "%d FAILURE(S): %s" % (len(FAILURES), ", ".join(FAILURES))
     sys.exit(1)

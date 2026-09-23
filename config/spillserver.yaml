@@ -25,10 +25,24 @@ server:
   cors_origins:
     - "*"
 
+  # Serve HTTPS directly by pointing these at a PEM certificate (with any
+  # intermediates appended) and its private key. Leave both empty to serve
+  # plain HTTP, e.g. behind a proxy that terminates TLS itself.
+  ssl_certfile: ""
+  ssl_keyfile: ""
+
 tdu:
-  # The TDU's embedded bottle server. Reachable only from inside the NOvA DAQ
-  # network; the gateway node is on it.
-  base_url: http://tdu-near-master-ppc-01:8080
+  # The TDUs to record from, each "URL" or "NAME=URL". Every event is tagged
+  # with its source's name, which is what queries select with source=. A bare
+  # URL is named after its host, so this one is "tdu-near-master-ppc-01".
+  # The TDUs' embedded bottle servers are reachable only from inside the NOvA
+  # DAQ network; the gateway node is on it.
+  #
+  # Sources can be enabled, disabled or pointed at a new URL while the server
+  # runs, from the /config page (see the admin section). Adding or removing
+  # one is done here, followed by a restart.
+  sources:
+    - http://tdu-near-master-ppc-01:8080
   timeout: 10.0
   retries: 2
   retry_backoff: 0.5
@@ -115,6 +129,18 @@ auth:
   session_secret: ""
   session_cookie: darpa_spill_session
   session_max_age: 28800
+
+admin:
+  # Changing sources at runtime needs a secret, sent as the X-Admin-Token
+  # header or typed into the /config page. With neither set, /config is
+  # read-only. Generate one and keep it out of this file:
+  #     openssl rand -hex 32 > /etc/darpa-spillserver/admin_token
+  token_file: ""
+  token: ""             # prefer token_file
+
+  # With auth.enabled, signed-in members of these groups may change sources
+  # without the token.
+  allowed_groups: []
 
 logging:
   level: INFO

@@ -65,6 +65,7 @@ COLUMNS: Sequence[str] = (
     "delta",
     "pps_offset",
     "source",
+    "route",
 )
 
 
@@ -104,6 +105,7 @@ def event_row(event: SpillEvent) -> Dict[str, Any]:
         "delta": event.delta,
         "pps_offset": event.pps_offset,
         "source": event.source,
+        "route": event.route,
     }
 
 

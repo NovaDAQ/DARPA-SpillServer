@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="copyright" content="{{ copyright }}">
+<title>Sources &mdash; DARPA Spill Information Server</title>
+<link rel="stylesheet" href="{{ root_path }}/static/spillserver.css">
+</head>
+<body>
+<header>
+  <div class="masthead">
+    <div class="masthead-text">
+      <h1>DARPA Spill Information Server</h1>
+      <p class="sub">
+        Sources &middot; v{{ version }}
+        &middot; <a href="{{ root_path }}/">query</a>
+        &middot; <a href="{{ root_path }}/docs">API docs</a>
+        &middot; <a href="{{ root_path }}/api/status">status</a>
+        {% if auth_enabled %}&middot; <a href="{{ root_path }}/auth/whoami">account</a>{% endif %}
+        &middot; <a href="{{ bug_report_url }}" target="_blank" rel="noopener noreferrer"
+                    >report a bug</a>
+      </p>
+    </div>
+    <a class="logo" href="{{ project_url }}" target="_blank" rel="noopener noreferrer"
+       title="NOvA DAQ &mdash; DARPA-SpillServer on GitHub">
+      <img src="{{ root_path }}/static/novadaq-logo.png"
+           alt="NOvA DAQ" width="256" height="256">
+    </a>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main>
+<form id="admin" autocomplete="off">
+  <fieldset>
+    <legend>Admin access</legend>
+    <p id="admin-state" class="hint">Checking whether this server accepts changes&hellip;</p>
+    <div id="token-row" hidden>
+      <label>Admin token
+        <input type="password" id="token" autocomplete="off"
+               placeholder="contents of admin.token_file">
+      </label>
+      <div class="actions">
+        <button type="submit">Unlock editing</button>
+        <button type="button" id="forget">Forget token</button>
+      </div>
+    </div>
+  </fieldset>
+</form>
+
+<section>
+  <p id="summary" class="summary">Loading sources&hellip;</p>
+  <div class="tablewrap">
+    <table id="sources">
+      <thead>
+        <tr>
+          <th>Source</th><th>Recording</th><th>URL</th><th>Ingest</th>
+          <th>Events</th><th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <p class="hint">
+    Changes apply immediately and are kept across restarts. A changed source
+    shows what the configuration file says beneath it; <em>Reset</em> goes
+    back to that. Adding or removing a source is done in the configuration
+    file, followed by a restart.
+  </p>
+</section>
+</main>
+
+<footer>
+  <p>
+    NOvA DAQ &middot;
+    <a href="{{ project_url }}" target="_blank" rel="noopener noreferrer"
+       >DARPA-SpillServer</a>
+    &middot; v{{ version }}
+  </p>
+  <p class="copyright">{{ copyright }}</p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROOT = {{ root_path | tojson }};
+  var TOKEN_KEY = "darpa-spill-admin-token";
+  var tbody = document.querySelector("#sources tbody");
+  var summary = document.getElementById("summary");
+  var banner = document.getElementById("banner");
+  var adminState = document.getElementById("admin-state");
+  var tokenRow = document.getElementById("token-row");
+  var tokenInput = document.getElementById("token");
+
+  var admin = {enabled: false, header: "X-Admin-Token", unlocked: false};
+  var rows = {};   // source name -> {tr, url input, ...}
+
+  // The token is kept for this tab only. Storage can be unavailable (private
+  // windows, blocked site data), so every access is guarded.
+  function loadToken() {
+    try { return window.sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+  }
+  function saveToken(value) {
+    try {
+      if (value) { window.sessionStorage.setItem(TOKEN_KEY, value); }
+      else { window.sessionStorage.removeItem(TOKEN_KEY); }
+    } catch (e) { /* the token then lasts only until the page is left */ }
+  }
+  var token = loadToken();
+
+  function headers(extra) {
+    var h = {"Accept": "application/json"};
+    if (token) { h[admin.header] = token; }
+    Object.keys(extra || {}).forEach(function (k) { h[k] = extra[k]; });
+    return h;
+  }
+
+  function errorText(body, response) {
+    var detail = (body && body.detail) || body || {};
+    var text = detail.error || (typeof detail === "string" ? detail : response.statusText);
+    if (detail.hint) { text += " " + detail.hint; }
+    return text;
+  }
+
+  function call(method, path, payload) {
+    var options = {method: method, headers: headers(
+      payload ? {"Content-Type": "application/json"} : null)};
+    if (payload) { options.body = JSON.stringify(payload); }
+    return fetch(ROOT + path, options).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok) { throw new Error(errorText(body, response)); }
+        return body;
+      });
+    });
+  }
+
+  function say(message, isError) {
+    banner.textContent = message;
+    banner.hidden = !message;
+    banner.dataset.kind = isError ? "error" : "info";
+  }
+
+  function when(seconds) {
+    if (!seconds) { return ""; }
+    return new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  }
+
+  function ingestText(entry, ingestEnabled) {
+    if (!entry.enabled) { return "disabled"; }
+    if (!ingestEnabled) { return "ingest off for this server"; }
+    var s = entry.ingest || {};
+    if (!s.running) { return "stopped"; }
+    var parts = [];
+    if (s.consecutive_errors) {
+      parts.push("failing (" + s.consecutive_errors + "): " + s.last_error);
+    } else if (s.last_success_at) {
+      parts.push("ok, last poll " + when(s.last_success_at));
+    } else {
+      parts.push("starting");
+    }
+    if (s.degraded) { parts.push("degraded: sampling via " + s.route); }
+    return parts.join(" · ");
+  }
+
+  function setEditable() {
+    Object.keys(rows).forEach(function (name) {
+      var row = rows[name];
+      [row.toggle, row.url, row.save, row.reset].forEach(function (el) {
+        el.disabled = !admin.unlocked;
+      });
+    });
+  }
+
+  function buildRow(entry) {
+    var tr = document.createElement("tr");
+    function td() { var c = document.createElement("td"); tr.appendChild(c); return c; }
+
+    var nameCell = td();
+    nameCell.textContent = entry.name;
+
+    var toggleCell = td();
+    var toggleLabel = document.createElement("label");
+    toggleLabel.className = "chip";
+    var toggle = document.createElement("input");
+    toggle.type = "checkbox";
+    var toggleText = document.createElement("span");
+    toggleLabel.appendChild(toggle);
+    toggleLabel.appendChild(toggleText);
+    toggleCell.appendChild(toggleLabel);
+
+    var urlCell = td();
+    var url = document.createElement("input");
+    url.type = "text";
+    url.spellcheck = false;
+    url.setAttribute("aria-label", "URL of " + entry.name);
+    var configured = document.createElement("p");
+    configured.className = "hint";
+    urlCell.appendChild(url);
+    urlCell.appendChild(configured);
+
+    var ingestCell = td();
+    ingestCell.style.whiteSpace = "normal";
+    var eventsCell = td();
+
+    var actions = td();
+    var save = document.createElement("button");
+    save.type = "button";
+    save.textContent = "Save URL";
+    var reset = document.createElement("button");
+    reset.type = "button";
+    reset.textContent = "Reset";
+    reset.title = "Return to the configuration file's settings";
+    actions.appendChild(save);
+    actions.appendChild(document.createTextNode(" "));
+    actions.appendChild(reset);
+
+    var row = {tr: tr, toggle: toggle, toggleText: toggleText, url: url,
+               configured: configured, ingest: ingestCell, events: eventsCell,
+               save: save, reset: reset, dirty: false};
+
+    url.addEventListener("input", function () { row.dirty = true; });
+    url.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); save.click(); }
+    });
+
+    toggle.addEventListener("change", function () {
+      var wanted = toggle.checked;
+      toggle.disabled = true;
+      call("PATCH", "/api/sources/" + encodeURIComponent(entry.name), {enabled: wanted})
+        .then(function () {
+          say(entry.name + (wanted ? " enabled." : " disabled."), false);
+          refresh();
+        })
+        .catch(function (error) {
+          toggle.checked = !wanted;
+          say(entry.name + ": " + error.message, true);
+        })
+        .then(function () { toggle.disabled = !admin.unlocked; });
+    });
+
+    save.addEventListener("click", function () {
+      var value = url.value.trim();
+      if (!window.confirm("Point " + entry.name + " at " + value + "?\n\n" +
+          "New events from that TDU will be archived under the name " + entry.name + ".")) {
+        return;
+      }
+      call("PATCH", "/api/sources/" + encodeURIComponent(entry.name), {base_url: value})
+        .then(function () {
+          row.dirty = false;
+          say(entry.name + " now records from " + value + ".", false);
+          refresh();
+        })
+        .catch(function (error) { say(entry.name + ": " + error.message, true); });
+    });
+
+    reset.addEventListener("click", function () {
+      call("POST", "/api/sources/" + encodeURIComponent(entry.name) + "/reset")
+        .then(function () {
+          row.dirty = false;
+          say(entry.name + " is back to the configuration file's settings.", false);
+          refresh();
+        })
+        .catch(function (error) { say(entry.name + ": " + error.message, true); });
+    });
+
+    tbody.appendChild(tr);
+    rows[entry.name] = row;
+    return row;
+  }
+
+  function update(row, entry, ingestEnabled) {
+    row.toggle.checked = entry.enabled;
+    row.toggleText.textContent = entry.enabled ? "on" : "off";
+    // Leave a URL the user is still editing alone.
+    if (!row.dirty && document.activeElement !== row.url) {
+      row.url.value = entry.base_url;
+    }
+    if (entry.overridden) {
+      row.configured.textContent = "Changed" +
+        (entry.updated_by ? " by " + entry.updated_by : "") +
+        (entry.updated_at ? " at " + when(entry.updated_at) : "") +
+        ". Configuration file: " + entry.configured.base_url + ", enabled.";
+    } else {
+      row.configured.textContent = "As in the configuration file.";
+    }
+    row.reset.hidden = !entry.overridden;
+    row.ingest.textContent = ingestText(entry, ingestEnabled);
+    row.events.textContent = entry.events.toLocaleString();
+  }
+
+  function refresh() {
+    return fetch(ROOT + "/api/sources", {headers: {"Accept": "application/json"}})
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        admin.enabled = data.admin.enabled;
+        admin.header = data.admin.token_header;
+        data.sources.forEach(function (entry) {
+          update(rows[entry.name] || buildRow(entry), entry, data.ingest_enabled);
+        });
+        var parts = [data.sources.length + " source(s)"];
+        if (!data.ingest_enabled) { parts.push("ingest is disabled on this server"); }
+        if (data.archived_only.length) {
+          parts.push("also in the archive but no longer configured: " +
+                     data.archived_only.join(", "));
+        }
+        summary.textContent = parts.join(" · ");
+        setEditable();
+      })
+      .catch(function (error) { summary.textContent = "Error: " + error.message; });
+  }
+
+  function describeAdmin() {
+    if (!admin.enabled) {
+      adminState.textContent = "This server does not accept changes from this page. " +
+        "To allow them, set admin.token_file in its configuration and restart it.";
+      tokenRow.hidden = true;
+      return;
+    }
+    tokenRow.hidden = false;
+    adminState.textContent = admin.unlocked
+      ? "Editing is unlocked (" + admin.who + ")."
+      : "Viewing only. Enter the admin token to make changes.";
+  }
+
+  function unlock() {
+    return call("GET", "/api/admin/check")
+      .then(function (body) {
+        admin.unlocked = true;
+        admin.who = body.as;
+        say("", false);
+      })
+      .catch(function (error) {
+        admin.unlocked = false;
+        if (token) { say(error.message, true); }
+      })
+      .then(function () { describeAdmin(); setEditable(); });
+  }
+
+  document.getElementById("admin").addEventListener("submit", function (event) {
+    event.preventDefault();
+    token = tokenInput.value.trim();
+    saveToken(token);
+    tokenInput.value = "";
+    unlock();
+  });
+  document.getElementById("forget").addEventListener("click", function () {
+    token = "";
+    saveToken("");
+    admin.unlocked = false;
+    describeAdmin();
+    setEditable();
+  });
+
+  refresh().then(function () {
+    describeAdmin();
+    // Signed-in SSO users in an admin group are allowed without a token.
+    if (admin.enabled) { unlock(); }
+  });
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

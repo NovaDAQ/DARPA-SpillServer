@@ -20,7 +20,9 @@ def test_defaults_are_usable_without_any_configuration():
     config = load_config(argv=[], environ={}, search_paths=[])
     config.validate()
     assert config.server.port == 8080
-    assert config.tdu.base_url.startswith("http://")
+    sources = config.tdu.resolved_sources()
+    assert [s.base_url for s in sources] == ["http://tdu-near-master-ppc-01:8080"]
+    assert sources[0].name == "tdu-near-master-ppc-01"
     assert config.auth.enabled is False, "Design.md: start with no authentication"
 
 
@@ -156,6 +158,27 @@ def test_invalid_values_are_rejected(argv, fragment):
     with pytest.raises(ConfigError) as excinfo:
         load_config(argv=argv, environ={}, search_paths=[])
     assert fragment in str(excinfo.value)
+
+
+@pytest.mark.parametrize("argv", [
+    ["--ssl-certfile", "/etc/pki/spill.crt"],
+    ["--ssl-keyfile", "/etc/pki/spill.key"],
+])
+def test_tls_needs_both_certificate_and_key(argv):
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(argv=argv, environ={}, search_paths=[])
+    assert "ssl_certfile" in str(excinfo.value)
+
+
+def test_tls_settings_select_https():
+    config = load_config(
+        argv=["--ssl-certfile", "/etc/pki/spill.crt"],
+        environ={"DARPA_SPILL_SERVER_SSL_KEYFILE": "/etc/pki/spill.key"},
+        search_paths=[],
+    )
+    assert config.server.ssl_keyfile == "/etc/pki/spill.key"
+    assert config.server.scheme == "https"
+    assert Config().server.scheme == "http"
 
 
 def test_max_limit_below_default_limit_is_rejected():

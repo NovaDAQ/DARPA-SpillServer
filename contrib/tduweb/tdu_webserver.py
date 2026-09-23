@@ -66,8 +66,11 @@ another port, pass it as the first argument or set ``TDU_WEB_PORT``;
 
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 
 from bottle import route, run, request, response
 
@@ -91,6 +94,21 @@ DEFAULT_LIMIT = 5000
 
 #: One second of the NOvA 64 MHz clock, in ticks.
 ONE_SECOND = 64000000
+
+#: Decoded SpillType values for the NuMI signals. kNuMI is 0, which is also
+#: what an unused ring slot decodes to -- see the note in spill_history().
+NUMI_TYPE = 0
+NUMI_TCLK_TYPE = 2
+
+#: Seconds a helper command may run before it is killed.  bottle's default
+#: server is single-threaded, so a command that never returns takes down every
+#: route, not just the one that invoked it.  Nothing here may block without a
+#: bound.
+COMMAND_TIMEOUT = 20.0
+
+#: Bytes of command output to keep.  A full-ring dump on the TDU's PowerPC can
+#: be very large, and reading it all would exhaust memory before it finished.
+MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 
 #: Matches one CSV row of DumpSpillHistory output:
 #:     "   3,    10733, 0x0780f1e2c3d4e5f6,  33778458638680249    4266769"
@@ -118,26 +136,59 @@ _SHM_FAILURE_MARKERS = (
 )
 
 
-def _run(command):
-    """Run *command* and return its stdout as text.
+def _run(command, timeout=COMMAND_TIMEOUT):
+    """Run *command* and return its stdout as text, never blocking forever.
+
+    Two properties matter more than they look, because bottle's default server
+    is single-threaded: a command that hangs takes down every route, and output
+    large enough to fill a pipe buffer hangs the command itself.
+
+    So stdout goes to a temporary file rather than a pipe -- there is no buffer
+    to fill -- and the process is polled against a deadline and killed if it
+    passes it. Python 2.5's subprocess has no timeout argument, so the wait is
+    written out by hand.
 
     The exit status is deliberately ignored, matching the original
     tdu_webserver.py. It is not a success indicator for these tools:
     DumpSpillHistory ends ``return 1;`` on the normal path (see
-    SHM_Utilities/cxx/src/DumpSpillHistory.cc lines 420 and 472), so treating
-    a non-zero status as failure would reject every successful call. Real
+    SHM_Utilities/cxx/src/DumpSpillHistory.cc lines 420 and 472), so treating a
+    non-zero status as failure would reject every successful call. Real
     failures are detected from the output instead, by _check_output below.
-
-    subprocess.Popen is used rather than check_output so that this file keeps
-    working on the Python 2.5 the TDUs carry.
     """
-    process = subprocess.Popen(command, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-    out, err = process.communicate()
+    out_file = tempfile.TemporaryFile()
+    err_file = tempfile.TemporaryFile()
+    try:
+        process = subprocess.Popen(command, stdout=out_file, stderr=err_file)
+
+        deadline = time.time() + timeout
+        while process.poll() is None:
+            if time.time() >= deadline:
+                _terminate(process)
+                raise RuntimeError(
+                    '%s did not finish within %.0f s and was killed. A full-ring '
+                    'dump can take far longer than this; narrow the request with '
+                    'since/until or types.' % (' '.join(command), timeout))
+            time.sleep(0.02)
+
+        out_file.seek(0)
+        out = out_file.read(MAX_OUTPUT_BYTES)
+        truncated = len(out_file.read(1)) > 0
+        err_file.seek(0)
+        err = err_file.read(64 * 1024)
+    finally:
+        out_file.close()
+        err_file.close()
+
     if not isinstance(out, str):
         out = out.decode('utf-8', 'replace')
     if not isinstance(err, str):
         err = err.decode('utf-8', 'replace')
+
+    if truncated:
+        raise RuntimeError(
+            '%s produced more than %d bytes of output. That normally means the '
+            'whole shared-memory segment is being dumped; narrow the request '
+            'with since/until or types.' % (' '.join(command), MAX_OUTPUT_BYTES))
 
     # Nothing on stdout and something on stderr is the one unambiguous
     # failure: the tool produced no result and said why.
@@ -145,6 +196,19 @@ def _run(command):
         raise RuntimeError('%s produced no output: %s' % (
             ' '.join(command), err.strip()))
     return out
+
+
+def _terminate(process):
+    """End *process*, politely then not."""
+    for signal_number in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(process.pid, signal_number)
+        except OSError:
+            return
+        for _ in range(25):
+            if process.poll() is not None:
+                return
+            time.sleep(0.02)
 
 
 def _check_output(text, command):
@@ -185,6 +249,10 @@ def _parse_history(text):
         if match is None:
             continue
         time_ticks = int(match.group('time'))
+        # A zeroed ring slot parses as a type-0 event at time 0. It is not an
+        # event, it is unused space, and it must never reach a client.
+        if time_ticks == 0:
+            continue
         events.append({
             'Type': int(match.group('type')),
             'Number': int(match.group('number')),
@@ -430,10 +498,23 @@ def spill_history():
                 {'error': 'types must be comma-separated integers, got %r'
                           % types_param})
 
-    # Every selection flag is passed so the utility emits all stored events;
-    # filtering happens here, where it is cheap to change.
+    # --numi is NOT passed by default, and that is not an oversight.
+    #
+    # DumpSpillHistory decides what to print by switching on evt_type, and
+    # kNuMI is the first member of the SpillType enum, so its value is 0. An
+    # unused slot in the shared-memory ring is all zeros, which therefore
+    # matches `case kNuMI` -- and with --numi set, every empty slot in the
+    # whole segment is printed, each one paying for a Boost date conversion.
+    # On the TDU's PowerPC that does not finish in any useful time, and with
+    # bottle's single-threaded server it takes down every other route with it.
+    #
+    # So NuMI is requested only when the caller actually asks for it by type,
+    # and even then _run's timeout and output cap bound the damage.
     command = [DUMP_SPILL_HISTORY, '-m', MEMORY_SEGMENT,
-               '--booster', '--numi', '--onehertz', '--tcr']
+               '--booster', '--onehertz', '--tcr']
+    if keep_types is not None and (NUMI_TYPE in keep_types
+                                   or NUMI_TCLK_TYPE in keep_types):
+        command.append('--numi')
     try:
         raw = _check_output(_run(command), command)
     except (RuntimeError, OSError), exc:

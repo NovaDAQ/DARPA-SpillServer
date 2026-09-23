@@ -61,6 +61,11 @@ Accelerator signal such as
 .BR '$74' .
 May be repeated; repeats form a union.
 .TP
+.BI \-\-source " NAME"
+Only events recorded from this TDU source, e.g.
+.BR tdu\-near\-master\-ppc\-02 .
+May be repeated or comma-separated. Default: every source.
+.TP
 .BI \-\-type " TYPE"
 Decoded spill type, by name
 .RB ( NUMI ", " BNB_TCLK )
@@ -132,7 +137,12 @@ so adjacent queries tile without reporting an event twice.
 .BR gps ", " gps_seconds ", " gps_nsec ", " gps_psec ", " gps_week ", "
 .BR gps_tow ", " gps_tow_exact ", " spill_type ", " spill_type_name ", "
 .BR signal ", " signal_name ", " event_number ", " delta ", " pps_offset ", "
-.BR source .
+.BR source ", " route .
+.PP
+.B source
+is the name of the TDU the event was read from;
+.B route
+is the TDU route that supplied it.
 .PP
 Prefer
 .B gps

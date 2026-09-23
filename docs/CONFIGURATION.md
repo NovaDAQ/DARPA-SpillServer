@@ -30,7 +30,7 @@ of these that exists is used:
 `DARPA_SPILL_<SECTION>_<KEY>`, upper case:
 
 ```console
-$ export DARPA_SPILL_TDU_BASE_URL=http://tdu-far-master-ppc-01:8080
+$ export DARPA_SPILL_TDU_SOURCES=http://tdu-far-master-ppc-01:8080,http://tdu-far-master-ppc-02:8080
 $ export DARPA_SPILL_STORAGE_PATH=/var/lib/darpa-spillserver/spills.db
 $ export DARPA_SPILL_QUERY_TIMEZONE=America/Chicago
 ```
@@ -61,19 +61,54 @@ the archive has already been pruned — or has grown without bound.
 | `port` | `8080` | |
 | `root_path` | `""` | mount prefix behind a proxy, e.g. `/spills` |
 | `cors_origins` | `["*"]` | narrow this once authentication is on |
+| `ssl_certfile` | `""` | PEM certificate, intermediates appended; setting it serves HTTPS |
+| `ssl_keyfile` | `""` | PEM private key; required whenever `ssl_certfile` is set |
 
-CLI: `--host`, `--port`, `--root-path`, `--cors-origin` (repeatable).
+CLI: `--host`, `--port`, `--root-path`, `--cors-origin` (repeatable),
+`--ssl-certfile`, `--ssl-keyfile`.
+
+Setting one of the two TLS files without the other is a configuration error.
+Both files are opened at startup, so a missing or unreadable key stops the
+server with a message naming it. `--print-config` does not open them, so it
+works for users who can't read the key.
 
 ### `tdu`
 
 | Key | Default | Notes |
 |---|---|---|
-| `base_url` | `http://tdu-near-master-ppc-01:8080` | reachable only on the DAQ network |
+| `sources` | `[]` | TDUs to record from, each `URL` or `NAME=URL`; see below |
+| `base_url` | `""` | a single TDU, the pre-`sources` form; cannot be combined with `sources` |
 | `timeout` | `10.0` | per-request seconds |
 | `retries` | `2` | retries per failed request |
 | `retry_backoff` | `0.5` | seconds before the first retry; doubles each time |
 
-CLI: `--tdu-url`, `--tdu-timeout`, `--tdu-retries`.
+CLI: `--tdu-source` (repeatable), `--tdu-url`, `--tdu-timeout`, `--tdu-retries`.
+
+With neither `sources` nor `base_url` set, the server records from
+`http://tdu-near-master-ppc-01:8080`.
+
+Each source is polled independently, and every event it supplies is tagged
+with the source's **name**. Queries select by that name (`source=` on the API,
+`--source` on `darpa-spill-query`), and leaving it out returns every source. A
+bare URL is named after its host:
+
+```yaml
+tdu:
+  sources:
+    - http://tdu-near-master-ppc-01:8080          # named tdu-near-master-ppc-01
+    - near-02=http://tdu-near-master-ppc-02:8080  # named near-02
+```
+
+Names are 1–64 letters, digits, `.`, `_` or `-`. The same name or URL listed
+twice is an error. A name is permanent once events are archived under it, and
+renaming a source starts a new history. To move a source to a replacement TDU,
+keep the name and change the URL.
+
+Sources can be enabled, disabled or given a new URL while the server runs, from
+the `/config` page or `PATCH /api/sources/{name}`. Changes are saved in the
+archive, survive restarts, and take precedence over this file until the source
+is reset. The server logs a warning at startup for each such change. Adding or
+removing a source is done here, followed by a restart.
 
 ### `ingest`
 
@@ -162,6 +197,23 @@ CLI: `--auth`, `--no-auth`, `--oidc-issuer`, `--oidc-client-id`,
 Enabling auth without its settings fails at startup, naming what is missing —
 the server will not come up unprotected after being asked for SSO.
 
+### `admin`
+
+Who may change sources at runtime. By default nobody can, and `/config` is
+read-only.
+
+| Key | Default | Notes |
+|---|---|---|
+| `token_file` | `""` | file holding the admin token; `openssl rand -hex 32` |
+| `token` | `""` | the token itself; prefer `token_file` |
+| `allowed_groups` | `[]` | with `auth.enabled`, signed-in members may edit without the token |
+
+CLI: `--admin-token-file`.
+
+The token is sent in the `X-Admin-Token` header, and the `/config` page asks
+for it. It is never put in a cookie, so a page on another site cannot get a
+browser to send it. An unreadable `token_file` stops the server at startup.
+
 ### `logging`
 
 | Key | Default | Notes |
@@ -185,7 +237,10 @@ server:
   port: 8080
 
 tdu:
-  base_url: http://tdu-near-master-ppc-01:8080
+  sources:
+    - http://tdu-near-master-ppc-01:8080
+    - http://tdu-near-master-ppc-02:8080
+    - http://tdu-near-master-ppc-03:8080
 
 ingest:
   enabled: true
@@ -198,6 +253,9 @@ storage:
 
 query:
   timezone: America/Chicago
+
+admin:
+  token_file: /etc/darpa-spillserver/admin_token
 
 logging:
   level: INFO

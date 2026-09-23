@@ -352,7 +352,8 @@ def test_query_page_links_a_bug_report(client, config):
     query = _bug_report_query(body)
     assert query["template"] == [BUG_REPORT_TEMPLATE]
     assert query["version"] == [__version__]
-    assert query["tdu"] == [config.tdu.base_url]
+    assert query["tdu"] == [", ".join(
+        s.base_url for s in config.tdu.resolved_sources())]
     assert query["surface"] == [BUG_REPORT_SURFACE]
 
 

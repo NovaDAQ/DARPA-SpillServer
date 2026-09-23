@@ -24,7 +24,7 @@ body:
     id: tdu
     attributes:
       label: TDU
-      description: The base URL shown in the masthead, e.g. http://tdu-near-master-ppc-01:8080
+      description: The TDU source URLs this server records from, listed on its /config page, e.g. http://tdu-near-master-ppc-01:8080
   - type: dropdown
     id: surface
     attributes:

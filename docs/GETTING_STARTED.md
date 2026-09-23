@@ -96,6 +96,10 @@ $ curl -s http://tdu-near-master-ppc-01:8080/tcr_status
 Nothing back means either you are off the DAQ network or `TCRMonitor` is not
 running on the TDU — check `http://tdu-near-master-ppc-01:8080/tcr_running`.
 
+To record from more than one TDU, list each under `tdu.sources` (see
+[CONFIGURATION](CONFIGURATION.md#tdu)); `config/spillserver-near.yaml` lists
+all three Near Detector master TDUs. Check each one the same way.
+
 ## 5. Run it
 
 ```console

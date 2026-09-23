@@ -131,7 +131,7 @@ legend { padding: 0 6px; font-weight: 600; font-size: 0.86rem; color: var(--acce
 
 label { display: block; margin-bottom: 10px; font-size: 0.86rem; color: var(--muted); }
 
-input[type="text"], input[type="number"], select {
+input[type="text"], input[type="password"], input[type="number"], select {
   display: block;
   width: 100%;
   margin-top: 3px;
@@ -237,3 +237,15 @@ footer {
 
 footer p { margin: 0 0 4px; }
 footer .copyright { font-size: 0.76rem; }
+
+/* The sources page: a failed change reads as an error, not a caveat. */
+.banner[data-kind="info"] {
+  border-color: var(--accent-soft);
+  background: var(--head);
+  color: var(--ink);
+}
+#sources td { vertical-align: top; }
+#sources input[type="text"] { min-width: 280px; margin-top: 0; }
+#sources .hint { white-space: normal; max-width: 420px; }
+#sources .chip { display: inline-flex; }
+button:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; }

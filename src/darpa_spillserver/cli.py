@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
 from . import __version__
@@ -54,13 +55,35 @@ def run(config: Config) -> int:
         return 1
 
     from .app import create_app
+    from .storage import StoreError
 
-    app = create_app(config)
+    # Check the TLS files here rather than in Config.validate(), so that
+    # --print-config still works for someone who cannot read the private key.
+    # uvicorn would otherwise fail on them with a bare traceback.
+    ssl_options = {}
+    if config.server.ssl_certfile:
+        for key in ("ssl_certfile", "ssl_keyfile"):
+            path = Path(getattr(config.server, key)).expanduser()
+            try:
+                path.open("rb").close()
+            except OSError as exc:
+                print("error: server.{}: cannot read {}: {}".format(
+                    key, path, exc.strerror), file=sys.stderr)
+                return 2
+            ssl_options[key] = str(path)
+
+    try:
+        app = create_app(config)
+    except (ConfigError, StoreError) as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
 
     log.info(
-        "serving on http://%s:%d%s (archive: %s, TDU: %s)",
-        config.server.host, config.server.port, config.server.root_path or "",
-        config.storage.path, config.tdu.base_url,
+        "serving on %s://%s:%d%s (archive: %s, sources: %s)",
+        config.server.scheme, config.server.host, config.server.port,
+        config.server.root_path or "", config.storage.path,
+        ", ".join("{}={}".format(s.name, s.base_url)
+                  for s in config.tdu.resolved_sources()),
     )
     if not config.auth.enabled:
         log.warning(
@@ -74,6 +97,7 @@ def run(config: Config) -> int:
         port=config.server.port,
         log_level=config.logging.level.lower(),
         access_log=config.logging.level.upper() == "DEBUG",
+        **ssl_options,
     )
     return 0
 

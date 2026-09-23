@@ -65,11 +65,28 @@ Mount prefix when running behind a reverse proxy, e.g. \fI/spills\fR.
 .TP
 .BI \-\-cors\-origin " ORIGIN"
 Allowed CORS origin. May be repeated.
-.SS TDU data source
+.TP
+.BI \-\-ssl\-certfile " FILE"
+PEM certificate, with any intermediates appended. Giving it serves HTTPS
+instead of HTTP; \fB\-\-ssl\-keyfile\fR is then required.
+.TP
+.BI \-\-ssl\-keyfile " FILE"
+PEM private key for \fB\-\-ssl\-certfile\fR.
+.SS TDU data sources
+.TP
+.BI \-\-tdu\-source " [NAME=]URL"
+A TDU to record from. May be repeated, one per TDU. Every event is tagged
+with the source's
+.IR NAME ,
+which defaults to the URL's host, e.g.
+.BR tdu\-near\-master\-ppc\-02 .
+Default: one source,
+\fBhttp://tdu\-near\-master\-ppc\-01:8080\fR.
 .TP
 .BI \-\-tdu\-url " URL"
-Base URL of the TDU's web server. Default
-\fBhttp://tdu\-near\-master\-ppc\-01:8080\fR.
+A single TDU, the form used before
+.B \-\-tdu\-source
+existed. Cannot be combined with it.
 .TP
 .BI \-\-tdu\-timeout " SECONDS"
 Per-request timeout. Default \fB10.0\fR.
@@ -130,6 +147,16 @@ configuration file.
 .TP
 .BI \-\-oidc\-redirect\-url " URL"
 Redirect URI, which must match the one registered with the provider.
+.SS Runtime configuration
+.TP
+.BI \-\-admin\-token\-file " FILE"
+File holding the token that lets the
+.I /config
+page and
+.I PATCH /api/sources/{name}
+enable, disable, and re-point sources while the server runs. Without it,
+sources can be changed only in the configuration file. Changes made at runtime
+are kept in the archive and take precedence over the file until reset.
 .SS Logging
 .TP
 .BR \-l ", " \-\-log\-level " " \fILEVEL\fR

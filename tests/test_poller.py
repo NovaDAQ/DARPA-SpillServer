@@ -27,6 +27,9 @@ SECOND = TICKS_PER_SECOND
 #: inside the default hour.
 ANCHOR_OFFSET = 600 * SECOND
 
+#: The name a Poller built without an explicit source polls under.
+DEFAULT_SOURCE = "tdu-near-master-ppc-01"
+
 
 class StubClient:
     """A TDUClient stand-in that records what was asked of it."""
@@ -70,7 +73,8 @@ def make_events(count, start=None, step=SECOND):
             spill_type=SpillType.ACCEL_ONE_HZ_TCLK,
             signal_code=0x8F,
             event_number=index,
-            source="spill_history",
+            source=DEFAULT_SOURCE,
+            route="spill_history",
         )
         for index in range(count)
     ]
@@ -255,7 +259,8 @@ async def test_ingest_log_records_each_pass(config, store):
 
     assert len(rows) == 1
     assert rows[0]["inserted"] == 3
-    assert rows[0]["source"] == HISTORY_ROUTE
+    assert rows[0]["route"] == HISTORY_ROUTE
+    assert rows[0]["source"] == poller.source.name
 
 
 async def test_default_events_sit_inside_the_cold_start_backfill(config, store):

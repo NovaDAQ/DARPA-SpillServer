@@ -19,11 +19,19 @@ BASE = 33778458638680249
 #: One second of the NOvA 64 MHz clock.
 SECOND = 64000000
 
+#: The two TDUs the populated archive holds events from.
+SOURCE_A = "tdu-near-master-ppc-01"
+SOURCE_B = "tdu-near-master-ppc-02"
+
 
 @pytest.fixture
 def config(tmp_path):
     cfg = Config()
     cfg.storage.path = str(tmp_path / "spills.db")
+    cfg.tdu.sources = [
+        "http://tdu-near-master-ppc-01:8080",
+        "http://tdu-near-master-ppc-02:8080",
+    ]
     cfg.ingest.enabled = False
     cfg.query.default_limit = 100
     cfg.query.max_limit = 1000
@@ -41,6 +49,9 @@ def store(config):
 def populated(store):
     """An archive holding a minute of 1 Hz events and a few NuMI spills.
 
+    The 1 Hz events come from SOURCE_A and the NuMI spills from SOURCE_B, both
+    of which the ``config`` fixture lists as sources.
+
     The 1 Hz events carry raw signal codes, as a patched TDU would supply;
     the NuMI ones do not, standing in for records ingested through the legacy
     route where the hardware preserved only the decoded type.
@@ -54,7 +65,8 @@ def populated(store):
             event_word=0x018F,
             event_number=1000 + index,
             delta=SECOND,
-            source="spill_history",
+            source=SOURCE_A,
+            route="spill_history",
         ))
     for index in range(5):
         events.append(SpillEvent(
@@ -62,7 +74,8 @@ def populated(store):
             spill_type=SpillType.NUMI,
             signal_code=-1,
             event_number=2000 + index,
-            source="tcr_status",
+            source=SOURCE_B,
+            route="tcr_status",
         ))
     store.insert_events(events)
     return store

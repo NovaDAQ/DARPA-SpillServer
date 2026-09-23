@@ -61,7 +61,11 @@ is synchronous and thread-safe through per-thread connections; async callers
 should wrap calls in
 .IR asyncio.to_thread .
 Inserts are idempotent on
-.RI ( nova_time ", " spill_type ", " signal_code ).
+.RI ( nova_time ", " spill_type ", " signal_code ", " source ).
+Opening an archive from before sources existed migrates it in place, tagging
+its events with the
+.I legacy_source
+name passed to the constructor.
 .SS darpa_spillserver.tdu_client
 An async HTTP client for the TDU's embedded web server, speaking both the
 legacy single-event routes and the bulk
@@ -70,7 +74,11 @@ route, and tolerating the malformed JSON that
 .B DumpSpillHistory
 emits.
 .SS darpa_spillserver.poller
-The background ingest loop.
+The background ingest loops.
+.B Poller
+polls one source;
+.B IngestManager
+runs one per enabled source and applies runtime changes to them.
 .SS darpa_spillserver.formats
 CSV and JSON rendering, as streaming generators.
 .SS darpa_spillserver.config

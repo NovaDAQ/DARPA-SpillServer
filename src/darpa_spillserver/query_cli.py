@@ -7,6 +7,7 @@ node, and because a shell pipeline is the natural home for a CSV.
 
     darpa-spill-query --signal '$74' --start 2026-07-01 --end today
     darpa-spill-query --signal '$8f' --start 09:15 --end 11:34 --format csv
+    darpa-spill-query --source tdu-near-master-ppc-02 --last
     darpa-spill-query --server http://localhost:8080 --last
 
 Quote ``$74`` in a shell, or write it as ``0x74`` or ``74``: an unquoted
@@ -25,7 +26,7 @@ from .config import ConfigError, load_config
 from .formats import COLUMNS, event_row, iter_csv, iter_json
 from .novatime import NovaTimeError, convert, get_timezone, parse_range
 from .signals import SIGNALS, parse_signal, parse_spill_type, signals_for_type
-from .storage import SpillStore
+from .storage import SpillStore, StoreError
 
 __all__ = ["main"]
 
@@ -65,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--type", action="append", metavar="TYPE",
                            dest="types",
                            help="decoded spill type, by name or number; repeatable")
+    selection.add_argument("--source", action="append", metavar="NAME",
+                           dest="sources",
+                           help="only events from this TDU source; repeatable "
+                                "or comma-separated. Default: every source")
     selection.add_argument("--last", action="store_true",
                            help="show only the most recent matching event")
     selection.add_argument("--limit", type=int, metavar="N",
@@ -109,21 +114,22 @@ def _list_signals() -> int:
 
 def _print_table(events, stream) -> None:
     """Render events as an aligned text table."""
-    header = "{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}".format(
-        "NOVA TIME", "UTC", "SIGNAL", "TYPE", "GPS TIME", "DELTA")
+    header = "{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}  {}".format(
+        "NOVA TIME", "UTC", "SIGNAL", "TYPE", "GPS TIME", "DELTA", "SOURCE")
     print(header, file=stream)
     print("-" * len(header), file=stream)
 
     count = 0
     for event in events:
         row = event_row(event)
-        print("{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}".format(
+        print("{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}  {}".format(
             row["nova_time"],
             row["utc"][:27],
             row["signal"] or "-",
             row["spill_type_name"],
             row["gps"],
             row["delta"] if row["delta"] is not None else "-",
+            row["source"],
         ), file=stream)
         count += 1
 
@@ -149,6 +155,8 @@ def _query_server(args, columns) -> int:
         params.append(("signal", signal))
     for spill_type in args.types or []:
         params.append(("type", spill_type))
+    for name in _source_names(args):
+        params.append(("source", name))
     if args.limit:
         params.append(("limit", str(args.limit)))
     if args.timezone:
@@ -186,6 +194,13 @@ def _query_server(args, columns) -> int:
     return 0
 
 
+def _source_names(args) -> List[str]:
+    names: List[str] = []
+    for text in args.sources or []:
+        names.extend(t.strip() for t in text.split(",") if t.strip())
+    return list(dict.fromkeys(names))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -211,6 +226,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # -- local archive ----------------------------------------------------
     database = args.database
+    legacy_source = None
     if not database:
         try:
             config = load_config(argv=(["-c", args.config] if args.config else []))
@@ -220,6 +236,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         database = config.storage.path
         timezone_name = args.timezone or config.query.timezone
         default_limit = config.query.default_limit
+        legacy_source = config.tdu.resolved_sources()[0].name
     else:
         timezone_name = args.timezone or "UTC"
         default_limit = 10000
@@ -250,10 +267,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
 
-    store = SpillStore(database)
     try:
+        store = SpillStore(database, legacy_source=legacy_source)
+    except StoreError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        sources = _source_names(args)
+        if sources:
+            known = store.source_names()
+            unknown = [name for name in sources if name not in known]
+            if unknown:
+                print("error: no events from source(s) {} in {}\n"
+                      "sources in this archive: {}".format(
+                          ", ".join(unknown), database,
+                          ", ".join(known) or "(none)"), file=sys.stderr)
+                return 2
         if args.last:
-            event = store.latest(spill_types[0] if len(spill_types) == 1 else None)
+            event = store.latest(
+                spill_types[0] if len(spill_types) == 1 else None,
+                sources or None,
+            )
             events = [event] if event is not None else []
         else:
             page = store.query(
@@ -263,6 +297,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 signal_codes=list(dict.fromkeys(signal_codes)) or None,
                 limit=args.limit or default_limit,
                 descending=args.desc,
+                sources=sources or None,
             )
             events = page.events
             if page.truncated:
@@ -285,6 +320,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "end": convert(end_nova).as_dict(),
                     },
                     "database": database,
+                    "sources": sources or ["(all sources)"],
                 }
                 for chunk in iter_json(events, meta=meta, indent=2):
                     stream.write(chunk)

@@ -27,7 +27,8 @@ def make_event(offset=0, signal_code=0x8F, spill_type=SpillType.ACCEL_ONE_HZ_TCL
         event_number=42,
         delta=64000000,
         pps_offset=0,
-        source="spill_history",
+        source="tdu-near-master-ppc-01",
+        route="spill_history",
     )
 
 

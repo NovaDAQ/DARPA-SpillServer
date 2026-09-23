@@ -3,8 +3,10 @@
 Base path `/api`. The generated OpenAPI reference is served live at `/docs`,
 and the raw schema at `/openapi.json`.
 
-Every endpoint is a `GET`. The server never modifies the accelerator data it
-serves, so there is nothing to `POST`.
+Every query endpoint is a `GET`, and the server never modifies the
+accelerator data it serves. The only writes are to its own source
+configuration (`PATCH /api/sources/{name}` and its reset), and they need the
+admin token.
 
 ## Time expressions
 
@@ -68,6 +70,23 @@ saying which signals cannot be told apart.
 Querying by signal matches such records through their decoded type as well, so
 a `$74` query still finds NuMI events stored before raw words were available.
 
+## Sources
+
+The server records from one or more TDUs, and tags every event with the name
+of the source it came from (`tdu.sources` in the configuration). Every query
+endpoint takes `source=`, which is repeatable or comma-separated, and
+restricts the result to those sources. Leave it out for all of them.
+
+```console
+$ curl -s 'http://localhost:8080/api/events?signal=$8f&start=-1h&source=tdu-near-master-ppc-02'
+```
+
+Two TDUs that see the same accelerator event each record it, so an
+all-sources query returns it once per source. An unknown source name is a
+`400` whose hint lists the known ones. A source that was removed from the
+configuration can still be queried by name while its events remain in the
+archive.
+
 ## Endpoints
 
 ### `GET /api/events`
@@ -80,6 +99,7 @@ The main query.
 | `end` | now | range end, exclusive |
 | `signal` | all | signal such as `$74`; repeatable, or comma-separated |
 | `type` | all | decoded type by name or number; repeatable |
+| `source` | all | source (TDU) name; repeatable, or comma-separated |
 | `format` | `json` | `json` or `csv` |
 | `limit` | `query.default_limit` | maximum rows |
 | `offset` | `0` | rows to skip |
@@ -88,6 +108,8 @@ The main query.
 | `columns` | all | comma-separated subset (CSV only) |
 
 Signals and types union together: `signal=$74&signal=$8f` returns both.
+Sources union among themselves, and narrow the rest of the selection:
+`signal=$8f&source=a&source=b` returns `$8F` events from `a` and from `b`.
 
 `X-Total-Count` carries the number of matching rows regardless of paging.
 
@@ -105,6 +127,7 @@ $ curl -s 'http://localhost:8080/api/events?signal=$8f&start=09:15&end=11:34'
       "note": "half-open: start <= t < end"
     },
     "selection": ["$8F"],
+    "sources": ["(all sources)"],
     "timezone": "UTC",
     "total": 8340,
     "returned": 8340,
@@ -121,7 +144,7 @@ $ curl -s 'http://localhost:8080/api/events?signal=$8f&start=09:15&end=11:34'
       "spill_type": 4, "spill_type_name": "ACCEL_ONE_HZ_TCLK",
       "signal": "$8F", "signal_name": "one-hertz",
       "event_number": 20230, "delta": 4264849, "pps_offset": 10078940,
-      "source": "spill_history"
+      "source": "tdu-near-master-ppc-01", "route": "spill_history"
     }
   ]
 }
@@ -138,7 +161,53 @@ bounded only by `query.max_export_rows`. Use it for bulk extraction; use
 
 ### `GET /api/latest`
 
-The newest archived event, optionally narrowed by `signal`.
+The newest archived event, optionally narrowed by `signal` and `source`.
+
+### `GET /api/sources`
+
+Every configured source: its name, current `base_url` and `enabled` state,
+what the configuration file says (`configured`), whether a runtime change is
+in force (`overridden`, with `updated_at` and `updated_by`), its event count,
+and its ingest health. Readable without authentication, like `/api/status`.
+`admin.enabled` says whether this server accepts changes at all.
+
+### `PATCH /api/sources/{name}`
+
+Change a source while the server runs. Needs the admin token in the
+`X-Admin-Token` header, or, with SSO on, a signed-in member of
+`admin.allowed_groups`.
+
+```console
+$ curl -s -X PATCH -H "X-Admin-Token: $(cat admin_token)" \
+       -H 'Content-Type: application/json' \
+       -d '{"enabled": false}' \
+       http://localhost:8080/api/sources/tdu-near-master-ppc-03
+
+$ curl -s -X PATCH -H "X-Admin-Token: $(cat admin_token)" \
+       -H 'Content-Type: application/json' \
+       -d '{"base_url": "http://tdu-near-master-ppc-04:8080"}' \
+       http://localhost:8080/api/sources/tdu-near-master-ppc-03
+```
+
+Either field may be omitted. The change applies immediately: disabling a source
+stops its poller, and a new URL starts a fresh poller that resumes from the
+source's newest archived event. It is saved in the archive, survives restarts,
+and wins over the configuration file. A source keeps its name when its URL
+changes, so its history stays in one place.
+
+`401` means no credentials were sent, and `403` means they were wrong or that
+changes are disabled on this server. The error body says which. A malformed
+URL, or one another source already uses, is a `400`.
+
+### `POST /api/sources/{name}/reset`
+
+Discard runtime changes to a source and return it to the configuration file's
+settings. Same credentials as `PATCH`.
+
+### `GET /api/admin/check`
+
+`200` if the caller's credentials would allow a change, otherwise the same
+`401`/`403` a change would get. The `/config` page uses this to unlock editing.
 
 ### `GET /api/signals`, `GET /api/types`
 
@@ -152,12 +221,19 @@ GPS. Useful for checking a query means what you think before running it.
 
 ### `GET /api/status`
 
-Configuration in use, archive extent and counts, and ingest health. Readable
-without authentication so monitoring can scrape it; carries no event data and
-no secrets.
+Configuration in use, archive extent and counts (overall, `by_type` and
+`by_source`), and ingest health. Readable without authentication so monitoring
+can scrape it; carries no event data and no secrets.
 
-The `ingest.degraded` flag is the one to watch — true means the TDU has no
-history route and the archive is a sample rather than a complete record.
+`ingest` summarises every enabled source, and `ingest.sources` gives each
+one's own status:
+
+* `ingest.running`: every enabled source is being polled.
+* `ingest.degraded`: at least one source has no history route, so its part of
+  the archive is a sample rather than a complete record.
+  `ingest.degraded_sources` names them.
+* `ingest.consecutive_errors`: the worst of any source. When it is non-zero,
+  `ingest.last_error` says which source is failing and how.
 
 ### `GET /api/health`
 
@@ -181,7 +257,8 @@ Liveness only. Never requires authentication.
 | `event_number` | the TDU's sequence counter |
 | `delta` | ticks since the previous event |
 | `pps_offset` | ticks past the 1 s boundary |
-| `source` | which TDU route supplied the record |
+| `source` | name of the TDU the event was read from |
+| `route` | which TDU route supplied the record, `spill_history` or `tcr_status` |
 
 Every row carries all four timescales rather than making you choose, because a
 saved table that omitted GPS would be useless to the next person who needed it.

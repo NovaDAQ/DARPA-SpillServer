@@ -1,10 +1,11 @@
 # DARPA Spill Information Server
 
-Serves **NOvA accelerator event timestamps** collected from a TDU, as a
-queryable table over HTTP and from the command line.
+Serves **NOvA accelerator event timestamps** collected from one or more TDUs,
+as a queryable table over HTTP and from the command line.
 
-The server polls the embedded web server running on a NOvA Timing Distribution
-Unit, archives the decoded accelerator events it reports, and answers questions
+The server polls the embedded web server running on each configured NOvA
+Timing Distribution Unit, archives the decoded accelerator events they report
+tagged with the TDU each came from, and answers questions
 like *"every `$74` NuMI spill between 1 July 2026 and today"* or *"the 1 Hz
 `$8F` events from 09:15 until 11:34 today"* — as CSV or JSON, with every
 timestamp rendered in NOvA base time, UNIX, UTC and GPS at once.
@@ -16,6 +17,11 @@ timestamp rendered in NOvA base time, UNIX, UTC and GPS at once.
 source venv/bin/activate
 darpa-spill-server -c config/spillserver.yaml
 ```
+
+To run it in the background instead, detached from the terminal, use
+`./start.sh` (same options, e.g. `./start.sh -c config/spillserver-near.yaml`)
+and `./stop.sh`. With no `-c`, it uses a local `./spillserver.yaml` if one
+exists, and `config/spillserver.yaml` otherwise. The PID file and output log go in `run/`.
 
 Then <http://localhost:8080/> for the query page, or <http://localhost:8080/docs>
 for the generated API reference.
@@ -35,6 +41,7 @@ Or without a browser:
 $ darpa-spill-query --signal '$74' --start 2026-07-01 --end today
 $ darpa-spill-query --signal '$8f' --start 09:15 --end 11:34 -f csv -o spills.csv
 $ darpa-spill-query --last
+$ darpa-spill-query --source tdu-near-master-ppc-02 --signal '$8f' --start -1h
 ```
 
 Quote `$74` in a shell — unquoted it expands to nothing. `0x74` and `74` also work.
@@ -93,6 +100,10 @@ additive, touches no DAQ process, and removes the event loss entirely.
   `09:15`, `-2h`, `today`, `nova:337784...`, `gps:1695:259216`. Ranges are
   half-open so adjacent queries tile; a date-only end covers that whole day.
 - **Signals in operator notation** — `$74`, `$8f`, `0x74`, or by name.
+- **Several TDUs at once** — every event is tagged with its source, and any
+  query can be narrowed to one source or several, or cover them all.
+- **Sources editable while running** — the `/config` page enables, disables
+  and re-points sources without a restart, guarded by an admin token.
 - **Every timescale in every row** — NOvA ticks, UNIX, UTC and GPS, so a saved
   table never sends the reader back to the server to convert.
 - **CSV and JSON**, both streamed, so a query spanning months does not have to
@@ -148,7 +159,7 @@ config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              245 tests
+tests/              299 tests
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```
@@ -157,7 +168,7 @@ novadaq-logo.png    full-resolution masthead artwork; the served copy under
 
 ```console
 $ python -m pytest -q
-245 passed
+299 passed
 ```
 
 The time conversions are checked against values read live from

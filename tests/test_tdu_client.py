@@ -93,7 +93,7 @@ def test_unrepairable_body_raises_with_an_excerpt():
 def test_event_from_legacy_record_has_no_signal():
     """The legacy routes report a decoded type only, never the raw word."""
     record = loads_tolerant(LIVE_TCR_STATUS)
-    event = event_from_record(record, source="tcr_status")
+    event = event_from_record(record, route="tcr_status")
 
     assert event.nova_time == 33778458638680249
     assert event.spill_type is SpillType.BNB_TCLK
@@ -105,7 +105,7 @@ def test_event_from_legacy_record_has_no_signal():
 def test_raw_event_word_is_authoritative_over_the_reported_type():
     """When both are present the word wins: it recovers the exact signal."""
     event = event_from_record(
-        {"Time": 1, "Type": 99, "Event": 0x018F}, source="spill_history"
+        {"Time": 1, "Type": 99, "Event": 0x018F}, route="spill_history"
     )
     assert event.spill_type is SpillType.ACCEL_ONE_HZ_TCLK
     assert event.signal_code == 0x8F
@@ -113,22 +113,22 @@ def test_raw_event_word_is_authoritative_over_the_reported_type():
 
 def test_lowercase_keys_are_accepted():
     event = event_from_record(
-        {"time": 42, "type": 4, "number": 7}, source="spill_history"
+        {"time": 42, "type": 4, "number": 7}, route="spill_history"
     )
     assert event.nova_time == 42
     assert event.spill_type is SpillType.ACCEL_ONE_HZ_TCLK
 
 
 def test_record_without_a_timestamp_is_dropped_not_fatal():
-    assert event_from_record({"Type": 4}, source="x") is None
+    assert event_from_record({"Type": 4}, route="x") is None
 
 
 def test_record_with_unknown_type_is_dropped():
-    assert event_from_record({"Time": 1, "Type": 99}, source="x") is None
+    assert event_from_record({"Time": 1, "Type": 99}, route="x") is None
 
 
 def test_unknown_signal_code_falls_back_to_sentinel():
-    event = event_from_record({"Time": 1, "Event": 0x0199}, source="x")
+    event = event_from_record({"Time": 1, "Event": 0x0199}, route="x")
     assert event.signal_code == UNKNOWN_SIGNAL
     assert event.spill_type is SpillType.FAKE
 

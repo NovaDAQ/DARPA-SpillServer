@@ -181,8 +181,8 @@ def test_meta_round_trip(store):
 
 
 def test_ingest_log(store):
-    store.record_ingest("/spill_history", 100, 101, 50, 10, None)
-    store.record_ingest("/spill_history", 102, 103, 50, 0, "boom")
+    store.record_ingest("ppc-01", "/spill_history", 100, 101, 50, 10, None)
+    store.record_ingest("ppc-01", "/spill_history", 102, 103, 50, 0, "boom")
     rows = store.recent_ingests()
     assert len(rows) == 2
     assert rows[0]["error"] == "boom"
@@ -190,7 +190,8 @@ def test_ingest_log(store):
 
 def test_trim_ingest_log(store):
     for index in range(20):
-        store.record_ingest("/spill_history", index, index + 1, 1, 1, None)
+        store.record_ingest("ppc-01", "/spill_history", index, index + 1, 1, 1,
+                            None)
     store.trim_ingest_log(keep=5)
     assert len(store.recent_ingests(limit=100)) == 5
 

@@ -21,10 +21,18 @@ because the stored records lack raw event words, or because ingest is running
 degraded against a TDU with no history route --- the response says so in its
 metadata (and in CSV, in a comment header).  A client that saves the file
 keeps the caveat with it.
+
+**Sources.**  Every query route takes ``source=`` (repeatable, or
+comma-separated) to restrict it to named TDUs; leaving it out means every
+source.  ``/api/sources`` lists them, and its ``PATCH`` form changes one at
+runtime --- allowed only to a caller holding the admin token, or a signed-in
+member of ``admin.allowed_groups``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import logging
 import time
 from datetime import datetime
@@ -32,6 +40,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from .config import Config
 from .formats import COLUMNS, ambiguity_note, event_row, iter_csv, iter_json
@@ -44,6 +53,7 @@ from .signals import (
     parse_spill_type,
     signals_for_type,
 )
+from .poller import SourceError
 from .storage import SpillStore
 
 __all__ = ["build_router"]
@@ -59,6 +69,19 @@ def _error(status: int, message: str, hint: Optional[str] = None) -> HTTPExcepti
     return HTTPException(status_code=status, detail=detail)
 
 
+class SourceUpdate(BaseModel):
+    """A change to one source.  Omitted fields are left as they are."""
+
+    enabled: Optional[bool] = Field(
+        None, description="Start (true) or stop (false) recording from it.")
+    base_url: Optional[str] = Field(
+        None, description="New TDU URL, e.g. http://tdu-near-master-ppc-04:8080")
+
+
+#: Header carrying the admin token on requests that change configuration.
+ADMIN_HEADER = "X-Admin-Token"
+
+
 def build_router(
     config: Config,
     store: SpillStore,
@@ -68,14 +91,76 @@ def build_router(
 
     :param config: merged server configuration.
     :param store: the event archive.
-    :param state: the application state object, carrying ``poller``,
-        ``authenticator`` and ``started_at``.
+    :param state: the application state object, carrying ``ingest``,
+        ``authenticator``, ``admin_token`` and ``started_at``.
     """
     router = APIRouter(prefix="/api", tags=["spills"])
     authenticator = state.authenticator
+    ingest = state.ingest
 
     async def current_user(request: Request):
         return await authenticator.require_user(request)
+
+    async def require_admin(request: Request) -> str:
+        """Allow a configuration change, returning who made it.
+
+        The token is compared in constant time.  It travels in a header
+        rather than a cookie, so a page on another site cannot make a
+        browser send it.
+        """
+        token = state.admin_token
+        groups = list(config.admin.allowed_groups)
+        via_sso = config.auth.enabled and bool(groups)
+        if not token and not via_sso:
+            raise _error(
+                403,
+                "changing sources at runtime is disabled on this server",
+                "Set admin.token_file in the configuration to a file holding "
+                "a secret (e.g. from 'openssl rand -hex 32'), and restart.",
+            )
+
+        supplied = request.headers.get(ADMIN_HEADER, "")
+        if token and supplied:
+            if hmac.compare_digest(supplied.encode(), token.encode()):
+                host = request.client.host if request.client else "?"
+                return "admin token from {}".format(host)
+            raise _error(403, "the admin token is not correct")
+
+        if via_sso:
+            principal = await authenticator.require_user(request)
+            if set(groups) & set(principal.groups):
+                return principal.subject
+            raise _error(
+                403,
+                "your account is not in a group allowed to change sources "
+                "(need one of: {})".format(", ".join(groups)),
+            )
+        raise _error(
+            401,
+            "changing sources needs the admin token",
+            "Send it in the {} header, or enter it on the /config page.".format(
+                ADMIN_HEADER),
+        )
+
+    async def resolve_sources(requested: Optional[Sequence[str]]) -> List[str]:
+        """Validate ``source=`` values; an empty result means every source."""
+        names: List[str] = []
+        for text in requested or []:
+            names.extend(t.strip() for t in str(text).split(",") if t.strip())
+        if not names:
+            return []
+        known = set(ingest.names()) | set(
+            await asyncio.to_thread(store.source_names)
+        )
+        unknown = [name for name in names if name not in known]
+        if unknown:
+            raise _error(
+                400,
+                "unknown source(s): {}".format(", ".join(unknown)),
+                "Known sources: {}. See /api/sources.".format(
+                    ", ".join(sorted(known)) or "(none)"),
+            )
+        return list(dict.fromkeys(names))
 
     # ---------------------------------------------------------------- health
 
@@ -91,21 +176,22 @@ def build_router(
         Deliberately readable without authentication so that monitoring can
         scrape it, but it carries no event data and no secrets.
         """
-        import asyncio
-
         earliest = await asyncio.to_thread(store.earliest)
         latest = await asyncio.to_thread(store.latest)
         total = await asyncio.to_thread(store.count)
         by_type = await asyncio.to_thread(store.counts_by_type)
+        by_source = await asyncio.to_thread(store.counts_by_source)
 
-        poller = getattr(state, "poller", None)
         return {
             "status": "ok",
             "version": state.version,
             "started_at": state.started_at,
             "uptime_seconds": round(time.time() - state.started_at, 1),
             "config_source": config.source or "(defaults)",
-            "tdu": {"base_url": config.tdu.base_url},
+            "sources": [
+                {"name": s.name, "base_url": s.base_url, "enabled": s.enabled}
+                for s in ingest.sources.values()
+            ],
             "auth": authenticator.describe(),
             "archive": {
                 "path": store.path,
@@ -117,15 +203,93 @@ def build_router(
                         by_type.items(), key=lambda item: item[0].value
                     )
                 },
+                "by_source": by_source,
                 "retention_days": config.storage.retention_days or None,
             },
-            "ingest": poller.status.as_dict() if poller else {"running": False},
+            "ingest": ingest.summary(),
             "query_defaults": {
                 "timezone": config.query.timezone,
                 "default_limit": config.query.default_limit,
                 "max_limit": config.query.max_limit,
             },
         }
+
+    # --------------------------------------------------------------- sources
+
+    @router.get("/sources", summary="The TDUs this server records from",
+                tags=["sources"])
+    async def sources() -> Dict[str, Any]:
+        """List every source: its URL, whether it is enabled, how that
+        differs from the configuration file, and its ingest health.
+
+        Readable without authentication, like ``/api/status``; it carries no
+        event data.  ``admin.enabled`` says whether this server accepts
+        changes at all.
+        """
+        counts = await asyncio.to_thread(store.counts_by_source)
+        described = ingest.describe()
+        for entry in described:
+            entry["events"] = counts.get(entry["name"], 0)
+        return {
+            "sources": described,
+            "archived_only": sorted(set(counts) - set(ingest.names())),
+            "ingest_enabled": ingest.running,
+            "admin": {
+                "enabled": bool(state.admin_token) or (
+                    config.auth.enabled and bool(config.admin.allowed_groups)),
+                "token_header": ADMIN_HEADER,
+                "sso_groups": list(config.admin.allowed_groups)
+                if config.auth.enabled else [],
+            },
+        }
+
+    @router.get("/admin/check", summary="Check admin credentials",
+                tags=["sources"])
+    async def admin_check(who: str = Depends(require_admin)) -> Dict[str, Any]:
+        """Succeeds only for a caller allowed to change sources."""
+        return {"ok": True, "as": who}
+
+    def _describe_one(name: str) -> Dict[str, Any]:
+        return next(e for e in ingest.describe() if e["name"] == name)
+
+    @router.patch("/sources/{name}", summary="Change a source at runtime",
+                  tags=["sources"])
+    async def update_source(
+        name: str,
+        update: SourceUpdate,
+        who: str = Depends(require_admin),
+    ) -> Dict[str, Any]:
+        """Enable or disable a source, or point it at a different URL.
+
+        The change applies immediately, is saved in the archive so that it
+        survives a restart, and wins over the configuration file until the
+        source is reset.
+        """
+        if update.enabled is None and update.base_url is None:
+            raise _error(400, "nothing to change",
+                         "Send enabled, base_url, or both.")
+        try:
+            await ingest.update_source(
+                name, base_url=update.base_url, enabled=update.enabled,
+                updated_by=who,
+            )
+        except SourceError as exc:
+            status_code = 404 if name not in ingest.sources else 400
+            raise _error(status_code, str(exc))
+        return {"source": _describe_one(name)}
+
+    @router.post("/sources/{name}/reset",
+                 summary="Return a source to the configuration file",
+                 tags=["sources"])
+    async def reset_source(
+        name: str, who: str = Depends(require_admin)
+    ) -> Dict[str, Any]:
+        """Discard runtime changes to a source."""
+        try:
+            await ingest.reset_source(name, updated_by=who)
+        except SourceError as exc:
+            raise _error(404, str(exc))
+        return {"source": _describe_one(name)}
 
     # -------------------------------------------------------------- registry
 
@@ -231,11 +395,13 @@ def build_router(
     @router.get("/latest", summary="The most recent stored event", tags=["spills"])
     async def latest(
         signal: Optional[str] = Query(None, description="Restrict to one signal, e.g. $8F"),
+        source: Optional[List[str]] = Query(
+            None, description="Restrict to these sources. Repeatable."),
         user=Depends(current_user),
     ) -> Dict[str, Any]:
-        """Return the newest archived event, optionally of one signal."""
-        import asyncio
-
+        """Return the newest archived event, optionally of one signal or
+        from given sources."""
+        selected_sources = await resolve_sources(source)
         spill_type = None
         if signal:
             try:
@@ -243,7 +409,8 @@ def build_router(
             except ValueError as exc:
                 raise _error(400, str(exc), "See /api/signals for the full list.")
 
-        event = await asyncio.to_thread(store.latest, spill_type)
+        event = await asyncio.to_thread(
+            store.latest, spill_type, selected_sources or None)
         if event is None:
             raise _error(
                 404,
@@ -270,6 +437,9 @@ def build_router(
         type: Optional[List[str]] = Query(
             None, alias="type",
             description="Decoded spill type, by name or number. Repeatable."),
+        source: Optional[List[str]] = Query(
+            None, description="Source (TDU) name, e.g. tdu-near-master-ppc-02. "
+                              "Repeatable; omit for every source."),
         format: str = Query("json", pattern="^(json|csv)$",
                             description="Response format."),
         limit: Optional[int] = Query(None, ge=1, description="Maximum rows."),
@@ -291,6 +461,9 @@ def build_router(
         returns both.  Asking for a signal narrows to that signal's raw code
         where the archive has one, and otherwise falls back to its decoded
         type, which is the best the hardware preserved.
+
+        Sources combine as a union too, and narrow everything else: asking
+        for ``$8F`` from two sources returns that signal as each recorded it.
         """
         zone = _resolve_zone(tz, config)
 
@@ -300,6 +473,7 @@ def build_router(
             raise _error(400, str(exc), "See /api/time/help for accepted forms.")
 
         spill_types, signal_codes, requested = _resolve_selection(signal, type)
+        selected_sources = await resolve_sources(source)
 
         effective_limit = limit or config.query.default_limit
         if effective_limit > config.query.max_limit:
@@ -315,7 +489,6 @@ def build_router(
         selected_columns = _resolve_columns(columns)
         descending = order == "desc"
 
-        import asyncio
         page = await asyncio.to_thread(
             store.query,
             start_nova=start_nova,
@@ -325,6 +498,7 @@ def build_router(
             limit=effective_limit,
             offset=offset,
             descending=descending,
+            sources=selected_sources or None,
         )
 
         meta = _build_meta(
@@ -334,6 +508,7 @@ def build_router(
             end_nova=end_nova,
             requested=requested,
             spill_types=spill_types,
+            sources=selected_sources,
             page_total=page.total,
             returned=len(page.events),
             limit=effective_limit,
@@ -382,6 +557,7 @@ def build_router(
         end: Optional[str] = Query(None),
         signal: Optional[List[str]] = Query(None),
         type: Optional[List[str]] = Query(None, alias="type"),
+        source: Optional[List[str]] = Query(None),
         format: str = Query("csv", pattern="^(json|csv)$"),
         tz: Optional[str] = Query(None),
         columns: Optional[str] = Query(None),
@@ -401,6 +577,7 @@ def build_router(
             raise _error(400, str(exc), "See /api/time/help for accepted forms.")
 
         spill_types, signal_codes, requested = _resolve_selection(signal, type)
+        selected_sources = await resolve_sources(source)
         selected_columns = _resolve_columns(columns)
         max_rows = config.query.max_export_rows
 
@@ -412,6 +589,7 @@ def build_router(
                     end_nova=end_nova,
                     spill_types=spill_types or None,
                     signal_codes=signal_codes or None,
+                    sources=selected_sources or None,
                 )
             ):
                 if index >= max_rows:
@@ -425,6 +603,7 @@ def build_router(
             config=config, state=state,
             start_nova=start_nova, end_nova=end_nova,
             requested=requested, spill_types=spill_types,
+            sources=selected_sources,
             page_total=None, returned=None,
             limit=max_rows, offset=0, order="asc",
             timezone_name=str(tz or config.query.timezone),
@@ -541,6 +720,7 @@ def _build_meta(
     end_nova: int,
     requested: Sequence[str],
     spill_types: Sequence[SpillType],
+    sources: Sequence[str],
     page_total: Optional[int],
     returned: Optional[int],
     limit: int,
@@ -557,6 +737,7 @@ def _build_meta(
             "note": "half-open: start <= t < end",
         },
         "selection": list(requested) or ["(all signals)"],
+        "sources": list(sources) or ["(all sources)"],
         "timezone": timezone_name,
         "order": order,
         "limit": limit,
@@ -574,14 +755,17 @@ def _build_meta(
     if note:
         warnings.append(note)
 
-    poller = getattr(state, "poller", None)
-    if poller is not None and poller.status.degraded:
+    degraded = state.ingest.degraded_sources(list(sources) or None)
+    if degraded:
         warnings.append(
-            "Ingest is running in degraded mode: the TDU at {} does not "
-            "expose a bulk history route, so only the newest event is "
-            "readable per poll and most events are never captured. This "
-            "result is a sample, not a complete history. See "
-            "contrib/tduweb/README.md.".format(config.tdu.base_url)
+            "Ingest is running in degraded mode for {}: {} not expose a bulk "
+            "history route, so only the newest event is readable per poll "
+            "and most events are never captured. Rows from {} are a sample, "
+            "not a complete history. See contrib/tduweb/README.md.".format(
+                ", ".join("{} ({})".format(s.name, s.base_url) for s in degraded),
+                "it does" if len(degraded) == 1 else "they do",
+                "that source" if len(degraded) == 1 else "those sources",
+            )
         )
 
     if warnings:
@@ -604,6 +788,7 @@ def _csv_comments(meta: Dict[str, Any]) -> List[str]:
             meta["range"]["note"],
         ),
         "selection: {}".format(", ".join(meta["selection"])),
+        "sources: {}".format(", ".join(meta["sources"])),
         "timezone for unqualified inputs: {}".format(meta["timezone"]),
     ]
     if "total" in meta:
