@@ -44,7 +44,7 @@ tdu:
   sources:
     - http://tdu-near-master-ppc-01:8080
   # Timeout for the quick routes, which answer at once.
-  timeout: 10.0
+  timeout: 20.0
 
   # Timeout for a bulk history read. Far longer, because it is different work:
   # the TDU walks its whole ring, which takes minutes on that hardware. Judging
