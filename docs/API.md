@@ -276,6 +276,47 @@ what the DAQ's own tooling prints.
 `gps_psec` carries the same exact remainder as an integer for callers that
 would rather not parse a decimal.
 
+## Backfilling from the ring buffer
+
+Ingest only moves forward: `ingest.backfill` applies on a cold start and
+nowhere else, so once a source has rows the poller never reaches back past
+them. `darpa-spill-backfill` fills that gap.
+
+```bash
+darpa-spill-backfill -c config/spillserver.yaml            # everything the ring holds
+darpa-spill-backfill --start=-6h --end=now                 # a specific range
+darpa-spill-backfill --source tdu-near-master-ppc-01 -n    # dry run, one source
+```
+
+Write relative times with an equals sign — `--start=-6h`, not `--start -6h` —
+or argparse reads the value as an option.
+
+It walks the range in windows (`--window`, 300 s by default) rather than paging
+by count, because `/spill_history` applies its `limit` *after* collecting
+everything at or after `since`: a wide `since` with a small `limit` still makes
+the TDU produce the rest of the ring. Bounding both ends is what keeps each
+request proportional to the window.
+
+Inserts are idempotent, so re-running over a covered range costs time and
+changes nothing. It is safe to run against a live archive while the poller
+is running.
+
+### What "everything the ring holds" means
+
+Measured on `tdu-near-master-ppc-01`, 2026-09-23: a 32 MB segment of 2,097,152
+slots, holding about **120 hours** of events. That is more than the current
+`TCRMonitor` run — that process resets its event counter on start but does not
+clear the segment, so slots beyond the insert point still hold the previous
+run's events. Their timestamps are genuine, and the data is real history worth
+keeping; only the `Number` sequence restarts, so **`event_number` is not
+continuous across that boundary** and a completeness check spanning it will
+under-report.
+
+Budget the time. Cost is dominated by `DumpSpillHistory` formatting each event,
+at roughly 5.8 ms apiece plus a second per request, so a full ring is several
+hours of TDU work. A 30-minute range took 56 s. Narrow ranges are cheap;
+prefer them unless you genuinely want the lot.
+
 ## Errors
 
 Failures return a JSON body with an `error` and, where there is one, a `hint`
