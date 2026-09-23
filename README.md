@@ -48,14 +48,35 @@ ignores its own type filters. Accelerator events arrive at roughly 6–15 Hz, so
 polling captures a fraction of them. Measured on a live TDU:
 
 ```
-captured event numbers: 20230, 20235, 20240, 20245, 20250, 20255, ...
-span: 105 hardware events -> 21 captured (20%)
+window                         : 4h 11m, 2026-09-22
+hardware events (event_number) : 73,904   (27,996 .. 101,899)
+captured                       :  8,700
+capture fraction               :    11.8%
 ```
 
-Separately, `TCRMonitor` writes to shared memory only inside
-`if (evt == 0x041B)`, so **`$74` and `$8F` are decoded and then discarded**, and
-the record it stores keeps only a decoded type — `$1D` cannot be told from
-`$1F`, nor `$A9` from `$AD`.
+Separately, the record the hardware stores keeps only a decoded *type*, not the
+raw event word — so `$1D` cannot be told from `$1F`, nor `$A9` from `$AD`.
+
+What **is** recorded turns out to be wider than the checked-out source suggests.
+In `NovaSpillServer/cxx/src/TCRMonitor.cc` the `memcpy` into shared memory sits
+inside `if (evt == 0x041B)`, which would store the TCR reference and nothing
+else. The deployed binary evidently differs. A four-hour archive collected on
+2026-09-22 contains:
+
+| Signal | Type | Captured | Implied rate |
+|---|---|---:|---:|
+| `$1D` / `$1F` | `BNB_TCLK` | 7233 | 4.07 /s |
+| `$8F` | `ACCEL_ONE_HZ_TCLK` | 1448 | 0.81 /s |
+| `$00` | `SUPER_CYCLE` | 10 | 0.01 /s |
+| `$1B` | `BNB` | 9 | 0.01 /s |
+
+`$8F` at 0.81 /s is the 1 Hz pulser showing up almost exactly as it should once
+the ~12% capture rate is accounted for, so it is genuinely being recorded.
+
+No NuMI signal (`$74`, `$A9`, `$AD`, `$A4`, `$A5`) appeared in that window. That
+is **not** evidence they are unrecorded — NuMI beam may simply not have been
+running. Whether `$74` reaches shared memory is still unverified, and needs a
+window with beam to settle.
 
 The server handles all of this honestly rather than papering over it: it detects
 the limitation, reports `ingest.degraded` in `/api/status`, attaches a warning
