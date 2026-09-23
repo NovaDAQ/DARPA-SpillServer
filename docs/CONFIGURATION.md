@@ -78,7 +78,8 @@ works for users who can't read the key.
 |---|---|---|
 | `sources` | `[]` | TDUs to record from, each `URL` or `NAME=URL`; see below |
 | `base_url` | `""` | a single TDU, the pre-`sources` form; cannot be combined with `sources` |
-| `timeout` | `10.0` | per-request seconds |
+| `timeout` | `10.0` | per-request seconds, for the quick routes |
+| `history_timeout` | `600.0` | seconds for a bulk history read |
 | `retries` | `2` | retries per failed request |
 | `retry_backoff` | `0.5` | seconds before the first retry; doubles each time |
 

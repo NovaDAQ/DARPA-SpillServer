@@ -173,6 +173,14 @@ class TDUConfig:
     ``sources``."""
 
     timeout: float = 10.0
+    """Per-request timeout for the quick routes, which answer at once."""
+
+    history_timeout: float = 600.0
+    """Timeout for a bulk history read.  Far longer, because it is different
+    work: the TDU walks its whole ring, which takes minutes on that hardware.
+    Judging it against the quick timeout is how a working history route came
+    to be reported as missing --- the probe timed out and was read as a 404."""
+
     retries: int = 2
     retry_backoff: float = 0.5
 
@@ -606,6 +614,9 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
                        help="a single TDU; use --tdu-source for several")
     group.add_argument("--tdu-timeout", dest="tdu_timeout", type=float,
                        metavar="SECONDS", help="per-request timeout")
+    group.add_argument("--tdu-history-timeout", dest="tdu_history_timeout",
+                       type=float, metavar="SECONDS",
+                       help="timeout for a bulk history read")
     group.add_argument("--tdu-retries", dest="tdu_retries", type=int,
                        metavar="N", help="retries per failed request")
 
@@ -678,6 +689,7 @@ _ARG_MAP = {
     "tdu_sources": ("tdu", "sources"),
     "tdu_base_url": ("tdu", "base_url"),
     "tdu_timeout": ("tdu", "timeout"),
+    "tdu_history_timeout": ("tdu", "history_timeout"),
     "tdu_retries": ("tdu", "retries"),
     "ingest_interval": ("ingest", "interval"),
     "ingest_batch_limit": ("ingest", "batch_limit"),

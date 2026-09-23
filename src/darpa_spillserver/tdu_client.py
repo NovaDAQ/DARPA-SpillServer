@@ -63,6 +63,16 @@ LEGACY_ROUTES = ("/tcr_status", "/onehz_status")
 #: The bulk-history route added by ``contrib/tduweb``.
 HISTORY_ROUTE = "/spill_history"
 
+#: Capability endpoint beside it.  Answering it costs the TDU nothing, which
+#: is the whole point: it reports whether the history route exists without
+#: walking the ring to prove it.
+HISTORY_INFO_ROUTE = "/spill_history_info"
+
+#: Seconds before an inconclusive history probe is tried again.  A definite
+#: answer -- a 404, or a successful reply -- is kept; an error or a timeout is
+#: not, because it says nothing about whether the route exists.
+HISTORY_PROBE_RETRY = 120.0
+
 #: Matches a bare (unquoted) object key, as emitted by DumpSpillHistory.
 _BARE_KEY_RE = re.compile(r"(?P<prefix>[{,]\s*)(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:")
 
@@ -209,6 +219,7 @@ class TDUClient:
         self,
         base_url: str,
         timeout: float = 10.0,
+        history_timeout: float = 600.0,
         retries: int = 2,
         retry_backoff: float = 0.5,
         client: Optional[httpx.AsyncClient] = None,
@@ -217,11 +228,13 @@ class TDUClient:
         self.base_url = base_url.rstrip("/") + "/"
         self.name = name
         self.timeout = timeout
+        self.history_timeout = history_timeout
         self.retries = max(0, int(retries))
         self.retry_backoff = retry_backoff
         self._client = client
         self._owns_client = client is None
         self._history_supported: Optional[bool] = None
+        self._history_probed_at: float = 0.0
 
     async def __aenter__(self) -> "TDUClient":
         await self.open()
@@ -248,8 +261,20 @@ class TDUClient:
 
     # -- low-level ----------------------------------------------------------
 
-    async def _get(self, route: str, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
-        """GET *route*, retrying transient failures with a growing backoff."""
+    async def _get(
+        self,
+        route: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> httpx.Response:
+        """GET *route*, retrying transient failures with a growing backoff.
+
+        *timeout* overrides the client default for this request. A bulk
+        history read is a different kind of work from a status read --- it
+        walks the ring and can take minutes on the TDU --- so it gets its own
+        budget rather than being judged against the one sized for a register
+        read.
+        """
         import asyncio
 
         url = urljoin(self.base_url, route.lstrip("/"))
@@ -258,7 +283,10 @@ class TDUClient:
 
         for attempt in range(self.retries + 1):
             try:
-                response = await self.client.get(url, params=params)
+                response = await self.client.get(
+                    url, params=params,
+                    timeout=timeout if timeout is not None else self.timeout,
+                )
             except httpx.HTTPError as exc:
                 last_error = exc
                 log.debug("TDU request to %s failed (attempt %d): %s",
@@ -331,24 +359,71 @@ class TDUClient:
     async def supports_history(self) -> bool:
         """Whether this TDU exposes the bulk-history route.
 
-        The answer is probed once and cached; a TDU is not upgraded underneath
-        a running server without a restart.
+        Asked of ``/spill_history_info``, which exists to answer exactly this
+        and costs the TDU nothing.  The obvious probe --- fetching
+        ``/spill_history?limit=1`` --- is not cheap at all: it walks the whole
+        ring, takes a minute or two on the hardware, and so times out against
+        any sensible request timeout.  Reading that timeout as "the route is
+        absent" is how a working TDU came to be reported as having no history
+        route at all.
+
+        A 404 on the info route means the TDU predates it, so the older probe
+        is tried before concluding anything.
+
+        Only a definite answer is remembered.  An error or a timeout says
+        nothing about whether the route exists, so it is retried after
+        :data:`HISTORY_PROBE_RETRY` seconds rather than condemning the source
+        to degraded mode for the life of the process.
         """
-        if self._history_supported is None:
-            try:
-                response = await self._get(HISTORY_ROUTE, params={"limit": 1})
-            except TDUError:
-                self._history_supported = False
+        import asyncio  # noqa: F401  (kept for symmetry with _get)
+
+        now = time.time()
+        if self._history_supported is not None:
+            return self._history_supported
+        if now - self._history_probed_at < HISTORY_PROBE_RETRY and self._history_probed_at:
+            return False
+
+        self._history_probed_at = now
+        supported: Optional[bool] = None
+
+        try:
+            response = await self._get(HISTORY_INFO_ROUTE)
+        except TDUError as exc:
+            log.debug("%s probe of %s failed: %s", self.name, HISTORY_INFO_ROUTE, exc)
+        else:
+            if response.status_code != 404:
+                supported = True
             else:
-                self._history_supported = response.status_code != 404
-            if not self._history_supported:
-                log.warning(
-                    "TDU at %s has no %s route; falling back to %s, which "
-                    "returns only the newest event and will miss most of them. "
-                    "See contrib/tduweb/README.md to enable history.",
-                    self.base_url, HISTORY_ROUTE, LEGACY_ROUTES[0],
-                )
-        return self._history_supported
+                # Older builds have the history route but not the info route,
+                # so fall back to asking for the smallest possible window.
+                try:
+                    older = await self._get(HISTORY_ROUTE, params={"limit": 1})
+                except TDUError as exc:
+                    log.debug("%s probe of %s failed: %s",
+                              self.name, HISTORY_ROUTE, exc)
+                else:
+                    supported = older.status_code != 404
+
+        if supported is None:
+            # Inconclusive: the TDU did not answer either probe. Do not record
+            # it, so the next poll tries again once the retry interval passes.
+            log.warning(
+                "%s: could not determine whether %s exposes %s -- neither probe "
+                "answered. Treating it as unavailable for now and retrying in "
+                "%.0f s.",
+                self.name, self.base_url, HISTORY_ROUTE, HISTORY_PROBE_RETRY,
+            )
+            return False
+
+        self._history_supported = supported
+        if not supported:
+            log.warning(
+                "TDU at %s has no %s route; falling back to %s, which "
+                "returns only the newest event and will miss most of them. "
+                "See contrib/tduweb/README.md to enable history.",
+                self.base_url, HISTORY_ROUTE, LEGACY_ROUTES[0],
+            )
+        return supported
 
     async def fetch_history(
         self,
@@ -376,7 +451,8 @@ class TDUClient:
                     "{:02x}".format(code) for code in signal_codes
                 )
 
-            response = await self._get(HISTORY_ROUTE, params=params)
+            response = await self._get(
+                HISTORY_ROUTE, params=params, timeout=self.history_timeout)
             payload = loads_tolerant(response.text)
             records, truncated = _extract_records(payload)
             events = [

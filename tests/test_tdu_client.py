@@ -148,6 +148,8 @@ async def test_fetch_latest():
 
 @respx.mock
 async def test_history_route_is_used_when_present():
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(200, json={"spill_history": True}))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json={
             "events": [
@@ -170,6 +172,8 @@ async def test_history_route_is_used_when_present():
 @respx.mock
 async def test_falls_back_to_the_legacy_route_on_404():
     """An un-upgraded TDU must still work, degraded rather than broken."""
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(404))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(return_value=httpx.Response(404))
     respx.get(BASE_URL + "/tcr_status").mock(
         return_value=httpx.Response(200, text=LIVE_TCR_STATUS)
@@ -184,6 +188,8 @@ async def test_falls_back_to_the_legacy_route_on_404():
 
 @respx.mock
 async def test_history_support_is_probed_only_once():
+    info = respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(404))
     route = respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(404)
     )
@@ -195,11 +201,14 @@ async def test_history_support_is_probed_only_once():
         await client.fetch_history()
         await client.fetch_history()
 
-    assert route.call_count == 1, "the probe result should be cached"
+    assert info.call_count == 1, "the probe result should be cached"
+    assert route.call_count == 1, "the fallback probe runs once too"
 
 
 @respx.mock
 async def test_legacy_bulk_json_is_parsed():
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(200, json={"spill_history": True}))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, text=LEGACY_BULK_JSON)
     )
@@ -242,6 +251,8 @@ async def test_ping_reports_false_when_unreachable():
 
 @respx.mock
 async def test_bare_list_response_is_accepted():
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(200, json={"spill_history": True}))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json=[{"Time": 1, "Type": 4}])
     )
@@ -313,9 +324,10 @@ async def test_a_good_response_is_not_retried():
 
 @respx.mock
 async def test_empty_history_response_is_retried():
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(200, json={"spill_history": True}))
     route = respx.get(BASE_URL + HISTORY_ROUTE)
     route.side_effect = [
-        httpx.Response(200, json={"events": [], "count": 0}),   # probe
         httpx.Response(200, text=""),
         httpx.Response(200, json={"events": [{"Time": 100, "Event": 0x018F}],
                                   "count": 1, "truncated": False}),
@@ -323,3 +335,104 @@ async def test_empty_history_response_is_retried():
     async with TDUClient(BASE_URL, retries=2, retry_backoff=0.01) as client:
         result = await client.fetch_history(since_nova=0)
     assert len(result.events) == 1
+
+
+# ------------------------------------------- history capability probing
+
+
+@respx.mock
+async def test_probe_uses_the_cheap_info_route():
+    """The obvious probe walks the whole ring. The info route does not."""
+    info = respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(200, json={"spill_history": True})
+    )
+    history = respx.get(BASE_URL + HISTORY_ROUTE).mock(
+        return_value=httpx.Response(200, json={"events": [], "count": 0})
+    )
+    async with TDUClient(BASE_URL) as client:
+        assert await client.supports_history() is True
+
+    assert info.call_count == 1
+    assert history.call_count == 0, "the expensive route must not be probed"
+
+
+@respx.mock
+async def test_a_slow_history_route_is_not_mistaken_for_a_missing_one():
+    """This is the bug that reported a working TDU as having no history
+    route: the probe timed out and the timeout was read as a 404."""
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        side_effect=httpx.ReadTimeout("too slow")
+    )
+    respx.get(BASE_URL + HISTORY_ROUTE).mock(
+        side_effect=httpx.ReadTimeout("too slow")
+    )
+    async with TDUClient(BASE_URL, retries=0, retry_backoff=0.01) as client:
+        assert await client.supports_history() is False
+        # Nothing was learned, so nothing is remembered.
+        assert client._history_supported is None
+
+
+@respx.mock
+async def test_an_inconclusive_probe_is_retried_later():
+    info = respx.get(BASE_URL + "/spill_history_info")
+    info.side_effect = [
+        httpx.ReadTimeout("too slow"),
+        httpx.Response(200, json={"spill_history": True}),
+    ]
+    respx.get(BASE_URL + HISTORY_ROUTE).mock(
+        side_effect=httpx.ReadTimeout("too slow")
+    )
+    async with TDUClient(BASE_URL, retries=0, retry_backoff=0.01) as client:
+        assert await client.supports_history() is False
+        client._history_probed_at = 0.0          # let the interval elapse
+        assert await client.supports_history() is True
+
+
+@respx.mock
+async def test_a_real_404_is_remembered():
+    """A definite answer is definite: do not keep re-probing it."""
+    info = respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(404)
+    )
+    history = respx.get(BASE_URL + HISTORY_ROUTE).mock(
+        return_value=httpx.Response(404)
+    )
+    async with TDUClient(BASE_URL) as client:
+        assert await client.supports_history() is False
+        assert await client.supports_history() is False
+
+    assert info.call_count == 1
+    assert history.call_count == 1
+
+
+@respx.mock
+async def test_older_server_without_the_info_route_still_detected():
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(404)
+    )
+    respx.get(BASE_URL + HISTORY_ROUTE).mock(
+        return_value=httpx.Response(200, json={"events": [], "count": 0})
+    )
+    async with TDUClient(BASE_URL) as client:
+        assert await client.supports_history() is True
+
+
+@respx.mock
+async def test_history_fetch_gets_the_long_budget():
+    captured = {}
+
+    def record(request):
+        captured["timeout"] = request.extensions.get("timeout", {})
+        return httpx.Response(200, json={"events": [], "count": 0})
+
+    respx.get(BASE_URL + "/spill_history_info").mock(
+        return_value=httpx.Response(200, json={"spill_history": True})
+    )
+    respx.get(BASE_URL + HISTORY_ROUTE).mock(side_effect=record)
+
+    async with TDUClient(BASE_URL, timeout=10.0, history_timeout=600.0) as client:
+        await client.fetch_history(since_nova=0)
+
+    assert captured["timeout"].get("read") == 600.0, (
+        "the bulk read must not be judged against the quick timeout"
+    )

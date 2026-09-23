@@ -118,6 +118,7 @@ class Poller:
         self._client = client or TDUClient(
             base_url=self.source.base_url,
             timeout=config.tdu.timeout,
+            history_timeout=config.tdu.history_timeout,
             retries=config.tdu.retries,
             retry_backoff=config.tdu.retry_backoff,
             name=self.source.name,

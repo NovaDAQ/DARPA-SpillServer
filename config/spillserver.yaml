@@ -43,7 +43,15 @@ tdu:
   # one is done here, followed by a restart.
   sources:
     - http://tdu-near-master-ppc-01:8080
+  # Timeout for the quick routes, which answer at once.
   timeout: 10.0
+
+  # Timeout for a bulk history read. Far longer, because it is different work:
+  # the TDU walks its whole ring, which takes minutes on that hardware. Judging
+  # it against the quick timeout above is how a working history route came to be
+  # reported as missing -- the probe timed out and was read as a 404.
+  history_timeout: 600.0
+
   retries: 2
   retry_backoff: 0.5
 
