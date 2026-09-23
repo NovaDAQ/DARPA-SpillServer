@@ -18,6 +18,12 @@ intact, which is what makes real backfill and per-signal queries possible.
 :meth:`TDUClient.fetch_history` degrades to the legacy route automatically when
 the TDU has not been upgraded, so this server runs against either.
 
+**Empty replies.** ``/tcr_status`` occasionally answers ``200`` with an empty
+body.  It happens on both generations of ``tdu_webserver`` and clears on a
+retry, so it originates below them -- in ``DumpSpillHistory`` or the
+shared-memory read it performs.  :meth:`TDUClient._get` retries it rather than
+failing the poll.
+
 **Malformed JSON.** ``DumpSpillHistory``'s bulk mode emits
 ``printf("{\\nEvents: [\\n")`` --- an unquoted key, which is not valid JSON.
 :func:`loads_tolerant` repairs that shape rather than failing, so the client
@@ -260,13 +266,31 @@ class TDUClient:
             else:
                 # A 404 is a definite answer -- the route is absent -- so it is
                 # returned rather than retried; the caller decides what to do.
-                if response.status_code == 404 or response.is_success:
+                if response.status_code == 404:
                     return response
-                last_error = TDUResponseError(
-                    "{} returned HTTP {}".format(url, response.status_code)
-                )
-                log.debug("TDU request to %s returned %d (attempt %d)",
-                          url, response.status_code, attempt + 1)
+
+                if response.is_success:
+                    # The TDU occasionally answers 200 with nothing in the
+                    # body. It happens on both the old and the new
+                    # tdu_webserver, so it originates below them, in
+                    # DumpSpillHistory or the shared-memory read it does --
+                    # and it clears on a retry a moment later. Treating it as
+                    # a parse failure threw away an entire poll for what is a
+                    # transient blip, so it is retried like any other
+                    # transient fault.
+                    if response.text.strip():
+                        return response
+                    last_error = TDUResponseError(
+                        "{} returned HTTP 200 with an empty body".format(url)
+                    )
+                    log.debug("TDU request to %s returned an empty body "
+                              "(attempt %d)", url, attempt + 1)
+                else:
+                    last_error = TDUResponseError(
+                        "{} returned HTTP {}".format(url, response.status_code)
+                    )
+                    log.debug("TDU request to %s returned %d (attempt %d)",
+                              url, response.status_code, attempt + 1)
 
             if attempt < self.retries:
                 await asyncio.sleep(delay)

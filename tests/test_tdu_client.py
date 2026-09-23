@@ -254,3 +254,72 @@ def test_client_rejects_use_before_open():
     client = TDUClient(BASE_URL)
     with pytest.raises(RuntimeError):
         _ = client.client
+
+
+# ------------------------------------------------- empty 200 responses
+
+
+@respx.mock
+async def test_empty_body_is_retried_not_fatal():
+    """The TDU answers 200 with nothing in the body from time to time. It
+    clears on a retry, so it must not cost a whole poll."""
+    route = respx.get(BASE_URL + "/tcr_status")
+    route.side_effect = [
+        httpx.Response(200, text=""),
+        httpx.Response(200, text=LIVE_TCR_STATUS),
+    ]
+    async with TDUClient(BASE_URL, retries=2, retry_backoff=0.01) as client:
+        event = await client.fetch_latest()
+
+    assert event is not None
+    assert event.nova_time == 33778458638680249
+    assert route.call_count == 2, "the empty reply should have been retried"
+
+
+@respx.mock
+async def test_whitespace_only_body_is_also_retried():
+    route = respx.get(BASE_URL + "/tcr_status")
+    route.side_effect = [
+        httpx.Response(200, text="   \n\t "),
+        httpx.Response(200, text=LIVE_TCR_STATUS),
+    ]
+    async with TDUClient(BASE_URL, retries=2, retry_backoff=0.01) as client:
+        assert await client.fetch_latest() is not None
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_persistently_empty_body_raises_a_clear_error():
+    """If it never clears, say what actually happened rather than blaming
+    the JSON parser."""
+    respx.get(BASE_URL + "/tcr_status").mock(
+        return_value=httpx.Response(200, text="")
+    )
+    async with TDUClient(BASE_URL, retries=1, retry_backoff=0.01) as client:
+        with pytest.raises(TDUUnavailable) as excinfo:
+            await client.fetch_latest()
+    assert "empty body" in str(excinfo.value)
+
+
+@respx.mock
+async def test_a_good_response_is_not_retried():
+    route = respx.get(BASE_URL + "/tcr_status").mock(
+        return_value=httpx.Response(200, text=LIVE_TCR_STATUS)
+    )
+    async with TDUClient(BASE_URL, retries=2, retry_backoff=0.01) as client:
+        await client.fetch_latest()
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_empty_history_response_is_retried():
+    route = respx.get(BASE_URL + HISTORY_ROUTE)
+    route.side_effect = [
+        httpx.Response(200, json={"events": [], "count": 0}),   # probe
+        httpx.Response(200, text=""),
+        httpx.Response(200, json={"events": [{"Time": 100, "Event": 0x018F}],
+                                  "count": 1, "truncated": False}),
+    ]
+    async with TDUClient(BASE_URL, retries=2, retry_backoff=0.01) as client:
+        result = await client.fetch_history(since_nova=0)
+    assert len(result.events) == 1
