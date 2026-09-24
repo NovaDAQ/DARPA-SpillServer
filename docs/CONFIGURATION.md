@@ -1,12 +1,17 @@
 # Configuration
 
 Everything is settable from a YAML file or the command line, as Design.md
-requires. Four layers merge, each overriding the one before:
+requires. Five layers merge, each overriding the one before:
 
 1. built-in defaults
 2. a YAML file
-3. environment variables prefixed `DARPA_SPILL_`
-4. command-line options
+3. a `.env` file
+4. environment variables prefixed `DARPA_SPILL_`
+5. command-line options
+
+That is, highest first: command line > environment > `.env` > YAML > defaults.
+The same order applies to `darpa-spill-query`, `darpa-spill-backfill` and both
+HTTP clients (whose settings are described in [CLIENT.md](CLIENT.md)).
 
 Check what a given invocation actually ends up with — it contacts nothing, so
 it is safe against a production config:
@@ -37,6 +42,34 @@ $ export DARPA_SPILL_QUERY_TIMEZONE=America/Chicago
 
 Lists are comma-separated; booleans accept `true/false`, `yes/no`, `on/off`,
 `1/0`.
+
+## The `.env` file
+
+The same variables can be kept in a `.env` file. It is read from
+`--env-file FILE`, else `$DARPA_SPILL_ENV_FILE`, else `./.env` if it exists.
+A file named with `--env-file` or `$DARPA_SPILL_ENV_FILE` has to exist; the
+default `./.env` is optional.
+[`config/spillserver.env.example`](../config/spillserver.env.example) is a
+starting point, and git ignores `.env` files so that a token put in one is not
+committed.
+
+```sh
+# ./.env
+DARPA_SPILL_CONFIG=config/spillserver-near.yaml
+DARPA_SPILL_STORAGE_PATH=/var/lib/darpa-spillserver/spills.db
+export DARPA_SPILL_ADMIN_TOKEN_FILE="/etc/darpa-spillserver/admin_token"
+```
+
+The syntax is the subset every dotenv reader agrees on: `KEY=VALUE` lines,
+blank lines and `#` comments, an optional leading `export`, and one pair of
+matching quotes stripped from the value. There is no `${VAR}` interpolation,
+so a `$` in a value is kept as it is. A line without `=` is an error, reported
+with its line number.
+
+A variable that is also set in the real environment keeps the environment's
+value. That is the point of the layer: the file holds a host's settings, and a
+one-off `DARPA_SPILL_SERVER_PORT=8081 darpa-spill-server` still wins over it.
+`DARPA_SPILL_CONFIG` can be set in the file too, to choose the YAML file.
 
 ## Unknown keys are errors
 

@@ -49,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_argument_group("data source")
     source.add_argument("-c", "--config", metavar="FILE",
                         help="YAML configuration file (for the archive path)")
+    source.add_argument("--env-file", metavar="FILE",
+                        help=".env file to read (default ./.env if present)")
     source.add_argument("-d", "--database", metavar="FILE",
                         help="SQLite archive to read directly")
     source.add_argument("-s", "--server", metavar="URL",
@@ -229,7 +231,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     legacy_source = None
     if not database:
         try:
-            config = load_config(argv=(["-c", args.config] if args.config else []))
+            config = load_config(argv=(
+            (["-c", args.config] if args.config else [])
+            + (["--env-file", args.env_file] if args.env_file else [])))
         except ConfigError as exc:
             print("error: {}".format(exc), file=sys.stderr)
             return 2
