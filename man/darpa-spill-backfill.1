@@ -1,0 +1,158 @@
+.TH DARPA-SPILL-BACKFILL 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+darpa-spill-backfill \- fill the spill archive from a TDU's ring buffer
+.SH SYNOPSIS
+.B darpa-spill-backfill
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+The ingest poller in
+.BR darpa-spill-server (1)
+only moves forward. Its
+.B ingest.backfill
+setting applies on a cold start and nowhere else, so once a source has any
+rows the poller never reaches back past them. Whatever the TDU already held
+before the server was first pointed at it \(em on a ring holding thirty hours,
+most of the data \(em would otherwise never be archived.
+.PP
+.B darpa-spill-backfill
+walks a time range in windows, asking each configured TDU's
+.I /spill_history
+route for one window at a time and inserting what comes back.
+.SS Why windows
+.I /spill_history
+applies its
+.B limit
+after collecting everything at or after
+.BR since ,
+so a wide request with a small limit still makes the TDU produce the whole
+remainder of the ring. Bounding both ends keeps each request proportional to
+its window. When a window returns more rows than
+.B \-\-limit
+allows, it is halved (down to one second) and the same stretch is re-read,
+so no events are skipped silently.
+.SS Finding the start of the ring
+Without
+.BR \-\-start ,
+the tool probes backwards from
+.B \-\-end
+in doubling strides from one hour (up to 30 days) until a one-minute window
+comes back empty, then binary-searches that bracket to within five minutes.
+The ring can span more than the current TCRMonitor run: that process resets
+its event counter on start but does not clear the segment, so older runs'
+events survive past the insert point. Their timestamps are genuine; only the
+.B event_number
+sequence restarts, so it is not continuous across that boundary.
+.SS Safety
+Inserts are idempotent, keyed on
+.RI ( nova_time ", " spill_type ", " signal_code ),
+so re-running over a range already archived costs time and changes nothing.
+It is safe to run while the server is ingesting: the archive is in SQLite WAL
+mode and the two writers do not block each other. A source whose TDU has no
+bulk history route is reported and skipped.
+.SH OPTIONS
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+YAML configuration file, as for
+.BR darpa-spill-server (1).
+It supplies the sources, TDU timeouts and archive path.
+.TP
+.BI \-\-env\-file " FILE"
+Read \fBDARPA_SPILL_\fR variables from this \fB.env\fR file. Without it,
+\fB$DARPA_SPILL_ENV_FILE\fR names the file, else
+.I ./.env
+is read if it exists.
+.TP
+.BR \-d ", " \-\-database " " \fIFILE\fR
+Archive to write into; overrides the configuration.
+.TP
+.BR \-s ", " \-\-source " " \fINAME\fR
+Only backfill this configured source. May be repeated. Default: every
+configured source.
+.TP
+.BI \-\-start " TIME"
+Start of the range. Default: the earliest time the TDU still holds, found by
+probing.
+.TP
+.BI \-\-end " TIME"
+End of the range. Default \fBnow\fR.
+.TP
+.BI \-\-window " SECONDS"
+Seconds of TDU time requested per call. Default \fB300\fR.
+.TP
+.BI \-\-limit " N"
+Maximum rows per request. Default \fB20000\fR.
+.TP
+.BR \-n ", " \-\-dry\-run
+Report the range and how many windows would be requested, without fetching
+or writing.
+.TP
+.BR \-q ", " \-\-quiet
+Print only the per-source and final summaries, and log only warnings.
+.PP
+Write relative times with an equals sign \(em
+.BR \-\-start=\-6h ,
+not
+.B \-\-start \-6h
+\(em or the option parser takes the value for an option.
+.SH CONFIGURATION
+Settings merge in the server's order: command line > environment > .env >
+YAML file > defaults. See
+.BR darpa-spill-server (1).
+.SH ENVIRONMENT
+.TP
+.B DARPA_SPILL_CONFIG
+Configuration file, as \fB\-\-config\fR.
+.TP
+.B DARPA_SPILL_ENV_FILE
+\&.env file, as \fB\-\-env\-file\fR.
+.TP
+.BI DARPA_SPILL_ SECTION _ KEY
+Overrides any single setting, e.g.
+.BR DARPA_SPILL_TDU_HISTORY_TIMEOUT .
+.SH EXIT STATUS
+.TP
+.B 0
+Finished; every reachable source was walked, or skipped with a message.
+.TP
+.B 1
+Interrupted. Rows already inserted are kept.
+.TP
+.B 2
+A configuration error, an unknown \fB\-\-source\fR, or a malformed time.
+.SH EXAMPLES
+See how much the TDUs still hold, without writing anything:
+.PP
+.RS
+.EX
+darpa\-spill\-backfill \-c config/spillserver.yaml \-\-dry\-run
+.EE
+.RE
+.PP
+Fill everything the ring holds for one source:
+.PP
+.RS
+.EX
+darpa\-spill\-backfill \-c config/spillserver.yaml \-s tdu\-near\-master\-ppc\-01
+.EE
+.RE
+.PP
+Fill the last six hours, in smaller windows, into another archive:
+.PP
+.RS
+.EX
+darpa\-spill\-backfill \-\-start=\-6h \-\-window 60 \-d /var/lib/darpa\-spillserver/spills.db
+.EE
+.RE
+.SH SEE ALSO
+.BR darpa-spill-server (1),
+.BR darpa-spill-query (1),
+.BR tdu_webserver (1),
+.BR darpa_spillserver (3)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/DARPA\-SpillServer/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

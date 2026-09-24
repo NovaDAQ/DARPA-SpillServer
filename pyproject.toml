@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "darpa-spillserver"
-version = "1.2.0"
+version = "1.3.0"
 description = "Web and API server for NOvA accelerator event timestamps collected from a TDU"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,10 +13,16 @@ authors = [{ name = "Andrew Norman", email = "anorman@fnal.gov" }]
 keywords = ["nova", "daq", "fermilab", "accelerator", "spill", "tdu", "timestamp"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: Other/Proprietary License",
     "Framework :: FastAPI",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Topic :: Scientific/Engineering :: Physics",
 ]
 
@@ -38,6 +44,7 @@ dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "respx>=0.20", "authlib>=1.3", "it
 darpa-spill-server = "darpa_spillserver.cli:main"
 darpa-spill-query = "darpa_spillserver.query_cli:main"
 darpa-spill-backfill = "darpa_spillserver.backfill:main"
+darpa-spill-client = "darpa_spillserver.client_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/NovaDAQ/DARPA-SpillServer"
