@@ -43,8 +43,8 @@ $PidFile = if ($env:SPILL_PIDFILE) { $env:SPILL_PIDFILE } else { Join-Path $RunD
 $LogFile = if ($env:SPILL_LOGFILE) { $env:SPILL_LOGFILE } else { Join-Path $RunDir "spillserver.log" }
 $ErrFile = [System.IO.Path]::ChangeExtension($LogFile, ".err.log")
 
-if (-not (Test-Path $Server)) {
-    Write-Host ">> $Server not found; running bootstrap.ps1"
+if (-not (Test-Path $Server) -or -not (Test-Path $Client)) {
+    Write-Host ">> $Server or $Client not found; running bootstrap.ps1"
     & (Join-Path $PSScriptRoot "bootstrap.ps1") -BuildCpp no
 }
 if (-not $Config) {
@@ -56,7 +56,10 @@ if (-not (Test-Path $Config)) { throw "config file $Config not found" }
 # just that the PID exists, so a stale PID file never matches an unrelated
 # process that has since been given the same PID.
 function Test-SpillServer([string]$ProcessId) {
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$ProcessId)" -ErrorAction SilentlyContinue
+    # A truncated or hand-edited PID file is stale, not an error.
+    $id = 0
+    if (-not [int]::TryParse($ProcessId.Trim(), [ref]$id) -or $id -le 0) { return $false }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
     return [bool]($proc -and $proc.CommandLine -match 'darpa-spill-server')
 }
 
@@ -76,6 +79,7 @@ $merged = & $Server -c $Config @ServerArgs --print-config
 if ($LASTEXITCODE -ne 0) { Write-Error "configuration rejected; nothing started"; exit 2 }
 $settings = ($merged | Out-String | ConvertFrom-Json).server
 $bindHost = if (@("0.0.0.0", "", "::") -contains $settings.host) { "127.0.0.1" } else { $settings.host }
+if ($bindHost.Contains(":")) { $bindHost = "[$bindHost]" }   # IPv6 literal in a URL
 $scheme = if ($settings.ssl_certfile) { "https" } else { "http" }
 $Url = "${scheme}://${bindHost}:$($settings.port)"
 

@@ -7,6 +7,7 @@ own HTTP handling: encoding, streaming, error bodies and exit status.
 
 import io
 import json
+import os
 
 import pytest
 
@@ -225,6 +226,22 @@ def test_library_admin(live_server):
     assert moved["source"]["base_url"] == "http://tdu-near-master-ppc-04:8080"
     reset = admin.reset_source(SOURCE_B)["source"]
     assert reset["enabled"] is True and reset["overridden"] is False
+
+
+def test_tls_ca_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    # Without verification no bundle is read, so a missing one is harmless.
+    SpillClient("https://example:8443", ca_file="~/missing.pem", verify_tls=False)
+    # With it, ~ is expanded before the bundle is opened, as in the C++ client.
+    import ssl
+    seen = []
+    real = ssl.create_default_context
+    monkeypatch.setattr(ssl, "create_default_context",
+                        lambda **kw: seen.append(kw.get("cafile")) or real())
+    SpillClient("https://example:8443", ca_file="~/bundle.pem")
+    assert seen == [os.path.expanduser("~/bundle.pem")]
+    assert "~" not in seen[0]
 
 
 def test_library_connection_error():

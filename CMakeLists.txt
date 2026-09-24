@@ -223,6 +223,10 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/DarpaSpillClientConfigVersion.cmake"
   DESTINATION ${DARPA_SPILL_CMAKE_DIR})
 
+set(DARPA_SPILL_PC_LIBS_PRIVATE "-lyaml-cpp")
+if(DARPA_SPILL_WITH_TLS)
+  string(APPEND DARPA_SPILL_PC_LIBS_PRIVATE " -lssl -lcrypto")
+endif()
 configure_file(cmake/darpa_spill_client.pc.in
   "${CMAKE_CURRENT_BINARY_DIR}/darpa_spill_client.pc" @ONLY)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/darpa_spill_client.pc"

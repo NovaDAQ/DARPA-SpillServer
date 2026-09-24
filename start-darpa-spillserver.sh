@@ -94,9 +94,10 @@ read -r SCHEME HOST PORT < <("$VPY" -c '
 import json, sys
 s = json.load(sys.stdin)["server"]
 host = s["host"]
-# A wildcard bind is reachable on loopback.
+# A wildcard bind is reachable on loopback; an IPv6 literal needs brackets.
+host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
 print("https" if s["ssl_certfile"] else "http",
-      "127.0.0.1" if host in ("0.0.0.0", "", "::") else host, s["port"])
+      "[{}]".format(host) if ":" in host else host, s["port"])
 ' <<<"$merged")
 URL="$SCHEME://$HOST:$PORT"
 

@@ -248,9 +248,11 @@ Response perform(const ClientOptions& options, const Url& url, const Request& re
     namespace ssl = net::ssl;
     ssl::context ctx(ssl::context::tls_client);
     try {
-        if (!options.ca_file.empty())
+        // With verification off no CA is consulted, so a missing or bad
+        // bundle must not stop --insecure from connecting.
+        if (options.verify_tls && !options.ca_file.empty())
             ctx.load_verify_file(options.ca_file);
-        else
+        else if (options.verify_tls)
             ctx.set_default_verify_paths();
     } catch (const boost::system::system_error& exc) {
         throw ConnectionError("cannot load CA certificates " +

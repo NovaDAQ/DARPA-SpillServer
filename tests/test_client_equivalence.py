@@ -41,6 +41,9 @@ _VOLATILE = [
     (re.compile(r'"time":\s*"[^"]*"'), '"time": "*"'),
     (re.compile(r"^time: .*$", re.M), "time: *"),
     (re.compile(r'"uptime_seconds":\s*[0-9.]+'), '"uptime_seconds": *'),
+    # A source change is stamped in whole seconds; the two runs may straddle one.
+    (re.compile(r'"updated_at":\s*[0-9.]+'), '"updated_at": *'),
+    (re.compile(r"^updated_at: [0-9.]+$", re.M), "updated_at: *"),
     (re.compile(r"^uptime_seconds: .*$", re.M), "uptime_seconds: *"),
 ]
 

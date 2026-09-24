@@ -377,8 +377,12 @@ class SpillClient:
         self.timezone = timezone
         self._context: Optional[ssl.SSLContext] = None
         if self.url.startswith("https://"):
-            self._context = ssl.create_default_context(cafile=ca_file or None)
-            if not verify_tls:
+            if verify_tls:
+                self._context = ssl.create_default_context(
+                    cafile=os.path.expanduser(ca_file) if ca_file else None)
+            else:
+                # No CA is consulted, so do not load one that may not exist.
+                self._context = ssl.create_default_context()
                 self._context.check_hostname = False
                 self._context.verify_mode = ssl.CERT_NONE
 

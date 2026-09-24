@@ -54,13 +54,21 @@ void dsc_client_free(dsc_client* client) { delete client; }
 
 int dsc_client_set_admin_token(dsc_client* client, const char* token) {
     if (!client) return DSC_ERR_USAGE;
-    client->options.admin_token = token ? token : "";
+    try {  // the assignment allocates; nothing may throw across the C ABI
+        client->options.admin_token = token ? token : "";
+    } catch (...) {
+        return DSC_ERR_INTERNAL;
+    }
     return DSC_OK;
 }
 
 int dsc_client_set_tls(dsc_client* client, const char* ca_file, int verify) {
     if (!client) return DSC_ERR_USAGE;
-    client->options.ca_file = ca_file ? ca_file : "";
+    try {
+        client->options.ca_file = ca_file ? ca_file : "";
+    } catch (...) {
+        return DSC_ERR_INTERNAL;
+    }
     client->options.verify_tls = verify != 0;
     return DSC_OK;
 }

@@ -165,6 +165,21 @@ def test_configuration_errors(run, tmp_path, setup, args):
     assert result.err.startswith("error: ")
 
 
+def test_insecure_never_loads_a_ca_bundle(run, tmp_path):
+    """-k must connect even when --ca-file names nothing; only a verifying
+    client needs the bundle."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    url = "https://127.0.0.1:{}".format(port)
+    missing = str(tmp_path / "missing.pem")
+    result = run("-u", url, "-t", "5", "-k", "--ca-file", missing, "health", check=3)
+    assert "cannot load CA" not in result.err
+    assert result.err.startswith("error: cannot reach")
+    result = run("-u", url, "-t", "5", "--ca-file", missing, "health", check=3)
+    assert "cannot load CA certificates" in result.err
+
+
 def test_connection_refused(run):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

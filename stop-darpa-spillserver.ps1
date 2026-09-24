@@ -22,7 +22,10 @@ $PidFile = if ($env:SPILL_PIDFILE) { $env:SPILL_PIDFILE } else { Join-Path $PSSc
 # just that the PID exists, so a stale PID file never matches an unrelated
 # process that has since been given the same PID.
 function Test-SpillServer([string]$ProcessId) {
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$ProcessId)" -ErrorAction SilentlyContinue
+    # A truncated or hand-edited PID file is stale, not an error.
+    $id = 0
+    if (-not [int]::TryParse($ProcessId.Trim(), [ref]$id) -or $id -le 0) { return $false }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
     return [bool]($proc -and $proc.CommandLine -match 'darpa-spill-server')
 }
 
