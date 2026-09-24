@@ -1,0 +1,159 @@
+.TH START-DARPA-SPILLSERVER 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+start-darpa-spillserver \- start the DARPA Spill Information Server in the background
+.SH SYNOPSIS
+.B ./start\-darpa\-spillserver.sh
+.RB [ \-c | \-\-config
+.IR FILE ]
+.RI [ SERVER-OPTIONS ...]
+.PP
+.B .\e start\-darpa\-spillserver.ps1
+.RB [ \-Config
+.IR FILE ]
+.RB [ \-Wait
+.IR SECONDS ]
+.RB [ \-\- ]
+.RI [ SERVER-OPTIONS ...]
+.SH DESCRIPTION
+Starts
+.BR darpa-spill-server (1)
+from a checkout, detached from the terminal, for hosts where it is not run as a
+service. A service install should use the systemd unit in
+.I docs/DEPLOYMENT.md
+instead. The shell script runs on Linux and macOS; the PowerShell script on
+Windows 11.
+.PP
+Both scripts:
+.IP 1. 4
+Refuse to start a second copy: if the PID file names a live
+.B darpa\-spill\-server
+process they report it and exit 0. The process's command line is checked, not
+just that the PID exists, so a stale PID file never matches an unrelated
+process; a stale file is removed.
+.IP 2. 4
+Run
+.B darpa\-spill\-server \-\-print\-config
+with the same options, which contacts nothing, to reject a bad configuration
+before starting and to find the address the health check should use (a
+wildcard bind is checked on 127.0.0.1).
+.IP 3. 4
+Start the server in the background and write its PID file.
+.IP 4. 4
+Poll
+.I /api/health
+once a second with
+.BR "darpa\-spill\-client \-k health" ,
+and report success only once it answers, so that a port already in use or a
+failure during startup is reported here. If the server exits while starting,
+the tail of its log is shown.
+.PP
+On Linux and macOS the server is given its own session (via Python's
+.BR os.setsid ,
+since macOS has no
+.BR setsid (1)),
+so it survives logging out, and its standard output and error are appended to
+one log, each start marked with a header line. On Windows it is a hidden
+process whose output and errors go to
+.I run\e spillserver.log
+and
+.IR run\e spillserver.err.log .
+If
+.I venv
+does not exist, the PowerShell script runs
+.B bootstrap.ps1 \-BuildCpp no
+first; the shell script asks you to run
+.B ./bootstrap.sh
+instead.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR " (sh), " \-Config " " \fIFILE\fR " (ps1)"
+Configuration file. Default: \fB$SPILL_CONFIG\fR, else
+.I ./spillserver.yaml
+if it exists, else
+.IR config/spillserver.yaml .
+.TP
+.BI \-Wait " SECONDS"
+(ps1) Seconds to wait for the health check. Default \fB$SPILL_WAIT\fR, else
+\fB30\fR.
+.TP
+.I SERVER-OPTIONS
+Anything else is passed to
+.BR darpa-spill-server (1),
+e.g.
+.BR "\-\-port 8081" .
+In PowerShell, put
+.B \-\-
+before them.
+.SH ENVIRONMENT
+.TP
+.B SPILL_CONFIG
+Configuration file, when none is given on the command line.
+.TP
+.B SPILL_PIDFILE
+PID file. Default
+.IR run/spillserver.pid .
+.TP
+.B SPILL_LOGFILE
+Output log. Default
+.IR run/spillserver.log .
+.TP
+.B SPILL_WAIT
+Seconds to wait for the health check. Default \fB30\fR.
+.PP
+The server itself also reads its
+.B DARPA_SPILL_
+variables and
+.I .env
+file; see
+.BR darpa-spill-server (1).
+.SH FILES
+.TP
+.I venv/
+The virtual environment made by
+.BR darpa-spillserver-bootstrap (1).
+.TP
+.I run/spillserver.pid
+.TQ
+.I run/spillserver.log
+.TQ
+.I run\e spillserver.err.log
+PID file and logs.
+.SH EXIT STATUS
+.TP
+.B 0
+The server is up and answering, or was already running.
+.TP
+.B 1
+The server was not found, exited during startup, or did not answer within
+the wait.
+.TP
+.B 2
+The configuration was rejected; nothing was started.
+.SH EXAMPLES
+.RS
+.EX
+\&./start\-darpa\-spillserver.sh
+\&./start\-darpa\-spillserver.sh \-c config/spillserver\-near.yaml
+\&./start\-darpa\-spillserver.sh \-\-port 8081
+SPILL_WAIT=60 ./start\-darpa\-spillserver.sh
+.EE
+.RE
+.PP
+On Windows:
+.PP
+.RS
+.EX
+powershell \-ExecutionPolicy Bypass \-File .\e start\-darpa\-spillserver.ps1
+\&.\e start\-darpa\-spillserver.ps1 \-Config config\e spillserver\-near.yaml \-\- \-\-port 8081
+.EE
+.RE
+.SH SEE ALSO
+.BR stop-darpa-spillserver (1),
+.BR darpa-spillserver-bootstrap (1),
+.BR darpa-spill-server (1),
+.BR darpa-spill-client (1)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/DARPA\-SpillServer/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

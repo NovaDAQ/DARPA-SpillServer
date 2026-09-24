@@ -1,12 +1,13 @@
 """Configuration: defaults, YAML file, environment, command line.
 
 Design.md requires that everything be settable from either the command line or
-a YAML file.  Four layers are merged, each overriding the one before:
+a YAML file.  Five layers are merged, each overriding the one before:
 
 1. the defaults in this module,
 2. a YAML file (``--config``, or the first of the search paths that exists),
-3. environment variables prefixed ``DARPA_SPILL_``,
-4. explicit command-line options.
+3. a ``.env`` file (``--env-file``, ``$DARPA_SPILL_ENV_FILE``, or ``./.env``),
+4. environment variables prefixed ``DARPA_SPILL_``,
+5. explicit command-line options.
 
 An environment variable names its setting by section and key joined with an
 underscore --- ``DARPA_SPILL_TDU_BASE_URL``, ``DARPA_SPILL_STORAGE_PATH`` ---
@@ -49,6 +50,8 @@ __all__ = [
     "ConfigError",
     "DEFAULT_CONFIG_PATHS",
     "ENV_PREFIX",
+    "DOTENV_PATH",
+    "read_dotenv",
     "build_parser",
     "load_config",
     "configure_logging",
@@ -66,8 +69,64 @@ DEFAULT_CONFIG_PATHS = (
 )
 
 
+#: The ``.env`` file read when neither ``--env-file`` nor
+#: ``$DARPA_SPILL_ENV_FILE`` names one; skipped if it does not exist.
+DOTENV_PATH = "./.env"
+
+
 class ConfigError(ValueError):
     """Raised when configuration is missing, malformed, or contradictory."""
+
+
+def read_dotenv(path: str) -> Dict[str, str]:
+    """Parse a ``.env`` file into a mapping.
+
+    The accepted syntax is the common subset every dotenv reader agrees on:
+    ``KEY=VALUE`` lines, blank lines and ``#`` comments skipped, an optional
+    leading ``export``, and one layer of matching single or double quotes
+    stripped from the value.  No interpolation, so a ``$`` in a token means
+    itself.
+
+    :raises ConfigError: if the file cannot be read or a line has no ``=``.
+    """
+    values: Dict[str, str] = {}
+    try:
+        text = Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError("cannot read {}: {}".format(path, exc.strerror)) from None
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        name, sep, value = line.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ConfigError("{}:{}: expected KEY=VALUE, got {!r}".format(
+                path, number, raw))
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        values[name] = value
+    return values
+
+
+def resolve_dotenv(explicit: Optional[str], environ: Mapping[str, str],
+                   default: Optional[str] = DOTENV_PATH) -> Dict[str, str]:
+    """Read the ``.env`` file selected by *explicit*, the environment, or
+    *default*, in that order.
+
+    A file named explicitly must exist; the default is skipped when absent.
+    """
+    chosen = explicit or environ.get(ENV_PREFIX + "ENV_FILE")
+    if chosen:
+        if not Path(chosen).expanduser().is_file():
+            raise ConfigError(".env file not found: {}".format(chosen))
+        return read_dotenv(chosen)
+    if default and Path(default).expanduser().is_file():
+        return read_dotenv(default)
+    return {}
 
 
 @dataclass
@@ -588,6 +647,8 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
     )
     parser.add_argument("-c", "--config", metavar="FILE",
                         help="YAML configuration file")
+    parser.add_argument("--env-file", metavar="FILE",
+                        help=".env file to read (default ./.env if present)")
     parser.add_argument("-V", "--version", action="store_true",
                         help="show version information and exit")
     parser.add_argument("--print-config", action="store_true",
@@ -716,25 +777,31 @@ def load_config(
     argv: Optional[Sequence[str]] = None,
     environ: Optional[Mapping[str, str]] = None,
     search_paths: Optional[Sequence[str]] = None,
+    dotenv_path: Optional[str] = DOTENV_PATH,
 ) -> Config:
-    """Build a :class:`Config` from all four layers.
+    """Build a :class:`Config` from all five layers.
 
     :param args: already-parsed arguments; if omitted, *argv* is parsed.
     :param argv: command line to parse when *args* is not given.
     :param environ: environment to read; defaults to :data:`os.environ`.
     :param search_paths: candidate config files; defaults to
         :data:`DEFAULT_CONFIG_PATHS`.
+    :param dotenv_path: ``.env`` file read when neither ``--env-file`` nor
+        ``$DARPA_SPILL_ENV_FILE`` names one; ``None`` reads none.
     :raises ConfigError: on any malformed or inconsistent setting.
     """
     if args is None:
         args = build_parser().parse_args(argv)
     environ = os.environ if environ is None else environ
+    dotenv = resolve_dotenv(getattr(args, "env_file", None), environ, dotenv_path)
 
     config = Config()
 
     # -- layer 2: YAML ----------------------------------------------------
     config_path: Optional[Path] = None
-    explicit = getattr(args, "config", None) or environ.get(ENV_PREFIX + "CONFIG")
+    explicit = (getattr(args, "config", None)
+                or environ.get(ENV_PREFIX + "CONFIG")
+                or dotenv.get(ENV_PREFIX + "CONFIG"))
     if explicit:
         config_path = Path(explicit).expanduser()
         if not config_path.is_file():
@@ -752,12 +819,19 @@ def load_config(
         _apply_mapping(config, _load_yaml(config_path), str(config_path))
         config.source = str(config_path)
 
-    # -- layer 3: environment ---------------------------------------------
+    # -- layer 3: .env file -----------------------------------------------
+    # Applied separately from, and before, the real environment so that a
+    # variable exported in the shell always beats the file's copy of it.
+    dotenv_data = _env_overrides(dotenv)
+    if dotenv_data:
+        _apply_mapping(config, dotenv_data, "the .env file")
+
+    # -- layer 4: environment ---------------------------------------------
     env_data = _env_overrides(environ)
     if env_data:
         _apply_mapping(config, env_data, "the environment")
 
-    # -- layer 4: command line ---------------------------------------------
+    # -- layer 5: command line ---------------------------------------------
     cli_data: Dict[str, Dict[str, Any]] = {}
     for dest, (section_name, key) in _ARG_MAP.items():
         value = getattr(args, dest, None)

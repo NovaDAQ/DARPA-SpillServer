@@ -1,0 +1,75 @@
+.TH STOP-DARPA-SPILLSERVER 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+stop-darpa-spillserver \- stop a DARPA Spill Information Server started from a checkout
+.SH SYNOPSIS
+.B ./stop\-darpa\-spillserver.sh
+.PP
+.B .\e stop\-darpa\-spillserver.ps1
+.SH DESCRIPTION
+Stops a server started by
+.BR start-darpa-spillserver (1).
+It reads the PID file and checks that the PID is still a
+.B darpa\-spill\-server
+process \(em by its command line, so a stale file never stops an unrelated
+process. If not, it removes the stale PID file and exits 0.
+.PP
+On Linux and macOS it sends
+.BR SIGTERM ,
+which lets uvicorn finish in-flight requests and the poller close the SQLite
+archive cleanly, and waits up to the grace period. If the process is still
+there it sends
+.BR SIGKILL .
+.PP
+On Windows a windowless console process has no equivalent of
+.BR SIGTERM ,
+so the stop is a hard terminate
+.RB ( "taskkill /T /F" ,
+which also ends the Python child the console-script launcher starts). It then
+waits up to 15 s for the process to go.
+.PP
+A hard stop is safe: the archive is in SQLite WAL mode, so at most the last
+poll is lost, and the next poll's overlap re-reads it.
+.PP
+The PID file is removed once the process has gone.
+.SH ENVIRONMENT
+.TP
+.B SPILL_PIDFILE
+PID file. Default
+.IR run/spillserver.pid .
+.TP
+.B SPILL_GRACE
+(sh) Seconds to wait after
+.B SIGTERM
+before
+.BR SIGKILL .
+Default \fB15\fR.
+.SH EXIT STATUS
+.TP
+.B 0
+The server was stopped, or was not running.
+.TP
+.B 1
+The process survived the kill.
+.SH EXAMPLES
+.RS
+.EX
+\&./stop\-darpa\-spillserver.sh
+SPILL_GRACE=60 ./stop\-darpa\-spillserver.sh
+.EE
+.RE
+.PP
+On Windows:
+.PP
+.RS
+.EX
+\&.\e stop\-darpa\-spillserver.ps1
+.EE
+.RE
+.SH SEE ALSO
+.BR start-darpa-spillserver (1),
+.BR darpa-spill-server (1)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/DARPA\-SpillServer/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

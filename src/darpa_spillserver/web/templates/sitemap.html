@@ -1,0 +1,30 @@
+{% extends "_base.html" %}
+{% block content %}
+<section>
+  <h2>Sitemap</h2>
+  <p class="hint">
+    Machine-readable form: <a href="{{ root_path }}/sitemap.xml">/sitemap.xml</a>.
+  </p>
+</section>
+
+{% for group in groups %}
+<section>
+  <h2>{{ group.title }}</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Path</th><th>Methods</th><th>What it is</th></tr></thead>
+      <tbody>
+      {% for entry in group.entries %}
+        <tr>
+          <td>{% if entry.link %}<a href="{{ root_path }}{{ entry.link }}"><code>{{ entry.path }}</code></a>
+              {% else %}<code>{{ entry.path }}</code>{% endif %}</td>
+          <td>{{ entry.methods }}</td>
+          <td>{{ entry.summary }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}

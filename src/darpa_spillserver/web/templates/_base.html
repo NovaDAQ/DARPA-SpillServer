@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="copyright" content="{{ copyright }}">
+<title>{{ page_title }} &mdash; DARPA Spill Information Server</title>
+<link rel="stylesheet" href="{{ root_path }}/static/spillserver.css">
+</head>
+<body>
+<header>
+  <div class="masthead">
+    <div class="masthead-text">
+      <h1>DARPA Spill Information Server</h1>
+      <p class="sub">
+        {{ page_title }} &middot; v{{ version }}
+        &middot; <a href="{{ root_path }}/">query</a>
+        &middot; <a href="{{ root_path }}/config">sources</a>
+        &middot; <a href="{{ root_path }}/api">API</a>
+        &middot; <a href="{{ root_path }}/about">about</a>
+        &middot; <a href="{{ root_path }}/sitemap">sitemap</a>
+        &middot; <a href="{{ bug_report_url }}" target="_blank" rel="noopener noreferrer"
+                    >report a bug</a>
+      </p>
+    </div>
+    <a class="logo" href="{{ project_url }}" target="_blank" rel="noopener noreferrer"
+       title="NOvA DAQ &mdash; DARPA-SpillServer on GitHub">
+      <img src="{{ root_path }}/static/novadaq-logo.png"
+           alt="NOvA DAQ" width="256" height="256">
+    </a>
+  </div>
+</header>
+
+<main class="doc">
+{% block content %}{% endblock %}
+</main>
+
+<footer>
+  <p>
+    NOvA DAQ &middot;
+    <a href="{{ project_url }}" target="_blank" rel="noopener noreferrer"
+       >DARPA-SpillServer</a>
+    &middot; v{{ version }}
+    &middot; <a href="{{ bug_report_url }}" target="_blank" rel="noopener noreferrer"
+                >report a bug</a>
+  </p>
+  <p class="copyright">{{ copyright }}</p>
+</footer>
+</body>
+</html>

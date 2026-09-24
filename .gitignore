@@ -27,9 +27,12 @@ htmlcov/
 # Local configuration overrides; the committed ones live in config/
 /spillserver.yaml
 
-# Local TLS certificate and private key, and the admin token
+# Local TLS certificate and private key, the admin token, and .env files
 /tls/
 /secrets/
+.env
+*.env
+!config/*.env.example
 
 # Core dumps
 core/

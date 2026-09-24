@@ -249,3 +249,20 @@ footer .copyright { font-size: 0.76rem; }
 #sources .hint { white-space: normal; max-width: 420px; }
 #sources .chip { display: inline-flex; }
 button:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Reference pages: about, API, sitemap. */
+main.doc section { margin: 18px 0 26px; }
+main.doc h2 { margin: 0 0 8px; font-size: 1.1rem; color: var(--accent); }
+main.doc h3 { margin: 18px 0 6px; font-size: 0.95rem; font-weight: 600; }
+main.doc p { max-width: 80ch; line-height: 1.5; }
+main.doc tbody th { text-align: left; width: 14em; }
+.toc { columns: 3 12em; padding-left: 1.2em; }
+.route { border-top: 1px solid var(--accent-soft); padding-top: 4px; }
+.route .description { white-space: pre-line; color: var(--muted); font-size: 0.86rem; }
+.method {
+  display: inline-block; min-width: 4.2em; padding: 1px 6px; margin-right: 6px;
+  border: 1px solid var(--accent-soft); border-radius: 4px;
+  font-size: 0.74rem; text-align: center;
+  background: var(--head); color: var(--accent);
+}
+.method-patch, .method-post { background: var(--accent); color: var(--on-accent); }

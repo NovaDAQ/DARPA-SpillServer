@@ -122,6 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="show version information and exit")
     parser.add_argument("-c", "--config", metavar="FILE",
                         help="YAML configuration file")
+    parser.add_argument("--env-file", metavar="FILE",
+                        help=".env file to read (default ./.env if present)")
     parser.add_argument("-d", "--database", metavar="FILE",
                         help="archive to write into; overrides the config")
     parser.add_argument("-s", "--source", action="append", metavar="NAME",
@@ -311,7 +313,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     try:
-        config = load_config(argv=(["-c", args.config] if args.config else []))
+        config = load_config(argv=(
+            (["-c", args.config] if args.config else [])
+            + (["--env-file", args.env_file] if args.env_file else [])))
     except ConfigError as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2

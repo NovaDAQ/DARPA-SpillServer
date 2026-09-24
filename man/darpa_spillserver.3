@@ -1,4 +1,4 @@
-.TH DARPA_SPILLSERVER 3 "September 2026" "darpa_spillserver 1.1.0" "Library Functions"
+.TH DARPA_SPILLSERVER 3 "September 24, 2026" "darpa_spillserver 1.3.0" "Library Functions"
 .SH NAME
 darpa_spillserver \- Python library for NOvA accelerator event timestamps
 .SH SYNOPSIS
@@ -8,6 +8,7 @@ darpa_spillserver \- Python library for NOvA accelerator event timestamps
 .B from darpa_spillserver.storage import SpillStore
 .B from darpa_spillserver.signals import parse_signal, decode_event_word
 .B from darpa_spillserver.novatime import parse_range, convert
+.B from darpa_spillserver.client import SpillClient, Selection
 .EE
 .SH DESCRIPTION
 The
@@ -82,8 +83,192 @@ runs one per enabled source and applies runtime changes to them.
 .SS darpa_spillserver.formats
 CSV and JSON rendering, as streaming generators.
 .SS darpa_spillserver.config
-Configuration merged from defaults, a YAML file, the environment, and the
-command line.
+Configuration merged from five layers, each overriding the one before:
+defaults, a YAML file, a
+.B .env
+file, the environment, and the command line.
+.TP
+.BI load_config( args ", " argv ", " environ ", " search_paths ", " dotenv_path )
+Build a
+.B Config
+from all five layers.
+.I dotenv_path
+(default
+.BR DOTENV_PATH ,
+.IR ./.env )
+is read when neither
+.B \-\-env\-file
+nor
+.B $DARPA_SPILL_ENV_FILE
+names a file;
+.B None
+reads none. Raises
+.B ConfigError
+on any malformed or inconsistent setting.
+.TP
+.BI read_dotenv( path )
+Parse a
+.B .env
+file into a
+.BR dict :
+.IB KEY = VALUE
+lines, blank lines and
+.B #
+comments skipped, a leading
+.B export
+ignored, one layer of matching quotes removed, no interpolation. Raises
+.B ConfigError
+if the file cannot be read or a line has no
+.BR = .
+.TP
+.BI resolve_dotenv( explicit ", " environ ", " default )
+Read the
+.B .env
+file named by
+.IR explicit ,
+else by
+.B DARPA_SPILL_ENV_FILE
+in
+.IR environ ,
+else
+.I default
+if it exists. An explicitly named file must exist.
+.SS darpa_spillserver.client
+A client for a running server's HTTP API, using only the standard library for
+HTTP (PyYAML only to read a configuration file). It follows the contract in
+.IR docs/CLIENT.md ,
+shared with the C++ library
+.BR darpa_spill_client (3).
+.TP
+\fBSpillClient(\fIurl\fB, \fItimeout\fB=30.0, \fIadmin_token\fB=\(dq\(dq, \fIca_file\fB=\(dq\(dq, \fIverify_tls\fB=True, \fItimezone\fB=\(dq\(dq)\fR
+One server.
+.I admin_token
+is sent as
+.B X\-Admin\-Token
+when not empty;
+.I timezone
+is sent as
+.B tz=
+on time-bearing queries when not empty.
+.B SpillClient.from_config(\fIconfig\fB)
+builds one from a
+.BR ClientConfig .
+.TP
+.BR health() ", " status() ", " sources() ", " signals() ", " types() ", " time_help()
+The reference routes, each returning the parsed JSON.
+.TP
+.BI time_convert( t ", " tz )
+One instant rendered as NOvA ticks, UNIX, UTC and GPS.
+.TP
+.BI latest( signal ", " sources )
+The newest event, as
+.BR {"event":\ {...}} .
+.TP
+.BI events( selection ", " limit ", " offset ", " descending ", " tz )
+One page, as
+.BR {"meta":\ ...,\ "events":\ [...]} ;
+.B meta.total
+is the number matching overall.
+.TP
+.BI events_csv( selection ", " limit ", " offset ", " descending ", " tz ", " columns )
+One page as CSV text, with its
+.B #
+comment header.
+.TP
+.BI export( selection ", " out ", " fmt "=\(dqcsv\(dq, " tz ", " columns )
+Stream every matching event to the binary file
+.IR out ,
+in 64 KiB chunks; returns the number of bytes written.
+.TP
+.BR admin_check() ", " update_source( \fIname\fR ", " \fIenabled\fR ", " \fIbase_url\fR ) ", " reset_source( \fIname\fR )
+Source administration; need the admin token.
+.TP
+.BI request( method ", " path ", " params ", " body )
+.TQ
+.BI stream( method ", " path ", " params )
+The transport under every call:
+.B request
+returns a
+.B Response
+.RB ( status ", " headers ", " body ", " json() ", " text );
+.B stream
+yields the body in chunks.
+.TP
+.BI Selection( start ", " end ", " signals ", " types ", " sources )
+Which events to ask for; every field optional. Times are any expression the
+server accepts.
+.TP
+.BI encode_query( params )
+Percent-encode an ordered list of
+.RI ( name ", " value )
+pairs per RFC 3986, so
+.B $74
+becomes
+.BR %2474 .
+.TP
+.B ClientConfig
+The settings
+.BR url ", " timeout ", " admin_token ", " admin_token_file ", "
+.BR ca_file ", " verify_tls ", " format ", " timezone ,
+with
+.B resolved_token()
+(the token, read from
+.B admin_token_file
+if set) and
+.B to_yaml()
+(the
+.B \-\-print\-config
+layout, token hidden).
+.TP
+.BI load_client_config( config_file ", " env_file ", " overrides ", " environ ", " search_paths ", " dotenv_path )
+Merge defaults, the YAML file's
+.B client:
+section, the
+.B .env
+file, the
+.B DARPA_SPILL_CLIENT_
+environment variables and
+.I overrides
+(command line;
+.B None
+values ignored), in rising precedence. Raises
+.B ConfigError
+on an unreadable file, unknown key or bad value.
+.TP
+.B SpillClientError
+Base of every error the client raises.
+.B SpillHTTPError
+is an HTTP error status, with
+.BR status ", " message " and " hint
+read from the server's error body.
+.B SpillConnectionError
+means the server could not be reached (DNS, refused, TLS or timeout).
+.SS darpa_spillserver.client_cli
+.BR darpa-spill-client (1).
+.BI main( argv ", " out ", " err )
+runs it and returns the exit status;
+.I out
+is a binary stream so that output is written byte for byte.
+.BR cell() ", " flatten() ", " render_table() " and " render_csv()
+implement the output rules shared with
+.BR darpa-spill-client-cpp (1).
+.SS darpa_spillserver.pages
+Content for the
+.IR /about ,
+.I /api
+and
+.I /sitemap
+pages.
+.BI api_context( schema )
+and
+.BI sitemap_groups( schema ", " auth_enabled )
+are generated from the application's OpenAPI schema, so a new route appears
+without anyone remembering to add it;
+.BI sitemap_xml( base_url ", " schema )
+renders a sitemaps.org
+.BR urlset ;
+.BI about_context( config ", " state )
+reads installed dependency versions from package metadata.
 .SS darpa_spillserver.api ", " darpa_spillserver.app
 The FastAPI routes and the application factory.
 .SH EXAMPLES
@@ -118,9 +303,31 @@ config.storage.path = ":memory:"
 app = create_app(config, start_ingest=False)
 .EE
 .RE
+.PP
+Query a running server:
+.PP
+.RS
+.EX
+from darpa_spillserver.client import SpillClient, Selection, SpillHTTPError
+
+client = SpillClient("http://novadaq\-near\-gateway\-01.fnal.gov:8080")
+try:
+    page = client.events(Selection(start="today", signals=["$74"]), limit=100)
+except SpillHTTPError as exc:
+    print(exc.status, exc.message, exc.hint)
+else:
+    print(page["meta"]["total"], len(page["events"]))
+with open("numi.csv", "wb") as out:
+    client.export(Selection(start="\-1d", signals=["$74"]), out)
+.EE
+.RE
 .SH SEE ALSO
 .BR darpa-spill-server (1),
 .BR darpa-spill-query (1),
+.BR darpa-spill-backfill (1),
+.BR darpa-spill-client (1),
+.BR darpa-spill-client-cpp (1),
+.BR darpa_spill_client (3),
 .BR nova_time_decoder (3)
 .SH AUTHOR
 NOvA DAQ group, Fermi National Accelerator Laboratory.

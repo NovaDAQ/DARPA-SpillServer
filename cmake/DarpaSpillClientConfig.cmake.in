@@ -1,0 +1,23 @@
+# DarpaSpillClientConfig.cmake -- find_package(DarpaSpillClient) support.
+#
+#   find_package(DarpaSpillClient 1.3 REQUIRED)
+#   target_link_libraries(myprog PRIVATE DarpaSpill::client)
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
+# Boost.JSON appears in the public headers, so consumers need it too.
+find_dependency(Boost 1.75 COMPONENTS json)
+if(NOT @BUILD_SHARED_LIBS@)
+  # A static library carries its private dependencies into the link.
+  find_dependency(yaml-cpp)
+  find_dependency(Threads)
+  if(@DARPA_SPILL_WITH_TLS@)
+    find_dependency(OpenSSL)
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/DarpaSpillClientTargets.cmake")
+check_required_components(DarpaSpillClient)

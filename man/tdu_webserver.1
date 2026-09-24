@@ -1,0 +1,174 @@
+.TH TDU_WEBSERVER 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+tdu_webserver \- TDU embedded web server with a bulk spill-history route
+.SH SYNOPSIS
+.B python2.5
+.B contrib/tduweb/tdu_webserver.py
+.RI [ PORT ]
+.SH DESCRIPTION
+.B tdu_webserver.py
+is a drop-in replacement for
+.I TDUWeb/server/tdu_webserver.py
+on a NOvA Timing Distribution Unit. It is a small
+.B bottle
+application that runs the TDU's command-line utilities and returns their
+output over HTTP. Every existing route issues the same command as before, and
+one route is added,
+.IR /spill_history ,
+which is what
+.BR darpa-spill-server (1)
+needs to record a complete event history.
+.PP
+The copy in this repository is a mirror. The authoritative, deployed file is
+.I server/tdu_webserver.py
+on the
+.B Darpa\-Modifications
+branch of
+.BR https://github.com/NovaDAQ/TDUWeb .
+Change it there, then re-sync.
+.PP
+It runs on the TDU's stock Python 2.5 as well as Python 3, needs nothing
+beyond the vendored
+.I bottle.py
+already in
+.IR TDUWeb/server/ ,
+and carries its own JSON encoder because Python 2.5 has no
+.B json
+module. It works with an unpatched
+.B DumpSpillHistory
+by parsing that tool's CSV output.
+.PP
+bottle's default server is single-threaded, so every helper command is run
+with a 20 s timeout, and its output is capped at 8 MiB, so that one hung or
+oversized command cannot take down every route.
+.SH ROUTES
+.TP
+.B /tcr_status
+.TQ
+.B /onehz_status
+The newest event in the
+.B BEAM
+shared-memory ring, from
+.BR "DumpSpillHistory \-\-last" .
+Both return the same record, because
+.B \-\-last
+ignores the type filters.
+.TP
+.BR /spill_history "[?since=\fITICKS\fR&until=\fITICKS\fR&limit=\fIN\fR&types=\fILIST\fR]"
+A window of events as JSON:
+.BR since " (inclusive) and " until
+(exclusive) in NOvA ticks, decimal or
+.BR 0x \-hex;
+.B limit
+default 5000, capped at 20000;
+.B types
+a comma-separated list of decoded spill-type numbers. The body is
+.B {"events": [...], "count": N, "truncated": B, "limit": L}
+with rows oldest first. When
+.B truncated
+is true, ask again with
+.B since
+past the last row.
+.TP
+.B /spill_history_info
+Capabilities, for client probing: limits, the memory segment, and whether the
+raw event word is available (it is not).
+.TP
+.B /tdu_status
+.BR tduRegDump .
+.TP
+.BR /tdu_init ", " /tdu_sync
+.BR "tduControl set 0x0 0x0420" .
+.TP
+.B /tdu_scrub
+.BR "tduControl set 0x0009 0x0004" .
+.TP
+.BR /tdu_errors ", " /tdu_errors2
+.B tduRegDump \-w \-a
+.BR 0x0014 " and " 0x000e .
+.TP
+.B /tcr_start
+Launches
+.B "TCRMonitor \-D 0 \-S 0"
+and returns at once. The original blocked forever waiting for a process that
+never exits; this is the one intentional change in behaviour.
+.TP
+.B /tcr_running
+Whether a
+.B TCRMonitor
+process exists
+.RB ( pidof ).
+.SH OPTIONS
+.TP
+.I PORT
+Port to listen on. Wins over
+.BR TDU_WEB_PORT .
+A value that is not a number in 1\(en65535 is reported on standard error and
+ignored.
+.SH ENVIRONMENT
+.TP
+.B TDU_WEB_HOST
+Address to bind. Default \fB0.0.0.0\fR.
+.TP
+.B TDU_WEB_PORT
+Port to bind when no
+.I PORT
+argument is given. Default \fB8080\fR.
+.TP
+.B TDU_WEB_NO_SERVE
+Set to \fB1\fR, \fBtrue\fR or \fByes\fR to import the module without starting
+the server, as
+.BR tduweb-selftest (1)
+and linters do. Without it, importing the module starts the server, as the
+original did.
+.SH EXAMPLES
+Install on the TDU, as root, keeping the original for rollback:
+.PP
+.RS
+.EX
+cd /path/to/TDUWeb/server
+cp tdu_webserver.py tdu_webserver.py.orig\-$(date +%Y%m%d)
+cp /path/from/here/tdu_webserver.py tdu_webserver.py
+.EE
+.RE
+.PP
+Restart the service, then check the new route and an old one:
+.PP
+.RS
+.EX
+curl \-s 'http://localhost:8080/spill_history?limit=5' | head
+curl \-s 'http://localhost:8080/tcr_status'
+.EE
+.RE
+.PP
+Run on another port:
+.PP
+.RS
+.EX
+python2.5 ./tdu_webserver.py 8081
+TDU_WEB_PORT=8081 python2.5 ./tdu_webserver.py
+.EE
+.RE
+.SH FILES
+.TP
+.I contrib/tduweb/README.md
+Why the route is needed, deployment, rollback, and the further upstream
+changes it does not make.
+.TP
+.I contrib/tduweb/patches/0001\-DumpSpillHistory\-json\-and\-time\-window.patch
+Optional fix to
+.BR DumpSpillHistory 's
+bulk JSON, adding
+.BR \-\-since / \-\-until .
+.SH SEE ALSO
+.BR tduweb-selftest (1),
+.BR tduweb-check-python25 (1),
+.BR tduweb-run-as-python25 (1),
+.BR darpa-spill-server (1),
+.BR darpa-spill-backfill (1)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/TDUWeb/issues\fR, or for the copy here at
+\fBhttps://github.com/NovaDAQ/DARPA\-SpillServer/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

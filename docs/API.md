@@ -1,7 +1,18 @@
 # API reference
 
-Base path `/api`. The generated OpenAPI reference is served live at `/docs`,
-and the raw schema at `/openapi.json`.
+Base path `/api`. A running server also documents itself:
+
+* `/api`: every route, its parameters and request body, generated from the
+  OpenAPI schema, so it always matches the running version.
+* `/docs` (Swagger UI) and `/redoc`: the same schema, interactive.
+* `/openapi.json`: the raw schema.
+* `/sitemap` and `/sitemap.xml`: every page and route.
+* `/about`: the version, the configuration in use, and the installed
+  dependencies.
+
+For scripts and programs, `darpa-spill-client` (Python) and
+`darpa-spill-client-cpp` (C++) wrap every endpoint below, and so do the
+libraries they are built on; see [CLIENT.md](CLIENT.md).
 
 Every query endpoint is a `GET`, and the server never modifies the
 accelerator data it serves. The only writes are to its own source

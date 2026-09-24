@@ -22,7 +22,7 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -30,6 +30,7 @@ from . import COPYRIGHT, ISSUES_URL, PROJECT_URL, __version__
 from .api import build_router
 from .auth import AuthError, build_authenticator
 from .config import Config, ConfigError
+from .pages import about_context, api_context, sitemap_groups, sitemap_xml
 from .poller import IngestManager
 from .signals import SIGNALS, SpillType, describe_type, signals_for_type
 from .storage import SpillStore
@@ -266,6 +267,41 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
                 "auth_enabled": config.auth.enabled,
             },
         )
+
+    def page(request: Request, name: str, context: dict):
+        """Render one of the reference pages built on _base.html."""
+        common = {
+            "version": state.version,
+            "copyright": COPYRIGHT,
+            "root_path": config.server.root_path,
+            "project_url": PROJECT_URL,
+            "bug_report_url": bug_report_url,
+        }
+        common.update(context)
+        return templates.TemplateResponse(request, name, common)
+
+    @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
+    async def about_page(request: Request):
+        """What this server is, how it is set up, and what it depends on."""
+        return page(request, "about.html", about_context(config, state))
+
+    @app.get("/api", response_class=HTMLResponse, include_in_schema=False)
+    async def api_page(request: Request):
+        """Every API route, generated from the OpenAPI schema."""
+        return page(request, "api.html", api_context(app.openapi()))
+
+    @app.get("/sitemap", response_class=HTMLResponse, include_in_schema=False)
+    async def sitemap_page(request: Request):
+        """Every page and route this server answers."""
+        return page(request, "sitemap.html", {
+            "page_title": "Sitemap",
+            "groups": sitemap_groups(app.openapi(), config.auth.enabled),
+        })
+
+    @app.get("/sitemap.xml", include_in_schema=False)
+    async def sitemap_document(request: Request):
+        return Response(sitemap_xml(str(request.base_url), app.openapi()),
+                        media_type="application/xml")
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
