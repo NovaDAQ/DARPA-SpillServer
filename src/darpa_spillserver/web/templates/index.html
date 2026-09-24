@@ -16,7 +16,9 @@
         NOvA accelerator event timestamps from
         {% for name in sources %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
         &middot; v{{ version }}
-        &middot; <a href="{{ root_path }}/docs">API docs</a>
+        &middot; <a href="{{ root_path }}/api">API</a>
+        &middot; <a href="{{ root_path }}/about">about</a>
+        &middot; <a href="{{ root_path }}/sitemap">sitemap</a>
         &middot; <a href="{{ root_path }}/api/status">status</a>
         &middot; <a href="{{ root_path }}/config">sources</a>
         {% if auth_enabled %}&middot; <a href="{{ root_path }}/auth/whoami">account</a>{% endif %}

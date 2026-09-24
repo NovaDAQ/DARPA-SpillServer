@@ -1,0 +1,59 @@
+{% extends "_base.html" %}
+{% block content %}
+<section>
+  <h2>API</h2>
+  <p>
+    Every route below is generated from the server's own OpenAPI schema, so
+    this page cannot drift from what the server accepts. Try requests
+    interactively at <a href="{{ root_path }}/docs">/docs</a>, read the same
+    schema as <a href="{{ root_path }}/redoc">ReDoc</a>, or fetch it raw from
+    <a href="{{ root_path }}/openapi.json">/openapi.json</a>.
+  </p>
+  <p class="hint">
+    Time parameters take any expression listed by
+    <a href="{{ root_path }}/api/time/help">/api/time/help</a>. Signals take the
+    hex form (<code>$74</code>) or a name (<code>numi</code>). Routes that
+    change sources need the <code>X-Admin-Token</code> header.
+    Command-line clients: <code>darpa-spill-client</code> (Python) and
+    <code>darpa-spill-client-cpp</code> (C++), both documented in
+    <code>docs/CLIENT.md</code>.
+  </p>
+  <ul class="toc">
+  {% for tag in tags %}
+    <li><a href="#tag-{{ tag.name }}">{{ tag.name }}</a>
+      ({{ tag.routes | length }})</li>
+  {% endfor %}
+  </ul>
+</section>
+
+{% for tag in tags %}
+<section id="tag-{{ tag.name }}">
+  <h2>{{ tag.name }}</h2>
+  {% for route in tag.routes %}
+  <article class="route" id="{{ route.anchor }}">
+    <h3><span class="method method-{{ route.method | lower }}">{{ route.method }}</span>
+        <code>{{ route.path }}</code> &mdash; {{ route.summary }}</h3>
+    {% if route.description %}<p class="description">{{ route.description }}</p>{% endif %}
+    {% if route.parameters %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>In</th><th>Required</th><th>Description</th></tr></thead>
+        <tbody>
+        {% for p in route.parameters %}
+          <tr>
+            <td><code>{{ p.name }}</code></td>
+            <td>{{ p.location }}</td>
+            <td>{{ "yes" if p.required else "no" }}</td>
+            <td>{{ p.description }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if route.body %}<p class="hint">Request body: <code>{{ route.body }}</code></p>{% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% endfor %}
+{% endblock %}
