@@ -1,0 +1,66 @@
+.TH TDUWEB-RUN-AS-PYTHON25 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+tduweb-run-as-python25 \- run a script under Python 2.7 with the 2.6+ builtins removed
+.SH SYNOPSIS
+.B python2
+.B contrib/tduweb/run_as_python25.py
+.I SCRIPT
+.RI [ ARGS ...]
+.SH DESCRIPTION
+.B run_as_python25.py
+approximates Python 2.5 closely enough to catch what a source scan misses:
+code that uses a name which does not exist on 2.5. The case that motivated it
+is
+.BR bytes ,
+which Python 2.7 has as an alias for
+.BR str ,
+so code using it runs cleanly on a development machine and dies with
+.B NameError
+on the TDU.
+.PP
+It deletes
+.BR bytes ", " bytearray ", " next ", " bin ", " format " and " memoryview
+from
+.B __builtin__
+and then runs
+.I SCRIPT
+with
+.BR execfile ,
+passing it
+.I ARGS
+as
+.BR sys.argv .
+The names that are hidden are reported on standard error.
+.PP
+Parts of the standard library use some of those names internally, so first it
+imports and exercises everything the code under test is known to reach
+(including
+.B bottle
+if it is importable), and gives every module already loaded its own copy of the
+names. Only code imported afterwards \(em the code under test \(em loses them.
+.PP
+It must run under Python 2.7.
+.SH EXIT STATUS
+That of
+.IR SCRIPT .
+A
+.B NameError
+for one of the hidden names means the script would fail on the TDU.
+.SH EXAMPLES
+Run the TDU web server's self-test as it would behave on 2.5:
+.PP
+.RS
+.EX
+PYTHONPATH=/path/to/TDUWeb/server TDU_WEB_NO_SERVE=1 \e
+    python2 contrib/tduweb/run_as_python25.py contrib/tduweb/selftest.py
+.EE
+.RE
+.SH SEE ALSO
+.BR tduweb-check-python25 (1),
+.BR tduweb-selftest (1),
+.BR tdu_webserver (1)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/TDUWeb/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

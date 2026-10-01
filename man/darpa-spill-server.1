@@ -1,4 +1,4 @@
-.TH DARPA-SPILL-SERVER 1 "September 2026" "darpa_spillserver 1.1.0" "User Commands"
+.TH DARPA-SPILL-SERVER 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
 .SH NAME
 darpa-spill-server \- serve NOvA accelerator event timestamps collected from a TDU
 .SH SYNOPSIS
@@ -18,10 +18,20 @@ UNIX time, UTC and GPS together.
 .PP
 A browser interface is served at
 .IR / ,
-a generated API reference at
-.IR /docs ,
+the source administration page at
+.IR /config ,
+an API reference generated from the OpenAPI schema at
+.I /api
+(interactive at
+.IR /docs ),
+a description of the server and its dependencies at
+.IR /about ,
+a sitemap at
+.I /sitemap
+and
+.IR /sitemap.xml ,
 and the API itself under
-.IR /api .
+.IR /api/ .
 .SS Degraded operation
 Where the TDU does not expose the
 .I /spill_history
@@ -44,6 +54,12 @@ Read configuration from \fIFILE\fR. Without this, the first of
 .IR ~/.config/darpa\-spillserver/spillserver.yaml ,
 .I /etc/darpa\-spillserver/spillserver.yaml
 that exists is used.
+.TP
+.BI \-\-env\-file " FILE"
+Read \fBDARPA_SPILL_\fR variables from the \fB.env\fR file \fIFILE\fR.
+Without this, \fB$DARPA_SPILL_ENV_FILE\fR names the file, else
+.I ./.env
+is read if it exists. A file named explicitly must exist.
 .TP
 .BR \-V ", " \-\-version
 Show version information for the server and its key dependencies, then exit.
@@ -89,7 +105,13 @@ A single TDU, the form used before
 existed. Cannot be combined with it.
 .TP
 .BI \-\-tdu\-timeout " SECONDS"
-Per-request timeout. Default \fB10.0\fR.
+Per-request timeout for the quick routes. Default \fB10.0\fR; the shipped
+.I config/spillserver.yaml
+sets \fB20.0\fR.
+.TP
+.BI \-\-tdu\-history\-timeout " SECONDS"
+Timeout for a bulk history read, which walks the TDU's whole ring and takes
+minutes on that hardware. Default \fB600.0\fR.
 .TP
 .BI \-\-tdu\-retries " N"
 Retries per failed request. Default \fB2\fR.
@@ -169,8 +191,25 @@ and console-only logging rather than a failure to start.
 .BR \-v ", " \-\-verbose
 Shorthand for \fB\-\-log\-level DEBUG\fR.
 .SH CONFIGURATION
-Four layers merge, each overriding the previous: built-in defaults, the YAML
-file, environment variables, then command-line options.
+Five layers merge, each overriding the previous: built-in defaults, the YAML
+file, the
+.B .env
+file, environment variables, then command-line options. In order of
+precedence: command line > environment > .env > YAML file > defaults.
+.PP
+The
+.B .env
+file holds
+.IB KEY = VALUE
+lines. Blank lines and lines starting with
+.B #
+are skipped, a leading
+.B export
+is ignored, and one layer of matching single or double quotes is removed from
+the value. There is no interpolation. Only
+.B DARPA_SPILL_
+variables are used, and a variable also set in the real environment keeps the
+environment's value.
 .PP
 Environment variables are named
 .BI DARPA_SPILL_ SECTION _ KEY
@@ -188,12 +227,20 @@ misspelling is caught at startup instead of quietly doing nothing.
 .I /etc/darpa\-spillserver/spillserver.yaml
 Configuration files, searched in this order.
 .TP
+.I ./.env
+Optional \fB.env\fR file, read when neither \fB\-\-env\-file\fR nor
+\fB$DARPA_SPILL_ENV_FILE\fR names one.
+.TP
 .I ./spills.db
 Default SQLite archive.
 .SH ENVIRONMENT
 .TP
 .B DARPA_SPILL_CONFIG
-Path to the configuration file, equivalent to \fB\-\-config\fR.
+Path to the configuration file, equivalent to \fB\-\-config\fR. May also be
+set in the \fB.env\fR file.
+.TP
+.B DARPA_SPILL_ENV_FILE
+Path to the \fB.env\fR file, equivalent to \fB\-\-env\-file\fR.
 .TP
 .BI DARPA_SPILL_ SECTION _ KEY
 Overrides any single setting.
@@ -208,7 +255,6 @@ A runtime failure, such as a missing dependency.
 .B 2
 The configuration is missing, malformed, or inconsistent.
 .SH EXAMPLES
-.PP
 Check the merged configuration without starting anything:
 .PP
 .RS
@@ -232,9 +278,26 @@ Serve an existing archive read-only, on another port:
 darpa\-spill\-server \-\-no\-ingest \-\-database /backup/spills.db \-\-port 9090
 .EE
 .RE
+.PP
+Start it in the background from a checkout, and stop it again:
+.PP
+.RS
+.EX
+\&./start\-darpa\-spillserver.sh \-c config/spillserver\-near.yaml
+\&./stop\-darpa\-spillserver.sh
+.EE
+.RE
 .SH SEE ALSO
 .BR darpa-spill-query (1),
+.BR darpa-spill-backfill (1),
+.BR darpa-spill-client (1),
+.BR darpa-spill-client-cpp (1),
+.BR start-darpa-spillserver (1),
+.BR stop-darpa-spillserver (1),
+.BR darpa-spillserver-bootstrap (1),
+.BR tdu_webserver (1),
 .BR darpa_spillserver (3),
+.BR darpa_spill_client (3),
 .BR nova-time-convert (1)
 .PP
 Full documentation in the source distribution under

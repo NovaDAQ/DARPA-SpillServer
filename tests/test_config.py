@@ -252,3 +252,76 @@ def test_parser_help_mentions_every_group():
     for heading in ("server", "TDU data source", "ingest", "storage",
                     "query defaults", "authentication", "logging"):
         assert heading in help_text
+
+
+# ------------------------------------------------------------------ .env
+
+
+def test_read_dotenv_syntax(tmp_path):
+    from darpa_spillserver.config import read_dotenv
+    path = tmp_path / ".env"
+    path.write_text(
+        "# a comment\n"
+        "\n"
+        "DARPA_SPILL_SERVER_PORT=7001\n"
+        "export DARPA_SPILL_SERVER_HOST = 127.0.0.1\n"
+        "DARPA_SPILL_ADMIN_TOKEN='a$b c'\n"
+        'DARPA_SPILL_LOGGING_LEVEL="DEBUG"\n'
+    )
+    assert read_dotenv(str(path)) == {
+        "DARPA_SPILL_SERVER_PORT": "7001",
+        "DARPA_SPILL_SERVER_HOST": "127.0.0.1",
+        "DARPA_SPILL_ADMIN_TOKEN": "a$b c",
+        "DARPA_SPILL_LOGGING_LEVEL": "DEBUG",
+    }
+
+
+def test_read_dotenv_rejects_line_without_equals(tmp_path):
+    from darpa_spillserver.config import read_dotenv
+    path = tmp_path / ".env"
+    path.write_text("DARPA_SPILL_SERVER_PORT\n")
+    with pytest.raises(ConfigError, match=":1: expected KEY=VALUE"):
+        read_dotenv(str(path))
+
+
+def test_dotenv_sits_between_yaml_and_environment(tmp_path):
+    path = write_yaml(tmp_path, "server:\n  port: 5000\n  host: 10.0.0.1\n")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DARPA_SPILL_SERVER_PORT=6000\nDARPA_SPILL_SERVER_HOST=10.0.0.2\n")
+
+    config = load_config(argv=["-c", path, "--env-file", str(dotenv)], environ={})
+    assert config.server.port == 6000          # .env beats YAML
+    assert config.server.host == "10.0.0.2"
+
+    config = load_config(argv=["-c", path, "--env-file", str(dotenv)],
+                         environ={"DARPA_SPILL_SERVER_PORT": "7000"})
+    assert config.server.port == 7000          # environment beats .env
+    assert config.server.host == "10.0.0.2"
+
+    config = load_config(argv=["-c", path, "--env-file", str(dotenv), "--port", "8000"],
+                         environ={"DARPA_SPILL_SERVER_PORT": "7000"})
+    assert config.server.port == 8000          # command line beats all
+
+
+def test_dotenv_default_path_and_env_selector(tmp_path):
+    dotenv = tmp_path / "custom.env"
+    dotenv.write_text("DARPA_SPILL_SERVER_PORT=6100\n")
+    config = load_config(argv=[], environ={}, search_paths=[], dotenv_path=str(dotenv))
+    assert config.server.port == 6100
+    config = load_config(argv=[], environ={"DARPA_SPILL_ENV_FILE": str(dotenv)},
+                         search_paths=[], dotenv_path=None)
+    assert config.server.port == 6100
+    # The default is optional; an explicitly named file is not.
+    load_config(argv=[], environ={}, search_paths=[],
+                dotenv_path=str(tmp_path / "absent.env"))
+    with pytest.raises(ConfigError, match=".env file not found"):
+        load_config(argv=["--env-file", str(tmp_path / "absent.env")], environ={},
+                    search_paths=[])
+
+
+def test_dotenv_can_name_the_config_file(tmp_path):
+    path = write_yaml(tmp_path, "server:\n  port: 5050\n")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DARPA_SPILL_CONFIG={}\n".format(path))
+    config = load_config(argv=["--env-file", str(dotenv)], environ={})
+    assert config.server.port == 5050

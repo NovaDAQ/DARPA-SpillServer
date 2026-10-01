@@ -1,0 +1,66 @@
+{% extends "_base.html" %}
+{% block content %}
+<section>
+  <h2>About</h2>
+  <p>
+    The DARPA Spill Information Server polls the embedded bottle server on
+    one or more NOvA TDUs, archives the accelerator events they decode
+    (NuMI <code>$74</code>, BNB <code>$1B</code>, the TCLK resets, the 1&nbsp;Hz
+    <code>$8F</code>, &hellip;), and serves them by time range and signal as
+    CSV or JSON, with every timestamp in NOvA base time, UNIX, UTC and GPS.
+  </p>
+  <p>
+    Data flow: <code>TDU /spill_history</code> &rarr; ingest poller (asyncio
+    task, one per source) &rarr; SQLite archive (WAL) &rarr; HTTP API
+    (<code>/api/&hellip;</code>) &rarr; this web UI, <code>darpa-spill-client</code>
+    (Python), <code>darpa-spill-client-cpp</code> and the C/C++ library.
+  </p>
+</section>
+
+<section>
+  <h2>This server</h2>
+  <div class="tablewrap">
+    <table>
+      <tbody>
+        <tr><th>Version</th><td>{{ version }}</td></tr>
+        <tr><th>Python</th><td>{{ python_version }}</td></tr>
+        <tr><th>Platform</th><td>{{ platform }}</td></tr>
+        <tr><th>Configuration</th><td><code>{{ config_source }}</code></td></tr>
+        <tr><th>Archive</th><td><code>{{ archive_path }}</code></td></tr>
+        <tr><th>Sources</th><td>{{ sources | join(", ") or "(none)" }}</td></tr>
+        <tr><th>Authentication</th><td>{{ "enabled (OIDC)" if auth_enabled else "disabled" }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% for group in dependency_groups %}
+<section>
+  <h2>{{ group.title }}</h2>
+  <p class="hint">{{ group.note }}</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Package</th><th>Required</th><th>Installed</th><th>Used for</th></tr></thead>
+      <tbody>
+      {% for dep in group.deps %}
+        <tr>
+          <td><code>{{ dep.name }}</code></td>
+          <td>{{ dep.required }}</td>
+          <td>{{ dep.installed }}</td>
+          <td>{{ dep.purpose }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+
+<section>
+  <h2>Source and licence</h2>
+  <p>
+    <a href="{{ project_url }}" target="_blank" rel="noopener noreferrer">{{ project_url }}</a><br>
+    {{ copyright }}
+  </p>
+</section>
+{% endblock %}

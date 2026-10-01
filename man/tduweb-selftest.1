@@ -1,0 +1,94 @@
+.TH TDUWEB-SELFTEST 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+tduweb-selftest \- self-test for the TDU web server, runnable on the TDU
+.SH SYNOPSIS
+.B python2.5
+.B contrib/tduweb/selftest.py
+.SH DESCRIPTION
+.B selftest.py
+checks the parts of
+.BR tdu_webserver (1)
+that have no other safety net. It imports
+.I tdu_webserver.py
+from its own directory with
+.B TDU_WEB_NO_SERVE
+set, so no socket is opened and a running server is not disturbed.
+.PP
+The groups of checks, each printed with an
+.B ok
+or
+.B FAIL
+line per case, are:
+.TP
+.B JSON encoder
+Literal expected output for scalars, strings, escapes, non-ASCII and nested
+containers. Compared as text, not round-tripped through a parser, because
+Python 2.5 has no
+.B json
+module.
+.TP
+.B History CSV parsing
+Rows of
+.B DumpSpillHistory
+CSV output, including the stray leading comma it writes.
+.TP
+.B Shared-memory failure detection
+Error text from the dump tool is reported as a failure, not as data.
+.TP
+.B Listen port
+The argument, then
+.BR TDU_WEB_PORT ,
+then the default, with bad values ignored.
+.TP
+.B Command timeout
+A hung helper command is killed rather than hanging the server.
+.TP
+.B Large output
+Output past the cap is truncated, not read into memory.
+.TP
+.B Empty ring slots
+Unused slots, which decode as type 0, are not reported as NuMI events.
+.PP
+It is written to the same Python 2.5 floor as the server. It needs
+.I bottle.py
+on the path.
+.SH ENVIRONMENT
+.TP
+.B PYTHONPATH
+Must reach
+.I bottle.py
+when run from this repository rather than from
+.IR TDUWeb/server/ .
+.SH EXIT STATUS
+.TP
+.B 0
+All checks passed.
+.TP
+.B 1
+At least one check failed; each is listed.
+.SH EXAMPLES
+On the TDU, beside the installed server:
+.PP
+.RS
+.EX
+python2.5 ./selftest.py
+.EE
+.RE
+.PP
+On a development machine, with the 2.6+ builtins hidden:
+.PP
+.RS
+.EX
+PYTHONPATH=/path/to/TDUWeb/server TDU_WEB_NO_SERVE=1 \e
+    python2 contrib/tduweb/run_as_python25.py contrib/tduweb/selftest.py
+.EE
+.RE
+.SH SEE ALSO
+.BR tdu_webserver (1),
+.BR tduweb-check-python25 (1),
+.BR tduweb-run-as-python25 (1)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/TDUWeb/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

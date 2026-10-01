@@ -1,0 +1,38 @@
+# darpa-spill-client / darpa-spill-client-cpp -- default client configuration.
+#
+# Both command-line clients and both libraries read this file (see
+# docs/CLIENT.md). Order of precedence, highest first:
+#     command line > environment > .env file > this file > built-in defaults
+# Each key has an environment variable DARPA_SPILL_CLIENT_<KEY>, e.g.
+# DARPA_SPILL_CLIENT_URL. Check the merged result with:
+#     darpa-spill-client --print-config
+#
+# Unknown keys are an error, so a typo is caught instead of ignored.
+
+client:
+  # Base URL of the server. The production instance runs on the NOvA DAQ
+  # gateway; use http://localhost:8080 for a server started from a checkout.
+  url: http://localhost:8080
+
+  # Seconds allowed for each request. An export streams, so this bounds the
+  # wait for each chunk, not the whole download.
+  timeout: 30.0
+
+  # Admin token, needed only for 'source enable|disable|set-url|reset' and
+  # 'admin-check'. Keep it out of this file: point admin_token_file at a
+  # file readable only by you, or set DARPA_SPILL_CLIENT_ADMIN_TOKEN.
+  admin_token: ""
+  admin_token_file: ""
+
+  # For an https server: a PEM bundle to verify it against (empty uses the
+  # system store), or verify_tls: false to accept any certificate.
+  ca_file: ""
+  verify_tls: true
+
+  # Default output: table (aligned columns), json (the server's body
+  # verbatim) or csv.
+  format: table
+
+  # Zone for time inputs that carry none, sent as tz=. Empty uses the
+  # server's query.timezone.
+  timezone: ""

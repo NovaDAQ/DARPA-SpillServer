@@ -154,7 +154,9 @@ work.
 
 ## 7. What to read next
 
-* [CONFIGURATION.md](CONFIGURATION.md) — every setting and the four layers.
+* [INSTALL.md](INSTALL.md) — the same setup on macOS and Windows 11, and the C/C++ build.
+* [CONFIGURATION.md](CONFIGURATION.md) — every setting and the five layers.
+* [CLIENT.md](CLIENT.md) — `darpa-spill-client` and the client libraries.
 * [API.md](API.md) — endpoints, parameters, output columns.
 * [DEPLOYMENT.md](DEPLOYMENT.md) — running it as a service, and enabling SSO.
 * [`contrib/tduweb/README.md`](../contrib/tduweb/README.md) — the TDU-side

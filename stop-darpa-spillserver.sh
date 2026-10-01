@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# stop.sh -- stop a DARPA Spill Information Server started by ./start.sh.
+# stop-darpa-spillserver.sh -- stop a DARPA Spill Information Server started
+# by ./start-darpa-spillserver.sh, on Linux or macOS.
 #
 # Sends SIGTERM, which lets uvicorn finish in-flight requests and the poller
 # close the SQLite archive cleanly, then waits for the process to exit. Only
@@ -8,10 +9,13 @@
 # the archive is in WAL mode, so even that loses at most the last poll.
 #
 # Usage:
-#   ./stop.sh
+#   ./stop-darpa-spillserver.sh
+#
+# Windows: use stop-darpa-spillserver.ps1.
 #
 # Environment:
-#   SPILL_PIDFILE    PID file written by start.sh (default: run/spillserver.pid)
+#   SPILL_PIDFILE    PID file written by start-darpa-spillserver.sh
+#                    (default: run/spillserver.pid)
 #   SPILL_GRACE      seconds to wait after SIGTERM (default: 15)
 
 set -euo pipefail
@@ -21,9 +25,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDFILE="${SPILL_PIDFILE:-$SCRIPT_DIR/run/spillserver.pid}"
 GRACE="${SPILL_GRACE:-15}"
 
-# Same check as start.sh: never signal a process that merely inherited the PID.
+# Same check as start-darpa-spillserver.sh: never signal a process that merely
+# inherited the PID. ps rather than /proc, which macOS does not have.
 is_server() {
-    [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' <"/proc/$1/cmdline" | grep -q darpa-spill-server
+    ps -p "$1" -o command= 2>/dev/null | grep -q darpa-spill-server
 }
 
 if [ ! -f "$PIDFILE" ]; then

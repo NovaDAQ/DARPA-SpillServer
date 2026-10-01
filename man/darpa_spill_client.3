@@ -1,0 +1,374 @@
+.TH DARPA_SPILL_CLIENT 3 "September 24, 2026" "darpa_spillserver 1.3.0" "Library Functions"
+.SH NAME
+darpa_spill_client \- C and C++ client library for the DARPA Spill Information Server
+.SH SYNOPSIS
+.nf
+.B #include <darpa_spill/client.hpp>
+.B #include <darpa_spill/config.hpp>
+.B #include <darpa_spill/format.hpp>
+.PP
+.B #include <darpa_spill/client.h>
+.PP
+Link with \fB\-ldarpa_spill_client \-lboost_json\fR, or in CMake:
+.PP
+.B find_package(DarpaSpillClient 1.3 REQUIRED)
+.B target_link_libraries(prog PRIVATE DarpaSpill::client)
+.fi
+.SH DESCRIPTION
+.B libdarpa_spill_client
+talks to the HTTP API of a
+.BR darpa-spill-server (1),
+which serves NOvA accelerator event timestamps recorded from a TDU. It is a
+synchronous HTTP/1.1 client built on Boost.Beast: each call opens one
+connection, sends one request and reads the whole response. The export route
+is the exception, and is streamed to a
+.B std::ostream
+in constant memory. The server sends its query results with chunked transfer
+encoding, and the library decodes it.
+.PP
+The parameters each call sends, their order, the percent-encoding and the way
+error bodies are decoded are fixed by
+.I docs/CLIENT.md
+and shared with the Python client
+.BR darpa_spillserver (3).
+.BR darpa-spill-client-cpp (1)
+is built on this library.
+.PP
+The C++ interface lives in namespace
+.BR darpa::spill .
+Parsed responses are
+.BR boost::json::value s,
+so Boost.JSON is a public dependency. yaml-cpp, OpenSSL and the rest of Boost
+are used only inside the library.
+.SH C++ INTERFACE
+.SS Connection options
+.nf
+.B struct ClientOptions {
+.B "    std::string url = \(dqhttp://localhost:8080\(dq;"
+.B "    double timeout = 30.0;"
+.B "    std::string admin_token;"
+.B "    std::string ca_file;"
+.B "    bool verify_tls = true;"
+.B };
+.fi
+.PP
+.I url
+may carry a path prefix, such as
+.BR https://gateway/spills ,
+when the server runs behind a proxy.
+.I timeout
+applies to each network operation (resolve, connect, handshake, write and
+every read) separately.
+.I admin_token
+is sent as the
+.B X\-Admin\-Token
+header when it is not empty.
+.I ca_file
+names a PEM bundle; when it is empty the system store is used.
+.SS Selections
+.nf
+.B struct Selection {
+.B "    std::optional<std::string> start, end;"
+.B "    std::vector<std::string> signals, types, sources;"
+.B "    std::optional<std::string> tz, columns;"
+.B };
+.B struct Paging {
+.B "    std::optional<std::int64_t> limit, offset;"
+.B "    bool descending = false;"
+.B };
+.B enum class Format { json, csv };
+.fi
+.PP
+Times are any expression the server accepts
+.RB ( now ", " today ", " \-2h ", " 2026\-07\-01T09:15:00Z ", " nova: \fITICKS\fR);
+see
+.BR "Client::time_help" .
+Repeated signals, types and sources form a union.
+.SS The client
+.nf
+.B "explicit Client(ClientOptions options);"
+.PP
+.B "boost::json::value health() const;"
+.B "boost::json::value status() const;"
+.B "boost::json::value sources() const;"
+.B "boost::json::value signals() const;"
+.B "boost::json::value types() const;"
+.B "boost::json::value time_convert(const std::string& t,"
+.B "                                const std::optional<std::string>& tz = {}) const;"
+.B "boost::json::value time_help() const;"
+.B "boost::json::value latest(const std::optional<std::string>& signal = {},"
+.B "                          const std::vector<std::string>& sources = {}) const;"
+.B "boost::json::value events(const Selection&, const Paging& = {}) const;"
+.B "std::string        events_csv(const Selection&, const Paging& = {}) const;"
+.B "void               export_to(const Selection&, std::ostream& out,"
+.B "                             Format format = Format::csv) const;"
+.B "boost::json::value admin_check() const;"
+.B "boost::json::value update_source(const std::string& name,"
+.B "                                 std::optional<bool> enabled,"
+.B "                                 std::optional<std::string> base_url) const;"
+.B "boost::json::value reset_source(const std::string& name) const;"
+.fi
+.PP
+Each method maps to one route under
+.IR /api ;
+.BR darpa-spill-client (1)
+lists them. The constructor rejects a URL that is not
+.B http://
+or
+.BR https:// .
+The client holds no connection between calls, and a
+.B const
+client may be used from several threads at once.
+.SS Raw access
+.nf
+.B "Response request(const std::string& method, const std::string& path,"
+.B "                 const Params& params = {}, const std::string& json_body = {}) const;"
+.B "Response checked(...same arguments...) const;"
+.B "void     stream(const std::string& path, const Params& params, std::ostream& out) const;"
+.PP
+.B "struct Response { int status; std::string reason, content_type, body; };"
+.B "using Params = std::vector<std::pair<std::string, std::string>>;"
+.fi
+.PP
+.B request
+returns the response whatever its status.
+.B checked
+throws
+.B HttpError
+for a status of 400 or above.
+.B stream
+writes the body to
+.I out
+as it arrives, and throws before writing anything if the status is an error.
+.SS Helpers
+.TP
+.B "std::string percent_encode(const std::string&)"
+RFC 3986 encoding: only
+.B "A\-Z a\-z 0\-9 \- . _ ~"
+pass through, so
+.B $74
+becomes
+.BR %2474 .
+.TP
+.B "std::string build_query(const Params&)"
+Encode parameters as \fBk=v&k=v\fR, keeping their order.
+.TP
+.B "Params selection_params(const Selection&, std::optional<Format>, const Paging* = nullptr)"
+The parameters of
+.I /api/events
+and
+.IR /api/export ,
+in the fixed order \fBstart end signal type source format limit offset order
+tz columns\fR.
+.TP
+.B "const char* version()"
+The library version, for example \fB1.3.0\fR.
+.SS Configuration
+.B darpa_spill/config.hpp
+provides the client configuration used by the command line:
+.B load_config(const LoadRequest&)
+merges the defaults, a YAML file, a \fB.env\fR file, the environment and
+command-line overrides, highest last, into a
+.BR ClientConfig .
+.B ClientConfig::to_options()
+turns the result into
+.BR ClientOptions ,
+reading
+.I admin_token_file
+if that is set. It throws
+.B ConfigError
+on a missing file, an unknown key or a bad value. The keys, variables and
+files are described in
+.BR darpa-spill-client (1).
+.SS Rendering
+.B darpa_spill/format.hpp
+exposes the command line's output rules:
+.BR format_cell ,
+.BR render_table ,
+.BR render_csv ,
+.BR parse_csv ,
+.BR flatten ,
+.B render_kv
+and
+.BR split_csv_comments .
+Use them to print responses exactly as the command-line clients do.
+.SS Errors
+.nf
+.B "class Error           : public std::runtime_error;"
+.B "class ConnectionError : public Error;   // DNS, connect, TLS, timeout"
+.B "class HttpError       : public Error;   // status >= 400"
+.B "    int status() const;"
+.B "    const std::string& message() const;"
+.B "    const std::string& hint() const;"
+.B "    const std::string& body() const;"
+.fi
+.PP
+.B ConnectionError::what()
+reads \fBcannot reach \fIURL\fB: \fIreason\fR.
+.B HttpError
+takes its message and hint from the server's
+.B {"detail": {"error": ..., "hint": ...}}
+body. It also accepts a top-level
+.BR {"error": ...} ,
+a string
+.BR detail ,
+and FastAPI's validation list, whose first item becomes
+.IB loc.path ": " msg\fR.
+If none of these is present, the message is the HTTP reason phrase.
+.SH C INTERFACE
+.nf
+.B "typedef struct dsc_client dsc_client;"
+.PP
+.BI "dsc_client *dsc_client_new(const char *" url ", double " timeout );
+.BI "void dsc_client_free(dsc_client *" client );
+.BI "int dsc_client_set_admin_token(dsc_client *" client ", const char *" token );
+.BI "int dsc_client_set_tls(dsc_client *" client ", const char *" ca_file ", int " verify );
+.BI "int dsc_get(dsc_client *" client ", const char *" path_and_query ,
+.BI "            char **" body ", long *" status );
+.BI "int dsc_request(dsc_client *" client ", const char *" method ,
+.BI "                const char *" path_and_query ", const char *" json_body ,
+.BI "                char **" body ", long *" status );
+.BI "const char *dsc_last_error(const dsc_client *" client );
+.BI "char *dsc_percent_encode(const char *" text );
+.BI "void dsc_string_free(char *" text );
+.B "const char *dsc_version(void);"
+.fi
+.PP
+No function throws.
+.B dsc_client_new
+returns NULL if
+.I url
+is NULL or not an http or https URL; a
+.I timeout
+of zero or less means 30 seconds.
+.I path_and_query
+must start with
+.B /
+and carry its query string already encoded (use
+.BR dsc_percent_encode ).
+On
+.B DSC_OK
+and
+.BR DSC_ERR_HTTP ,
+.I *body
+receives the response body, which the caller releases with
+.BR dsc_string_free ,
+and
+.I *status
+receives the HTTP status. Either pointer may be NULL.
+.B dsc_last_error
+describes the last failure on a client. The string is valid until the next
+call on that client.
+.SH RETURN VALUE
+The C functions that return
+.B int
+return one of these codes. They match the exit status of the command-line
+clients:
+.TP
+.B DSC_OK (0)
+Success; the HTTP status is below 400.
+.TP
+.B DSC_ERR_HTTP (1)
+The server answered with a status of 400 or above.
+.TP
+.B DSC_ERR_USAGE (2)
+A NULL or malformed argument.
+.TP
+.B DSC_ERR_CONNECTION (3)
+Connect, TLS or timeout failure.
+.TP
+.B DSC_ERR_INTERNAL (4)
+Anything else, such as memory exhaustion.
+.SH EXAMPLES
+C++: today's NuMI spills as JSON, then a day of 1 Hz events streamed to a file.
+.PP
+.RS
+.EX
+#include <darpa_spill/client.hpp>
+#include <fstream>
+#include <iostream>
+
+int main() {
+    darpa::spill::ClientOptions options;
+    options.url = "http://novadaq\-near\-gateway\-01.fnal.gov:8080";
+    darpa::spill::Client client(options);
+
+    darpa::spill::Selection numi;
+    numi.start = "today";
+    numi.signals = {"$74"};
+    try {
+        auto page = client.events(numi, darpa::spill::Paging{100, {}, false});
+        std::cout << page.as_object().at("meta").as_object().at("total")
+                  << " spills\en";
+
+        darpa::spill::Selection hz;
+        hz.start = hz.end = "2026\-07\-01";
+        hz.signals = {"$8f"};
+        std::ofstream out("one\-hertz.csv", std::ios::binary);
+        client.export_to(hz, out);
+    } catch (const darpa::spill::HttpError& e) {
+        std::cerr << e.what() << "\en" << e.hint() << "\en";
+        return 1;
+    } catch (const darpa::spill::Error& e) {
+        std::cerr << e.what() << "\en";
+        return 3;
+    }
+}
+.EE
+.RE
+.PP
+C: the newest event (from
+.I examples/c/latest.c
+in the source distribution).
+.PP
+.RS
+.EX
+#include <darpa_spill/client.h>
+#include <stdio.h>
+
+int main(void) {
+    dsc_client *c = dsc_client_new("http://localhost:8080", 30.0);
+    char *body = NULL;
+    long status = 0;
+    int rc = dsc_get(c, "/api/latest?signal=%2474", &body, &status);
+    if (rc == DSC_OK)
+        puts(body);
+    else
+        fprintf(stderr, "%s\en", dsc_last_error(c));
+    dsc_string_free(body);
+    dsc_client_free(c);
+    return rc;
+}
+.EE
+.RE
+.PP
+Build and link against an installed copy:
+.PP
+.RS
+.EX
+cc latest.c $(pkg\-config \-\-cflags \-\-libs darpa_spill_client) \-o latest
+.EE
+.RE
+.SH FILES
+.TP
+.I include/darpa_spill/
+Headers:
+.BR client.hpp ", " client.h ", " config.hpp ", " format.hpp ", "
+.BR version.hpp ", " darpa_spill_export.h .
+.TP
+.I lib/cmake/DarpaSpillClient/
+CMake package configuration for
+.BR find_package(DarpaSpillClient) .
+.TP
+.I lib/pkgconfig/darpa_spill_client.pc
+pkg-config metadata.
+.SH SEE ALSO
+.BR darpa-spill-client-cpp (1),
+.BR darpa-spill-client (1),
+.BR darpa-spill-server (1),
+.BR darpa_spillserver (3)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/DARPA\-SpillServer/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

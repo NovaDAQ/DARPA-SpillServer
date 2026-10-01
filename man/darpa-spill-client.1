@@ -1,0 +1,364 @@
+.TH DARPA-SPILL-CLIENT 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+darpa-spill-client \- query and administer a DARPA Spill Information Server over HTTP
+.SH SYNOPSIS
+.B darpa-spill-client
+.RI [ GLOBAL-OPTIONS ]
+.I COMMAND
+.RI [ COMMAND-OPTIONS ]
+.SH DESCRIPTION
+.B darpa-spill-client
+drives a running
+.BR darpa-spill-server (1)
+through its HTTP API. Where
+.BR darpa-spill-query (1)
+reads an archive file directly, this program needs only network access to a
+server, so it works from any host and never touches the database.
+.PP
+Every request goes through the Python client library,
+.BR darpa_spillserver.client ,
+which uses only the Python standard library for HTTP.
+.PP
+.BR darpa-spill-client-cpp (1)
+implements the same commands, options and output rules on top of the C++
+library
+.BR darpa_spill_client (3).
+For the same invocation both write byte-identical standard output; the test
+suite checks this. The contract is written down in
+.I docs/CLIENT.md
+in the source distribution.
+.SS Quoting hex signals
+Signals are written with a leading dollar sign,
+.BR $74 ", " $8F .
+A shell expands an unquoted
+.B $74
+to nothing, so quote it:
+.BR "\-\-signal '$74'" .
+Registry names such as
+.B numi
+work unquoted.
+.SH GLOBAL OPTIONS
+Global options come before the command.
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+YAML client configuration file (see
+.BR CONFIGURATION ).
+.TP
+.BI \-\-env\-file " FILE"
+\&.env file to read.
+.TP
+.BR \-u ", " \-\-url " " \fIURL\fR
+Server base URL,
+.B http://
+or
+.BR https:// .
+Default \fBhttp://localhost:8080\fR.
+.TP
+.BR \-t ", " \-\-timeout " " \fISECONDS\fR
+Per-request timeout. Default \fB30.0\fR.
+.TP
+.BI \-\-admin\-token " TOKEN"
+Admin token, sent in the \fBX\-Admin\-Token\fR header. Needed only by
+.B admin\-check
+and the
+.B source
+commands. Prefer \fB\-\-admin\-token\-file\fR, since a command line is visible
+to other users.
+.TP
+.BI \-\-admin\-token\-file " FILE"
+File whose first line is the admin token.
+.TP
+.BI \-\-ca\-file " FILE"
+PEM bundle to verify an https server against.
+.TP
+.BR \-k ", " \-\-insecure
+Accept any TLS certificate.
+.TP
+.BR \-f ", " \-\-format " " \fIFORMAT\fR
+One of \fBtable\fR (default), \fBjson\fR, \fBcsv\fR. See
+.BR OUTPUT .
+.TP
+.BI \-\-tz " ZONE"
+Zone for time inputs that carry none, sent as \fBtz=\fR on
+.BR convert ", " events " and " export .
+.TP
+.B \-\-print\-config
+Print the merged client configuration as YAML and exit. The token itself is
+shown as \fB'***'\fR.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit. Each command also accepts \fB\-h\fR.
+.SH COMMANDS
+.TP
+.B health
+Liveness check,
+.IR "GET /api/health" .
+.TP
+.B status
+Configuration, archive extent and ingest health,
+.IR "GET /api/status" .
+.TP
+.B sources
+The TDUs the server records from,
+.IR "GET /api/sources" .
+.TP
+.B signals
+Every accelerator signal the server decodes,
+.IR "GET /api/signals" .
+.TP
+.B types
+The decoded spill types,
+.IR "GET /api/types" .
+.TP
+.BI convert " TIME"
+Render one instant as NOvA ticks, UNIX, UTC and GPS,
+.IR "GET /api/time/convert" .
+.TP
+.B time\-help
+The accepted time expressions,
+.IR "GET /api/time/help" .
+.TP
+.B latest \fR[\fB\-\-signal\fR \fISIG\fR] [\fB\-\-source\fR \fINAME\fR]...
+The newest stored event,
+.IR "GET /api/latest" .
+.TP
+.B events \fR[\fISELECTION\fR] [\fB\-\-limit\fR \fIN\fR] [\fB\-\-offset\fR \fIN\fR] [\fB\-\-desc\fR] [\fB\-\-columns\fR \fILIST\fR]
+One page of matching events,
+.IR "GET /api/events" .
+.B \-\-desc
+sends \fBorder=desc\fR (newest first).
+.B \-\-columns
+is a comma-separated subset of the output columns listed in
+.BR darpa-spill-query (1).
+.TP
+.B export \fR[\fISELECTION\fR] [\fB\-\-columns\fR \fILIST\fR] [\fB\-o\fR \fIFILE\fR]
+Every matching event, streamed without paging,
+.IR "GET /api/export" .
+Memory use does not grow with the size of the export. Written to
+.I FILE
+with \fB\-o\fR/\fB\-\-output\fR, else to standard output.
+.TP
+.B admin\-check
+Succeeds only with valid admin credentials,
+.IR "GET /api/admin/check" .
+.TP
+.BI "source enable " NAME
+.TQ
+.BI "source disable " NAME
+Start or stop recording from a source,
+.IR "PATCH /api/sources/NAME" .
+.TP
+.BI "source set\-url " "NAME URL"
+Point a source at a different TDU.
+.TP
+.BI "source reset " NAME
+Discard runtime changes and return the source to the server's configuration
+file,
+.IR "POST /api/sources/NAME/reset" .
+.PP
+.I SELECTION
+is any of
+.BI \-\-start " TIME" ,
+.BI \-\-end " TIME" ,
+.BI \-\-signal " SIG" ,
+.BI \-\-type " TYPE"
+and
+.BI \-\-source " NAME" ;
+the last three may be repeated and repeats form a union. The range is
+half-open,
+.IR "start <= t < end" .
+Times take every form listed by
+.BR time\-help ,
+such as
+.BR now ", " today ", " \-2h ", " 09:15 ", " 2026\-07\-01T09:15:00Z ", " nova: \fITICKS\fR.
+.SH OUTPUT
+.TP
+.B json
+The response body exactly as the server sent it, followed by a newline if it
+does not already end in one.
+.TP
+.B csv
+For
+.B events
+and
+.BR export ,
+the server's CSV verbatim, including its
+.B #
+comment header recording the query and any caveat.
+For
+.BR sources ", " signals " and " types ,
+client-rendered CSV of the table columns below. Other commands print as
+.BR table .
+.TP
+.B table
+.BR sources ,
+.B signals
+and
+.B types
+print as aligned tables with columns
+.RB ( name ", " base_url ", " enabled ", " overridden ", " events ),
+.RB ( hex ", " name ", " spill_type_name ", " description )
+and
+.RB ( value ", " name ", " ambiguous ", " signals ).
+.B events
+asks the server for CSV and lays it out as a table, by default with columns
+.BR utc_string ", " gps_week ", " gps_tow_exact ", " signal ", "
+.BR spill_type_name ", " event_number ", " source ;
+each warning in the CSV header is written to standard error as
+.BR "warning: ..." .
+Every other command prints one
+.B "key: value"
+line per leaf of the JSON response, nested keys joined with
+.B .
+and list elements by index
+.RB ( sources.0.name ).
+.PP
+In tables and key/value lines, \fBtrue\fR/\fBfalse\fR print as
+\fByes\fR/\fBno\fR, \fBnull\fR as \fB\-\fR, a non-integer number with up to
+six decimals (trailing zeros removed), and a list of values joined with
+commas.
+.SH CONFIGURATION
+Settings are resolved in this order, highest first:
+command line > environment > .env > YAML file > defaults.
+.PP
+The YAML file holds a single
+.B client:
+section; unknown keys are an error:
+.PP
+.RS
+.EX
+client:
+  url: http://localhost:8080
+  timeout: 30.0
+  admin_token: ""
+  admin_token_file: ""
+  ca_file: ""
+  verify_tls: true
+  format: table      # table | json | csv
+  timezone: ""
+.EE
+.RE
+.PP
+It is \fB\-\-config\fR, else \fB$DARPA_SPILL_CLIENT_CONFIG\fR, else the first
+of the files under
+.B FILES
+that exists.
+.PP
+The \fB.env\fR file is \fB\-\-env\-file\fR, else \fB$DARPA_SPILL_ENV_FILE\fR,
+else
+.I ./.env
+if it exists. It holds
+.IB KEY = VALUE
+lines; blank lines and
+.B #
+comments are skipped, a leading
+.B export
+is ignored, and one layer of matching quotes is removed. Only
+.B DARPA_SPILL_
+variables are used, and one also set in the real environment keeps the
+environment's value.
+.SH ENVIRONMENT
+.TP
+.BI DARPA_SPILL_CLIENT_ KEY
+Sets the client key
+.I KEY
+in upper case:
+.BR DARPA_SPILL_CLIENT_URL ", " DARPA_SPILL_CLIENT_TIMEOUT ", "
+.BR DARPA_SPILL_CLIENT_ADMIN_TOKEN ", " DARPA_SPILL_CLIENT_ADMIN_TOKEN_FILE ", "
+.BR DARPA_SPILL_CLIENT_CA_FILE ", " DARPA_SPILL_CLIENT_VERIFY_TLS ", "
+.BR DARPA_SPILL_CLIENT_FORMAT ", " DARPA_SPILL_CLIENT_TIMEZONE .
+Booleans accept
+.BR 1/0 ", " true/false ", " yes/no " and " on/off .
+.TP
+.B DARPA_SPILL_CLIENT_CONFIG
+The YAML file, as \fB\-\-config\fR.
+.TP
+.B DARPA_SPILL_ENV_FILE
+The \fB.env\fR file, as \fB\-\-env\-file\fR.
+.SH FILES
+.TP
+.I ./config/spillclient.yaml
+.TQ
+.I ~/.config/darpa\-spillserver/spillclient.yaml
+.TQ
+.I /etc/darpa\-spillserver/spillclient.yaml
+Configuration files, searched in this order. On Windows the last is
+.IR %PROGRAMDATA%\e darpa\-spillserver\e spillclient.yaml .
+.TP
+.I ./.env
+Optional \fB.env\fR file.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The server answered with an HTTP error. Standard error gets
+.B "error: HTTP" \fISTATUS\fB:\fR \fIMESSAGE\fR
+and, when the server gave one,
+.BR "hint: " \fIHINT\fR.
+.TP
+.B 2
+A usage or configuration error.
+.TP
+.B 3
+The server could not be reached: connection refused, DNS, TLS or timeout.
+.SH EXAMPLES
+Today's NuMI spills from the Near Detector gateway:
+.PP
+.RS
+.EX
+darpa\-spill\-client \-u http://novadaq\-near\-gateway\-01.fnal.gov:8080 \e
+    events \-\-start today \-\-signal '$74'
+.EE
+.RE
+.PP
+The same as CSV, saved to a file:
+.PP
+.RS
+.EX
+darpa\-spill\-client \-f csv events \-\-start today \-\-signal '$74' > numi.csv
+.EE
+.RE
+.PP
+A whole day of 1 Hz events, streamed:
+.PP
+.RS
+.EX
+darpa\-spill\-client export \-\-start 2026\-07\-01 \-\-end 2026\-07\-01 \e
+    \-\-signal '$8f' \-o one\-hertz.csv
+.EE
+.RE
+.PP
+Check that the server is up, for a monitoring script:
+.PP
+.RS
+.EX
+darpa\-spill\-client \-u https://gateway:8443 \-\-ca\-file site.pem health
+.EE
+.RE
+.PP
+Stop recording from a TDU, then restore it:
+.PP
+.RS
+.EX
+darpa\-spill\-client \-\-admin\-token\-file ~/.spill\-admin \e
+    source disable tdu\-near\-master\-ppc\-02
+darpa\-spill\-client \-\-admin\-token\-file ~/.spill\-admin \e
+    source reset tdu\-near\-master\-ppc\-02
+.EE
+.RE
+.SH SEE ALSO
+.BR darpa-spill-client-cpp (1),
+.BR darpa-spill-server (1),
+.BR darpa-spill-query (1),
+.BR darpa_spill_client (3),
+.BR darpa_spillserver (3)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/DARPA\-SpillServer/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.

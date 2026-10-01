@@ -93,3 +93,42 @@ def populated_client(config, populated):
     app = create_app(config, store=populated, start_ingest=False)
     with TestClient(app) as test_client:
         yield test_client
+
+
+#: Admin token the live server accepts, for the client tests that change sources.
+ADMIN_TOKEN = "test-admin-token"
+
+
+@pytest.fixture
+def live_server(config, populated):
+    """A real uvicorn server on a free loopback port, serving the populated
+    archive, for the tests that drive the clients over a socket.
+
+    Yields the base URL. The server runs in a daemon thread so that a test
+    that hangs cannot keep the interpreter alive after pytest finishes.
+    """
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    config.admin.token = ADMIN_TOKEN
+    app = create_app(config, store=populated, start_ingest=False)
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning", lifespan="on"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            raise RuntimeError("live server did not start")
+        time.sleep(0.02)
+    yield "http://127.0.0.1:{}".format(port)
+    server.should_exit = True
+    thread.join(timeout=10)

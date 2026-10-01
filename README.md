@@ -12,19 +12,34 @@ timestamp rendered in NOvA base time, UNIX, UTC and GPS at once.
 
 ## Quick start
 
+Linux or macOS:
+
 ```bash
-./bootstrap.sh
+./bootstrap.sh                        # venv, Python package, and the C/C++ library if CMake is present
 source venv/bin/activate
 darpa-spill-server -c config/spillserver.yaml
 ```
 
-To run it in the background instead, detached from the terminal, use
-`./start.sh` (same options, e.g. `./start.sh -c config/spillserver-near.yaml`)
-and `./stop.sh`. With no `-c`, it uses a local `./spillserver.yaml` if one
-exists, and `config/spillserver.yaml` otherwise. The PID file and output log go in `run/`.
+Windows 11 (PowerShell):
 
-Then <http://localhost:8080/> for the query page, or <http://localhost:8080/docs>
-for the generated API reference.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
+.\venv\Scripts\Activate.ps1
+darpa-spill-server -c config\spillserver.yaml
+```
+
+To run it in the background instead, detached from the terminal, use
+`./start-darpa-spillserver.sh` (same options, e.g.
+`./start-darpa-spillserver.sh -c config/spillserver-near.yaml`) and
+`./stop-darpa-spillserver.sh`; on Windows, `start-darpa-spillserver.ps1` and
+`stop-darpa-spillserver.ps1`. With no `-c`, it uses a local `./spillserver.yaml`
+if one exists, and `config/spillserver.yaml` otherwise. The PID file and output
+log go in `run/`. [docs/INSTALL.md](docs/INSTALL.md) has the per-platform
+details.
+
+Then <http://localhost:8080/> for the query page, <http://localhost:8080/api>
+for the API reference, <http://localhost:8080/about> for the version and
+dependencies, and <http://localhost:8080/sitemap> for every page and route.
 
 ```console
 $ curl -s 'http://localhost:8080/api/events?signal=$8f&start=09:15&end=11:34&format=csv'
@@ -45,6 +60,22 @@ $ darpa-spill-query --source tdu-near-master-ppc-02 --signal '$8f' --start -1h
 ```
 
 Quote `$74` in a shell — unquoted it expands to nothing. `0x74` and `74` also work.
+
+`darpa-spill-query` reads an archive file directly. From any other host, use
+the HTTP client instead. It comes in Python and C++ versions that give
+identical output for the same invocation:
+
+```console
+$ darpa-spill-client -u http://novadaq-near-gateway-01.fnal.gov:8080 events --start today --signal '$74'
+$ darpa-spill-client -f csv export --start 2026-07-01 --signal '$74' -o numi.csv
+$ darpa-spill-client --admin-token-file ~/.spill-token source disable tdu-near-master-ppc-02
+$ build/darpa-spill-client-cpp -u http://localhost:8080 latest --signal '$8f'
+```
+
+Both are built on client libraries — `darpa_spillserver.client` for Python and
+`libdarpa_spill_client` for C++ (with a C ABI) — which DAQ code can link
+against directly. See [docs/CLIENT.md](docs/CLIENT.md) and
+[docs/CPP_LIBRARY.md](docs/CPP_LIBRARY.md).
 
 ## Read this before deploying
 
@@ -108,24 +139,46 @@ additive, touches no DAQ process, and removes the event loss entirely.
   table never sends the reader back to the server to convert.
 - **CSV and JSON**, both streamed, so a query spanning months does not have to
   fit in memory. CSV carries the query and any caveat as comment lines.
-- **Configurable from a YAML file, the environment, or the command line**, with
-  unknown keys rejected rather than ignored.
+- **Configurable from a YAML file, a `.env` file, the environment, or the
+  command line** (highest wins: command line > environment > `.env` > YAML >
+  defaults), with unknown keys rejected rather than ignored.
+- **Client libraries and CLIs in Python and C/C++**, held to one written
+  contract and checked against each other by the test suite.
+- **Linux, macOS and Windows 11**: bootstrap, start and stop scripts for each,
+  and a CMake build with presets for each.
 - **OIDC hooks ready for Fermilab SSO** — off by default, as specified;
   enabling it is a config change, not a code change.
-- **Man pages** for both commands and the library.
+- **Man pages** for every command, script, helper and library.
+- **Reference pages served by the server itself**: `/api` (generated from the
+  OpenAPI schema), `/about` (version and dependencies), and `/sitemap` and
+  `/sitemap.xml`.
 
 ## Documentation
 
 | | |
 |---|---|
+| [docs/INSTALL.md](docs/INSTALL.md) | install, bootstrap, build and run on Linux, macOS and Windows 11 |
 | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | from checkout to first query, including the Python 3.9+ problem on the gateways |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every setting, and how the four layers merge |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every setting, and how the five layers merge |
+| [docs/CLIENT.md](docs/CLIENT.md) | the client libraries and `darpa-spill-client`: the contract both languages implement |
+| [docs/CPP_LIBRARY.md](docs/CPP_LIBRARY.md) | building, installing and linking the C/C++ library |
 | [docs/API.md](docs/API.md) | endpoints, parameters, signals, output columns |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | systemd, reverse proxy, backups, enabling SSO |
 | [contrib/tduweb/README.md](contrib/tduweb/README.md) | the TDU-side changes and what each unlocks |
 
-Man pages: `man -l man/darpa-spill-server.1`, `man -l man/darpa-spill-query.1`,
-`man -l man/darpa_spillserver.3`.
+Man pages are in `man/`; read any of them with `man -l man/<page>` or
+`man ./man/<page>` on macOS:
+
+| Page | Covers |
+|---|---|
+| `darpa-spill-server(1)` | the server |
+| `darpa-spill-query(1)` | reading an archive file directly |
+| `darpa-spill-backfill(1)` | filling the archive from a TDU's ring buffer |
+| `darpa-spill-client(1)`, `darpa-spill-client-cpp(1)` | the HTTP clients |
+| `darpa-spillserver-bootstrap(1)`, `start-darpa-spillserver(1)`, `stop-darpa-spillserver(1)` | the platform scripts |
+| `tdu_webserver(1)`, `tduweb-selftest(1)`, `tduweb-check-python25(1)`, `tduweb-run-as-python25(1)` | the TDU-side helpers in `contrib/tduweb/` |
+| `darpa_spillserver(3)` | the Python package, including the client |
+| `darpa_spill_client(3)` | the C++ and C client library |
 
 ## Requirements
 
@@ -138,6 +191,9 @@ Man pages: `man -l man/darpa-spill-server.1`, `man -l man/darpa-spill-query.1`,
   checkout if there is one.
 - **Network access to the TDU**, which lives on the NOvA DAQ network. The
   gateway nodes are on it.
+- **For the C/C++ library only:** CMake 3.16+, a C++17 compiler, Boost 1.75+
+  (Beast, Asio, JSON, Program_options), yaml-cpp, and optionally OpenSSL (for
+  https) and CppUnit (for tests). The server does not need any of them.
 
 ## Layout
 
@@ -149,17 +205,28 @@ src/darpa_spillserver/
     tdu_client.py   async HTTP client for the TDU
     poller.py       the background ingest loop
     formats.py      streaming CSV and JSON
-    config.py       defaults, YAML, environment, command line
+    config.py       defaults, YAML, .env, environment, command line
     auth.py         OIDC hooks; no-op by default
     api.py, app.py  the HTTP surface
+    pages.py        /about, /api and /sitemap, generated from the running app
     cli.py          darpa-spill-server
     query_cli.py    darpa-spill-query
+    backfill.py     darpa-spill-backfill
+    client.py       Python client library for the HTTP API
+    client_cli.py   darpa-spill-client
     web/            browser UI (templates, CSS, masthead logo)
-config/             default and Near Detector configurations
+src/include/darpa_spill/  C++ (client.hpp) and C (client.h) public headers
+src/cpp/            libdarpa_spill_client, and cli/ for darpa-spill-client-cpp
+examples/c/         a C program linking the C ABI
+CMakeLists.txt, CMakePresets.json, vcpkg.json, cmake/
+                    C/C++ build: presets for Linux, macOS and Windows (MSVC + vcpkg)
+config/             server and client configurations, and an example .env
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              299 tests
+tests/              pytest suite (453 tests); tests/cpp/ holds the CppUnit tests (39)
+bootstrap.{sh,ps1}, start-darpa-spillserver.{sh,ps1}, stop-darpa-spillserver.{sh,ps1}
+                    setup and background start/stop, for POSIX and Windows
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```
@@ -168,7 +235,7 @@ novadaq-logo.png    full-resolution masthead artwork; the served copy under
 
 ```console
 $ python -m pytest -q
-299 passed
+453 passed
 ```
 
 The time conversions are checked against values read live from

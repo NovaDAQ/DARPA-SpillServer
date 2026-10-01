@@ -1,0 +1,69 @@
+.TH TDUWEB-CHECK-PYTHON25 1 "September 24, 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+tduweb-check-python25 \- flag Python source constructs that need Python 2.6 or later
+.SH SYNOPSIS
+.B python2
+.B contrib/tduweb/check_python25.py
+.IR FILE ...
+.SH DESCRIPTION
+The TDU runs Python 2.5.
+.B check_python25.py
+scans each
+.I FILE
+line by line for syntax and names that arrived in 2.6 or 2.7, so a change to
+.BR tdu_webserver (1)
+can be checked without a 2.5 interpreter. It flags, among others:
+.BR "except X as e" ,
+.BR str.format() " and the " format() " builtin,"
+the
+.BR json ", " argparse " and " importlib
+modules, bytes literals, dict and set comprehensions,
+.BR OrderedDict ", " Counter ", " subprocess.check_output ,
+.BR next() ", " bin() ,
+.BR bytes ", " bytearray ", " memoryview ,
+the
+.B with
+statement, and
+.BR print_function .
+.PP
+Lines inside string literals and comments are skipped. A line ending in
+.B "# py25\-ok"
+is skipped too; that marks a newer name used deliberately inside a guard that
+never runs on 2.5.
+.PP
+A source scan cannot see a name that is merely looked up at run time;
+.BR tduweb-run-as-python25 (1)
+covers that case.
+.PP
+It must itself run under Python 2, since it uses the
+.B StringIO
+module.
+.SH OUTPUT
+For each file, one line:
+.IB FILE ": clean for Python 2.5"
+or
+.IB FILE ": " N " problem(s)" ,
+followed by the line number, the reason, and the start of each offending line.
+.SH EXIT STATUS
+.TP
+.B 0
+Every file is clean.
+.TP
+.B 1
+At least one problem was found.
+.SH EXAMPLES
+.RS
+.EX
+python2 contrib/tduweb/check_python25.py \e
+    contrib/tduweb/tdu_webserver.py contrib/tduweb/selftest.py
+.EE
+.RE
+.SH SEE ALSO
+.BR tduweb-run-as-python25 (1),
+.BR tduweb-selftest (1),
+.BR tdu_webserver (1)
+.SH REPORTING BUGS
+Report defects at
+\fBhttps://github.com/NovaDAQ/TDUWeb/issues\fR.
+.SH AUTHOR
+NOvA DAQ group, Fermi National Accelerator Laboratory.
