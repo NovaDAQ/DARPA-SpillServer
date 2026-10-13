@@ -45,6 +45,15 @@ Read this SQLite archive directly.
 .BR \-s ", " \-\-server " " \fIURL\fR
 Query a running server instead of a local file, e.g.
 .BR http://localhost:8080 .
+.TP
+.BI \-\-ca\-bundle " FILE"
+Verify the server's TLS certificate against this CA bundle (PEM).
+.TP
+.BR \-k ", " \-\-insecure
+Do not verify the server's TLS certificate.  Needed for a server with a
+self-signed certificate, such as the Near Detector gateway, when no
+.B \-\-ca\-bundle
+is available.
 .PP
 With none of these, the archive path comes from the configuration file found by
 the usual search.
@@ -202,6 +211,14 @@ The most recent event, from a running server:
 .RS
 .EX
 darpa\-spill\-query \-\-server http://localhost:8080 \-\-last
+.EE
+.RE
+.PP
+The same from the Near Detector gateway, whose certificate is self-signed:
+.PP
+.RS
+.EX
+darpa\-spill\-query \-s https://novadaq\-near\-gateway\-01.fnal.gov:8443 \-k \-\-last
 .EE
 .RE
 .PP

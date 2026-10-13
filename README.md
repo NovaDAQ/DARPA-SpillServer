@@ -174,7 +174,7 @@ config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              333 tests
+tests/              336 tests
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```

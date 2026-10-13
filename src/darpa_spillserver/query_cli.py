@@ -9,6 +9,7 @@ node, and because a shell pipeline is the natural home for a CSV.
     darpa-spill-query --signal '$8f' --start 09:15 --end 11:34 --format csv
     darpa-spill-query --source tdu-near-master-ppc-02 --last
     darpa-spill-query --server http://localhost:8080 --last
+    darpa-spill-query -s https://novadaq-near-gateway-01.fnal.gov:8443 -k --last
 
 Quote ``$74`` in a shell, or write it as ``0x74`` or ``74``: an unquoted
 ``$74`` is a shell variable and expands to nothing.
@@ -53,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="SQLite archive to read directly")
     source.add_argument("-s", "--server", metavar="URL",
                         help="query a running server instead of a local file")
+    source.add_argument("--ca-bundle", metavar="FILE",
+                        help="CA certificate(s) to verify the server with")
+    source.add_argument("-k", "--insecure", action="store_true",
+                        help="do not verify the server's TLS certificate")
 
     selection = parser.add_argument_group("selection")
     selection.add_argument("--start", metavar="TIME",
@@ -168,10 +173,14 @@ def _query_server(args, columns) -> int:
         params.append(("columns", ",".join(columns)))
 
     url = args.server.rstrip("/") + ("/api/latest" if args.last else "/api/events")
+    verify = False if args.insecure else (args.ca_bundle or True)
     try:
-        response = httpx.get(url, params=params, timeout=60.0)
+        response = httpx.get(url, params=params, timeout=60.0, verify=verify)
     except httpx.HTTPError as exc:
         print("error: cannot reach {}: {}".format(url, exc), file=sys.stderr)
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            print("pass --ca-bundle FILE with the server's certificate, or "
+                  "--insecure to skip verification", file=sys.stderr)
         return 1
 
     if response.status_code >= 400:
