@@ -160,12 +160,14 @@ $ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \
       --start=-6h --signal '$74' --csv numi.csv
 ```
 
-See `man -l man/darpa-spill-dump.1` for windowing, verification and exit codes.
+[COMMAND_LINE.md](COMMAND_LINE.md) walks through both commands with real
+output, including splitting a dump into one file per day or hour.
 
 ## 7. What to read next
 
 * [CONFIGURATION.md](CONFIGURATION.md) — every setting and the four layers.
 * [API.md](API.md) — endpoints, parameters, output columns.
+* [COMMAND_LINE.md](COMMAND_LINE.md) — the query and dump commands by example.
 * [DEPLOYMENT.md](DEPLOYMENT.md) — running it as a service, and enabling SSO.
 * [`contrib/tduweb/README.md`](../contrib/tduweb/README.md) — the TDU-side
   changes and what each one unlocks.

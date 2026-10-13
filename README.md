@@ -138,6 +138,7 @@ additive, touches no DAQ process, and removes the event loss entirely.
 | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | from checkout to first query, including the Python 3.9+ problem on the gateways |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every setting, and how the four layers merge |
 | [docs/API.md](docs/API.md) | endpoints, parameters, signals, output columns |
+| [docs/COMMAND_LINE.md](docs/COMMAND_LINE.md) | `darpa-spill-query` and `darpa-spill-dump` by example: times, selection, exports, splitting into files |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | systemd, reverse proxy, backups, enabling SSO |
 | [contrib/tduweb/README.md](contrib/tduweb/README.md) | the TDU-side changes and what each unlocks |
 
@@ -178,7 +179,7 @@ config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              346 tests
+tests/              353 tests
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```
