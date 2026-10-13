@@ -1,0 +1,331 @@
+.TH DARPA-SPILL-DUMP 1 "October 2026" "darpa_spillserver 1.2.0" "User Commands"
+.SH NAME
+darpa-spill-dump \- export a time range of NOvA accelerator events to CSV and JSON
+.SH SYNOPSIS
+.B darpa-spill-dump
+.RB [ \-\-csv
+.IR FILE ]
+.RB [ \-\-json
+.IR FILE ]
+.RB [ \-\-start
+.IR TIME ]
+.RB [ \-\-end
+.IR TIME ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B darpa-spill-dump
+copies every event in a time range out of the archive, writing a CSV file, a
+JSON file, or both from a single pass.  It reads a local SQLite archive or a
+running
+.BR darpa-spill-server (1).
+Where
+.BR darpa-spill-query (1)
+answers a question and stops at a row limit,
+.B darpa-spill-dump
+has no row limit: it is meant for taking a day, a week or the whole archive
+into an analysis.
+.SS How the range is read
+The range is walked in windows of
+.B \-\-window
+seconds of archive time, one request per window.  A window that holds more
+than
+.B \-\-page\-size
+events is halved and re-read, then the window grows back once the dense
+stretch is past.  This keeps every request proportional to its slice of time
+instead of paging through the whole range with
+.BR "LIMIT ... OFFSET" ,
+which SQLite resolves by stepping over every skipped row, and it means a
+concurrent
+.BR darpa-spill-backfill (1)
+cannot shift a page boundary and drop or repeat a row.
+.PP
+Windows are half-open,
+.IR "start <= t < end" ,
+so they tile without gaps or overlaps.
+.SS Snapshot and verification
+At start-up the range is clamped to the earliest and latest events the
+archive holds, and the matching events are counted.  Events that arrive while
+a long dump runs are therefore not half-included, and the count written at
+the end is compared with the count at the start.  A mismatch (a backfill or
+retention prune touched the range mid-run) is reported and gives exit
+status 3; the files are still internally consistent.
+.SS No partial files
+Each file is written as
+.IB FILE .part
+and renamed into place only after the whole range has been read.  An error or
+an interrupt removes the
+.B .part
+files, so a short, plausible-looking file is never left behind.
+.SH OUTPUT FORMATS
+Both files carry the same rows in the same order (time, then spill type,
+then source) with the same columns as the server's
+.IR /api/events ;
+see
+.B COLUMNS
+in
+.BR darpa-spill-query (1)
+or
+.IR docs/API.md .
+.SS CSV
+Four lines beginning
+.B #
+record the tool version, origin, range and selection, followed by the
+column-name row and one row per event.
+.B \-\-no\-comments
+and
+.B \-\-no\-header
+remove them.  To read the commented form with pandas use
+.IR "pd.read_csv(path, comment='#')" .
+.SS JSON
+A single object:
+.RS
+.nf
+{
+"meta":    { generated, generator, origin, range, selection,
+             sources, timezone, order, columns, expected },
+"events":  [ {row}, {row}, ... ],
+"summary": { returned, expected, complete, requests, seconds }
+}
+.fi
+.RE
+.PP
+.I meta
+and
+.I events
+match the
+.I /api/events
+envelope.  Each event is on its own line.
+.I summary.complete
+is true when every event counted at start-up was written.
+.SH OPTIONS
+.SS General
+.TP
+.BR \-V ", " \-\-version
+Show version information and exit.
+.TP
+.BR \-q ", " \-\-quiet
+Print nothing but errors and warnings.  Otherwise progress lines and a summary
+are written to standard error.
+.SS Data source
+With neither
+.B \-\-database
+nor
+.BR \-\-server ,
+the archive named by the configuration
+.RB ( storage.path )
+is read.
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Read the archive path and default query timezone from this configuration file.
+.TP
+.BR \-d ", " \-\-database " " \fIFILE\fR
+Read this SQLite archive directly.  Times without a zone are then UTC unless
+.B \-\-timezone
+is given.
+.TP
+.BR \-s ", " \-\-server " " \fIURL\fR
+Read from a running server, e.g.
+.IR https://novadaq-near-gateway-01.fnal.gov:8443 .
+Unqualified times use the server's configured zone.  The per-request row cap
+is lowered to the server's
+.B query.max_limit
+if needed.
+.TP
+.BI \-\-token " TOKEN"
+Send
+.BI "Authorization: Bearer " TOKEN
+for a server with SSO enabled.
+.TP
+.BI \-\-ca\-bundle " FILE"
+Verify the server's TLS certificate against this CA bundle (PEM).
+.TP
+.BR \-k ", " \-\-insecure
+Do not verify the server's TLS certificate.  Needed for a server with a
+self-signed certificate when no
+.B \-\-ca\-bundle
+is available.
+.SS Selection
+.TP
+.BI \-\-start " TIME"
+Start of the range, inclusive.  Default: the earliest event in the archive.
+.TP
+.BI \-\-end " TIME"
+End of the range, exclusive.  A bare date covers the whole of that day, so
+.B "\-\-start 2026-10-12 \-\-end 2026-10-12"
+is one day and
+.B "\-\-end 2026-10-13"
+would run to midnight ending the 13th.  Give a time,
+.BR 2026-10-13T00:00 ,
+for an exact bound.  Default: now.
+.TP
+.BI \-\-signal " SIG"
+Accelerator signal, e.g.
+.BR '$74' ,
+.BR 0x8f ,
+.BR numi .
+Repeatable.  As with the API, records stored without a raw event word match on
+their decoded type.
+.TP
+.BI \-\-type " TYPE"
+Decoded spill type by name or number.  Repeatable.
+.TP
+.BI \-\-source " NAME"
+Only events from this TDU.  Repeatable or comma-separated.  Default: every
+source.
+.TP
+.BI \-\-timezone " ZONE"
+Zone for times that carry none, e.g.
+.BR America/Chicago .
+.PP
+Times take every form
+.BR darpa-spill-query (1)
+accepts:
+.BR 2026-10-12 ,
+.BR "2026-10-12T06:00" ,
+.BR 09:15 ,
+.BR today ,
+.BR \-6h ,
+.BR nova:33885388992000000 ,
+.BR unix:1791763200 ,
+.BR gps:1475798418 .
+Write relative times with an equals sign,
+.BR \-\-start=\-6h ,
+or argparse mistakes the value for an option.
+.SS Output
+At least one of
+.B \-\-csv
+and
+.B \-\-json
+is required.  Either may be
+.B \-
+for standard output, but not both.
+.TP
+.BI \-\-csv " FILE"
+Write CSV to
+.IR FILE .
+.TP
+.BI \-\-json " FILE"
+Write JSON to
+.IR FILE .
+.TP
+.BI \-\-columns " LIST"
+Comma-separated subset and order of columns, applied to both files.
+.TP
+.B \-\-no\-header
+Omit the CSV column-name row.
+.TP
+.B \-\-no\-comments
+Omit the
+.B #
+provenance lines at the top of the CSV.
+.TP
+.BI \-\-indent " N"
+Pretty-print each JSON event with this indent.
+.SS Tuning
+.TP
+.BI \-\-window " SECONDS"
+Seconds of archive time per request.  Default 3600; the Near Detector archive
+holds about 28,000 events per hour across three TDUs.
+.TP
+.BI \-\-page\-size " N"
+Maximum rows per request.  Default 50000.
+.TP
+.BI \-\-timeout " SECONDS"
+Per-request HTTP timeout.  Default 120.  Failed or 5xx requests are retried
+three times with exponential back-off.
+.SH ENVIRONMENT
+Command-line options override the environment, which overrides the
+configuration file.
+.TP
+.B DARPA_SPILL_DUMP_SERVER
+Server URL, as
+.BR \-\-server .
+.TP
+.B DARPA_SPILL_DUMP_TOKEN
+Bearer token, as
+.BR \-\-token .
+.TP
+.B DARPA_SPILL_DUMP_CA_BUNDLE
+CA bundle, as
+.BR \-\-ca\-bundle .
+.TP
+.B DARPA_SPILL_DUMP_INSECURE
+.BR 1 / true / yes
+to skip TLS verification, as
+.BR \-\-insecure .
+.TP
+.BR DARPA_SPILL_CONFIG ", " DARPA_SPILL_STORAGE_PATH ", " DARPA_SPILL_QUERY_TIMEZONE
+Configuration file, archive path and default timezone for local reads; see
+.BR darpa-spill-server (1).
+.SH EXIT STATUS
+.TP
+.B 0
+Every event counted at start-up was written.
+.TP
+.B 1
+Server unreachable, request rejected, or another runtime failure.  No output
+file is left behind.
+.TP
+.B 2
+Usage error: bad option, unknown column, source or signal, or missing archive.
+.TP
+.B 3
+The files were written but hold a different number of events from the count
+at start-up, because the archive changed during the dump.
+.TP
+.B 130
+Interrupted.  No output file is left behind.
+.SH EXAMPLES
+One UTC day from the Near Detector gateway, both formats:
+.PP
+.RS
+.nf
+darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \e
+    --start 2026-10-12T00:00 --end 2026-10-13T00:00 --timezone UTC \e
+    --csv nd-2026-10-12.csv --json nd-2026-10-12.json
+.fi
+.RE
+.PP
+The last six hours of NuMI spills, a few columns, to standard output:
+.PP
+.RS
+.nf
+darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \e
+    --start=-6h --signal '$74' --columns nova_time,utc,gps,source \e
+    --no-comments --csv - | head
+.fi
+.RE
+.PP
+The whole local archive, on the gateway node itself:
+.PP
+.RS
+.nf
+darpa-spill-dump -c config/spillserver-near.yaml --json archive.json
+.fi
+.RE
+.PP
+The same server settings from the environment:
+.PP
+.RS
+.nf
+export DARPA_SPILL_DUMP_SERVER=https://novadaq-near-gateway-01.fnal.gov:8443
+export DARPA_SPILL_DUMP_INSECURE=1
+darpa-spill-dump --start 2026-10-12T06:00 --end 2026-10-12T07:00 --csv hour.csv
+.fi
+.RE
+.SH NOTES
+Opening a local archive through this tool, like
+.BR darpa-spill-query (1),
+applies any pending schema migration to it, so the file must be writable on
+first use after an upgrade.
+.PP
+Measured against the Near Detector gateway (October 2026): 1,052,663 events
+over 40 hours in 278 s, about 3,800 events per second, limited by the server's
+JSON rendering; peak client memory 250 MB.  A day is roughly 630,000 events,
+170 MB of CSV and 360 MB of JSON with all columns; use
+.B \-\-columns
+to shrink both.  Reading the archive file directly on the gateway is faster.
+.SH SEE ALSO
+.BR darpa-spill-query (1),
+.BR darpa-spill-server (1),
+.BR darpa_spillserver (3)

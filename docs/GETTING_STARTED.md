@@ -152,6 +152,16 @@ $ darpa-spill-query --last
 Quote `$74` in a shell — unquoted it expands to nothing. `0x74` and `74` also
 work.
 
+For a bulk copy of a range with no row limit, as CSV and JSON together:
+
+```console
+$ darpa-spill-dump --start 2026-10-12T00:00 --end 2026-10-13T00:00 --csv day.csv --json day.json
+$ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \
+      --start=-6h --signal '$74' --csv numi.csv
+```
+
+See `man -l man/darpa-spill-dump.1` for windowing, verification and exit codes.
+
 ## 7. What to read next
 
 * [CONFIGURATION.md](CONFIGURATION.md) — every setting and the four layers.

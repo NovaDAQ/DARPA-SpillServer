@@ -46,6 +46,19 @@ $ darpa-spill-query --source tdu-near-master-ppc-02 --signal '$8f' --start -1h
 
 Quote `$74` in a shell — unquoted it expands to nothing. `0x74` and `74` also work.
 
+To take a copy of a whole range — a day, a week, the archive — with no row
+limit, use `darpa-spill-dump`. It writes CSV and JSON from one pass, reads a
+local archive or a running server, and leaves no file behind if it fails:
+
+```console
+$ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \
+      --start 2026-10-12T00:00 --end 2026-10-13T00:00 --timezone UTC \
+      --csv nd-2026-10-12.csv --json nd-2026-10-12.json
+```
+
+`-k` skips TLS verification for the gateway's self-signed certificate;
+`--ca-bundle FILE` verifies against it instead.
+
 ## Read this before deploying
 
 **The TDU cannot currently supply a complete event history.** Its two event
@@ -112,7 +125,7 @@ additive, touches no DAQ process, and removes the event loss entirely.
   unknown keys rejected rather than ignored.
 - **OIDC hooks ready for Fermilab SSO** — off by default, as specified;
   enabling it is a config change, not a code change.
-- **Man pages** for both commands and the library.
+- **Man pages** for the server, query and dump commands and the library.
 
 ## Documentation
 
@@ -125,7 +138,7 @@ additive, touches no DAQ process, and removes the event loss entirely.
 | [contrib/tduweb/README.md](contrib/tduweb/README.md) | the TDU-side changes and what each unlocks |
 
 Man pages: `man -l man/darpa-spill-server.1`, `man -l man/darpa-spill-query.1`,
-`man -l man/darpa_spillserver.3`.
+`man -l man/darpa-spill-dump.1`, `man -l man/darpa_spillserver.3`.
 
 ## Requirements
 
@@ -154,12 +167,14 @@ src/darpa_spillserver/
     api.py, app.py  the HTTP surface
     cli.py          darpa-spill-server
     query_cli.py    darpa-spill-query
+    backfill.py     darpa-spill-backfill
+    dump.py         darpa-spill-dump
     web/            browser UI (templates, CSS, masthead logo)
 config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              299 tests
+tests/              333 tests
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```
