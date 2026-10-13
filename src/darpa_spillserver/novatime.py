@@ -527,6 +527,22 @@ def _require_nonnegative(token: str, what: str) -> int:
     return value
 
 
+def _swap_hint(start, end) -> str:
+    """Spell out the corrected range when both ends are bare dates.
+
+    Only then is the widening of a date-only end worth mentioning: swapping
+    ``2026-10-11`` / ``2026-10-10`` gives two whole days, which is not what
+    swapping two clock times gives.
+    """
+    bare = re.compile(r"^\s*\d{4}-\d{2}-\d{2}\s*$")
+    if isinstance(start, str) and isinstance(end, str) \
+            and bare.match(start) and bare.match(end):
+        return (" A date given as the end includes that whole day, so start "
+                "{} with end {} covers both days.".format(end.strip(),
+                                                          start.strip()))
+    return ""
+
+
 def parse_range(
     start: Union[str, int, datetime, None],
     end: Union[str, int, datetime, None],
@@ -559,8 +575,10 @@ def parse_range(
     plain_end = parse_instant(end, now=reference, tz=tz, end_of_day=False)
     if plain_end < start_nova:
         raise NovaTimeError(
-            "the end of the range ({}) is before its start ({})".format(
-                nova_to_string(plain_end), nova_to_string(start_nova)
+            "the end of the range ({}) is before its start ({}); are start "
+            "and end swapped?{}".format(
+                nova_to_string(plain_end), nova_to_string(start_nova),
+                _swap_hint(start, end),
             )
         )
 

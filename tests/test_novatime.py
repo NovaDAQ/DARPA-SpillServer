@@ -248,6 +248,22 @@ def test_backwards_range_is_rejected():
     with pytest.raises(NovaTimeError) as excinfo:
         parse_range("today", "yesterday", now=NOW)
     assert "before its start" in str(excinfo.value)
+    assert "swapped" in str(excinfo.value)
+    assert "whole day" not in str(excinfo.value)
+
+
+def test_backwards_date_range_spells_out_the_fix():
+    with pytest.raises(NovaTimeError) as excinfo:
+        parse_range("2026-10-11", "2026-10-10", now=NOW)
+    assert "start 2026-10-10 with end 2026-10-11 covers both days" \
+        in str(excinfo.value)
+
+
+def test_backwards_clock_times_get_no_date_hint():
+    with pytest.raises(NovaTimeError) as excinfo:
+        parse_range("11:34", "09:15", now=NOW)
+    assert "swapped" in str(excinfo.value)
+    assert "whole day" not in str(excinfo.value)
 
 
 def test_equal_instants_make_an_empty_range():
