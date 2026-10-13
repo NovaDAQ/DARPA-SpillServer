@@ -246,3 +246,152 @@ def test_server_from_environment(monkeypatch, populated_client, tmp_path):
           "--json", str(out)], environ={dump.ENV_SERVER: "https://env:2"})
     assert seen["url"] == "https://cli:1"
     assert seen["verify"] == "ca.pem"
+
+
+# ------------------------------------------------------------------ split
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+from darpa_spillserver.dump import segment_path, split_range  # noqa: E402
+from darpa_spillserver.novatime import (  # noqa: E402
+    datetime_to_nova,
+    get_timezone,
+    nova_to_datetime,
+)
+from darpa_spillserver.storage import SpillEvent  # noqa: E402
+from darpa_spillserver.signals import SpillType  # noqa: E402
+
+
+def utc(*args):
+    return datetime_to_nova(datetime(*args, tzinfo=timezone.utc))
+
+
+def test_split_days_tile_the_range():
+    start, end = utc(2026, 10, 12, 6), utc(2026, 10, 15, 3)
+    pieces = split_range(start, end, "day", get_timezone("UTC"))
+    assert [p[2] for p in pieces] == ["2026-10-12", "2026-10-13",
+                                      "2026-10-14", "2026-10-15"]
+    assert pieces[0][0] == start and pieces[-1][1] == end
+    assert all(a[1] == b[0] for a, b in zip(pieces, pieces[1:]))
+    assert pieces[1][:2] == (utc(2026, 10, 13), utc(2026, 10, 14))
+
+
+def test_split_hours_and_unsplit():
+    start, end = utc(2026, 10, 12, 0, 30), utc(2026, 10, 12, 3)
+    pieces = split_range(start, end, "hour", get_timezone("UTC"))
+    assert [p[2] for p in pieces] == ["2026-10-12T00", "2026-10-12T01",
+                                      "2026-10-12T02"]
+    assert split_range(start, end, None, None) == [(start, end, None)]
+
+
+def test_split_days_follow_local_midnight():
+    chicago = get_timezone("America/Chicago")
+    pieces = split_range(utc(2026, 10, 12, 5), utc(2026, 10, 14, 5),
+                         "day", chicago)
+    assert [p[2] for p in pieces] == ["2026-10-12", "2026-10-13"]
+    assert pieces[1][0] == utc(2026, 10, 13, 5)
+
+
+def test_split_across_daylight_saving():
+    chicago = get_timezone("America/Chicago")
+    # 2026-11-01: clocks fall back at 02:00 CDT; the day is 25 hours.
+    days = split_range(utc(2026, 11, 1, 5), utc(2026, 11, 2, 6), "day", chicago)
+    assert len(days) == 1 and days[0][2] == "2026-11-01"
+    hours = split_range(utc(2026, 11, 1, 5), utc(2026, 11, 2, 6), "hour",
+                        chicago)
+    labels = [p[2] for p in hours]
+    assert len(hours) == 25 and len(set(labels)) == 25
+    assert "2026-11-01T01-0500" in labels and "2026-11-01T01-0600" in labels
+    # 2026-03-08: spring forward; 23 hours, no 02:00.
+    hours = split_range(utc(2026, 3, 8, 6), utc(2026, 3, 9, 5), "hour",
+                        chicago)
+    assert len(hours) == 23
+    assert not any(p[2].startswith("2026-03-08T02") for p in hours)
+
+
+def test_segment_path():
+    assert segment_path("week.csv", "2026-10-12") == "week_2026-10-12.csv"
+    assert segment_path("out/{start}/s.json", "2026-10-12") == \
+        "out/2026-10-12/s.json"
+    assert segment_path("week.csv", None) == "week.csv"
+
+
+@pytest.fixture
+def two_days(tmp_path):
+    """Events every 6 h across 2026-10-12 and -13 UTC, all one source."""
+    from darpa_spillserver.storage import SpillStore
+    store = SpillStore(str(tmp_path / "two.db"))
+    store.insert_events([
+        SpillEvent(nova_time=utc(2026, 10, 12) + i * 6 * 3600 * SECOND,
+                   spill_type=SpillType.ACCEL_ONE_HZ_TCLK, signal_code=0x8F,
+                   event_number=i, source=SOURCE_A, route="spill_history")
+        for i in range(8)
+    ])
+    yield store
+    store.close()
+
+
+def test_split_by_day_writes_one_file_per_day(two_days, tmp_path):
+    out = tmp_path / "out"
+    code = main(["-d", two_days.path, "-q", "--timezone", "UTC",
+                 "--start", "2026-10-12", "--end", "2026-10-13",
+                 "--split", "day", "--csv", str(out / "s.csv"),
+                 "--json", str(out / "{start}" / "s.json")], environ={})
+    assert code == 0
+    assert len(read_csv(out / "s_2026-10-12.csv")) == 4
+    assert len(read_csv(out / "s_2026-10-13.csv")) == 4
+    doc = read_json(out / "2026-10-13" / "s.json")
+    assert doc["meta"]["piece"] == {"split": "day", "label": "2026-10-13"}
+    assert doc["meta"]["range"]["start"]["utc"].startswith("2026-10-13T00:00")
+    assert doc["summary"]["complete"] is True
+    assert not list(out.rglob("*.part"))
+
+
+def test_split_by_hour_and_skip_empty(two_days, tmp_path):
+    out = tmp_path / "h.csv"
+    args = ["-d", two_days.path, "-q", "--timezone", "UTC",
+            "--start", "2026-10-12T00:00", "--end", "2026-10-12T12:00",
+            "--split", "hour", "--csv", str(out)]
+    assert main(args, environ={}) == 0
+    assert len(list(tmp_path.glob("h_*.csv"))) == 12
+    assert len(read_csv(tmp_path / "h_2026-10-12T06.csv")) == 1
+    assert len(read_csv(tmp_path / "h_2026-10-12T07.csv")) == 0
+
+    for f in tmp_path.glob("h_*.csv"):
+        f.unlink()
+    assert main(args + ["--skip-empty"], environ={}) == 0
+    assert sorted(f.name for f in tmp_path.glob("h_*.csv")) == [
+        "h_2026-10-12T00.csv", "h_2026-10-12T06.csv"]
+
+
+def test_split_skips_pieces_after_the_archive(two_days, tmp_path):
+    main(["-d", two_days.path, "-q", "--timezone", "UTC",
+          "--start", "2026-10-12", "--end", "2026-10-20",
+          "--split", "day", "--json", str(tmp_path / "d.json")], environ={})
+    assert sorted(f.name for f in tmp_path.glob("d_*.json")) == [
+        "d_2026-10-12.json", "d_2026-10-13.json"]
+
+
+def test_split_usage_errors(two_days, tmp_path):
+    assert main(["-d", two_days.path, "--split", "day", "--csv", "-"],
+                environ={}) == 2
+    assert main(["-d", two_days.path, "--skip-empty",
+                 "--csv", str(tmp_path / "x.csv")], environ={}) == 2
+
+
+def test_failed_piece_keeps_completed_ones(two_days, tmp_path, monkeypatch):
+    real = LocalReader.fetch
+
+    def flaky(self, start, end, limit):
+        if limit > 1 and nova_to_datetime(start).day == 13:
+            raise DumpError("boom")
+        return real(self, start, end, limit)
+
+    monkeypatch.setattr(LocalReader, "fetch", flaky)
+    code = main(["-d", two_days.path, "-q", "--timezone", "UTC",
+                 "--start", "2026-10-12", "--end", "2026-10-13",
+                 "--split", "day", "--csv", str(tmp_path / "s.csv")],
+                environ={})
+    assert code == 1
+    assert sorted(f.name for f in tmp_path.glob("s_*")) == ["s_2026-10-12.csv"]

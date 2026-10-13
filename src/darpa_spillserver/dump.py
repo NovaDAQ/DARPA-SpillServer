@@ -42,7 +42,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import __version__
@@ -52,14 +52,16 @@ from .novatime import (
     TICKS_PER_SECOND,
     NovaTimeError,
     convert,
+    datetime_to_nova,
     get_timezone,
+    nova_to_datetime,
     parse_range,
 )
 from .signals import parse_signal, parse_spill_type
 from .storage import UNKNOWN_SIGNAL, SpillStore, StoreError
 
-__all__ = ["main", "dump_range", "CsvSink", "JsonSink", "LocalReader",
-           "RemoteReader", "DumpError"]
+__all__ = ["main", "dump_range", "split_range", "segment_path", "CsvSink",
+           "JsonSink", "LocalReader", "RemoteReader", "DumpError"]
 
 #: Seconds of archive time per request.  The near detector archive holds
 #: roughly 25k events per hour across three TDUs, so an hour is one request.
@@ -355,6 +357,75 @@ def dump_range(reader, sinks, start_nova: int, end_nova: int,
     return rows_written, requests
 
 
+# ------------------------------------------------------------------- split
+
+
+def split_range(start_nova: int, end_nova: int, unit: Optional[str],
+                zone) -> List[Tuple[int, int, Optional[str]]]:
+    """Cut ``[start_nova, end_nova)`` at calendar boundaries in *zone*.
+
+    Returns ``(start, end, label)`` triples that tile the range exactly; the
+    first and last are partial when the range does not begin or end on a
+    boundary.  *unit* is ``"day"``, ``"hour"`` or ``None`` (one piece, no
+    label).
+
+    Boundaries are local midnights or local hours in *zone*, stepped in real
+    time, so a daylight-saving changeover day is 23 or 25 hours long and the
+    repeated autumn hour gets its own piece.  Hour labels carry the UTC
+    offset outside UTC for exactly that reason: ``2026-11-01T01-0500`` and
+    ``2026-11-01T01-0600`` are different hours.
+    """
+    if unit is None or end_nova <= start_nova:
+        return [(start_nova, end_nova, None)]
+
+    utc = zone.utcoffset(datetime(2000, 1, 1)) == timedelta(0) and \
+        zone.utcoffset(datetime(2000, 7, 1)) == timedelta(0)
+    local = nova_to_datetime(start_nova).astimezone(zone)
+    if unit == "day":
+        floor = datetime.combine(local.date(), dtime(0), tzinfo=zone)
+    elif unit == "hour":
+        floor = local.replace(minute=0, second=0, microsecond=0)
+    else:
+        raise ValueError("unknown split unit {!r}".format(unit))
+
+    pieces: List[Tuple[int, int, Optional[str]]] = []
+    lower = start_nova
+    boundary = floor
+    while lower < end_nova:
+        if unit == "day":
+            label = boundary.strftime("%Y-%m-%d")
+            following = datetime.combine(boundary.date() + timedelta(days=1),
+                                         dtime(0), tzinfo=zone)
+        else:
+            label = boundary.strftime("%Y-%m-%dT%H")
+            if not utc:
+                label += boundary.strftime("%z")
+            # Step in UTC so the repeated autumn hour is not skipped.
+            following = (boundary.astimezone(timezone.utc)
+                         + timedelta(hours=1)).astimezone(zone)
+        upper = min(datetime_to_nova(following), end_nova)
+        if upper > lower:
+            pieces.append((lower, upper, label))
+        lower = max(lower, upper)
+        boundary = following
+    return pieces
+
+
+def segment_path(template: str, label: Optional[str]) -> str:
+    """The output path for one piece of a split dump.
+
+    ``{start}`` in *template* is replaced by the piece's label, which allows
+    a directory per day (``out/{start}/spills.csv``).  Otherwise the label
+    goes before the extension: ``week.csv`` becomes ``week_2026-10-12.csv``.
+    """
+    if label is None:
+        return template
+    if "{start}" in template:
+        return template.replace("{start}", label)
+    root, ext = os.path.splitext(template)
+    return "{}_{}{}".format(root, label, ext)
+
+
 # --------------------------------------------------------------------- CLI
 
 
@@ -434,6 +505,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "the CSV")
     output.add_argument("--indent", type=int, metavar="N",
                         help="pretty-print JSON events with this indent")
+    output.add_argument("--split", choices=["day", "hour"],
+                        help="write one file per day or hour, cut at "
+                             "boundaries in --timezone; FILE gains a _LABEL "
+                             "suffix, or replaces {start} if it contains it")
+    output.add_argument("--skip-empty", action="store_true",
+                        help="with --split, write no file for a piece "
+                             "holding no events")
 
     tuning = parser.add_argument_group("tuning")
     tuning.add_argument("--window", type=float, default=DEFAULT_WINDOW,
@@ -569,6 +647,12 @@ def main(argv: Optional[Sequence[str]] = None,
     if args.csv == "-" and args.json == "-":
         _err("--csv and --json cannot both write to stdout")
         return 2
+    if args.split and "-" in (args.csv, args.json):
+        _err("--split writes several files; it cannot write to stdout")
+        return 2
+    if args.skip_empty and not args.split:
+        _err("--skip-empty only applies with --split")
+        return 2
     if args.page_size < 1 or args.window <= 0:
         _err("--page-size and --window must be positive")
         return 2
@@ -593,6 +677,7 @@ def main(argv: Optional[Sequence[str]] = None,
         return 1 if (args.server or environ.get(ENV_SERVER)) else 2
 
     sinks: List[Any] = []
+    written: List[str] = []
     try:
         # A server refuses a limit above its query.max_limit.
         ceiling = reader.max_limit() if hasattr(reader, "max_limit") else None
@@ -607,106 +692,161 @@ def main(argv: Optional[Sequence[str]] = None,
             return 2
 
         first, last = reader.extent()
-        if first is None or last is None:
-            start_nova = end_nova = req_start
-        else:
-            # Clamp to what the archive held when the dump began: skips the
-            # empty windows before the first event and fixes the snapshot.
-            start_nova = max(req_start, first)
-            end_nova = min(req_end, last + 1)
-        if end_nova < start_nova:
-            end_nova = start_nova
+        # Clamp the walk to what the archive held when the dump began: it
+        # skips the empty stretch before the first event and fixes the
+        # snapshot, so rows arriving during a long dump are not half-included.
+        snap_start = req_start if first is None else max(req_start, first)
+        snap_end = req_start if last is None else min(req_end, last + 1)
+        snap_end = max(snap_end, snap_start)
 
-        expected = 0
-        if end_nova > start_nova:
-            _, expected = reader.fetch(start_nova, end_nova, 1)
+        pieces = split_range(req_start, req_end, args.split, zone)
+        if args.split:
+            # Pieces wholly after the snapshot have not happened yet.
+            pieces = [p for p in pieces if p[0] < snap_end]
 
-        generated = datetime.now(timezone.utc).isoformat()
-        meta = {
-            "generated": generated,
+        _, expected_total = (reader.fetch(snap_start, snap_end, 1)
+                             if snap_end > snap_start else (None, 0))
+        if not quiet:
+            print("darpa-spill-dump: {} -> {} from {}: {:,} events{}".format(
+                convert(req_start).utc, convert(req_end).utc,
+                reader.description, expected_total,
+                ", {} {} file(s)".format(len(pieces), args.split)
+                if args.split else ""), file=log, flush=True)
+
+        base_meta = {
             "generator": "darpa-spill-dump {}".format(__version__),
             "origin": reader.description,
-            "range": {
-                "start": convert(req_start).as_dict(),
-                "end": convert(req_end).as_dict(),
-                "note": "half-open: start <= t < end",
-            },
             "selection": (list(args.signal) + list(args.types))
                          or ["(all signals)"],
             "sources": _split(args.sources) or ["(all sources)"],
             "timezone": str(args.timezone or default_zone),
             "order": "asc",
             "columns": columns,
-            "expected": expected,
         }
-        if not quiet:
-            print("darpa-spill-dump: {} -> {} from {}: {:,} events".format(
-                convert(req_start).utc, convert(req_end).utc,
-                reader.description, expected), file=log, flush=True)
-
-        if args.csv:
-            comments = [] if args.no_comments else [
-                "darpa-spill-dump {} generated {}".format(__version__, generated),
-                "origin: {}".format(reader.description),
-                "range: {} <= t < {}".format(convert(req_start).utc,
-                                             convert(req_end).utc),
-                "selection: {}; sources: {}".format(
-                    ", ".join(meta["selection"]), ", ".join(meta["sources"])),
-            ]
-            sinks.append(CsvSink(args.csv, columns, comments,
-                                 header=not args.no_header))
-        if args.json:
-            sinks.append(JsonSink(args.json, columns, meta, indent=args.indent))
-
-        progress = None if quiet else _progress_printer(
-            start_nova, end_nova, expected, log)
+        printer = None if quiet else _progress_printer(
+            snap_start, snap_end, expected_total, log)
         started = time.monotonic()
         rows = requests = 0
-        if end_nova > start_nova:
-            rows, requests = dump_range(
-                reader, sinks, start_nova, end_nova,
-                window_seconds=args.window, page_size=args.page_size,
-                progress=progress)
+        mismatched = []
 
-        summary = {
-            "returned": rows,
-            "expected": expected,
-            "complete": rows == expected,
-            "requests": requests,
-            "seconds": round(time.monotonic() - started, 3),
-        }
-        for sink in sinks:
-            sink.close(summary)
-        sinks = []
+        for seg_start, seg_end, label in pieces:
+            walk_start = max(seg_start, snap_start)
+            walk_end = min(seg_end, snap_end)
+            expected = 0
+            if walk_end > walk_start:
+                if len(pieces) == 1:
+                    expected = expected_total
+                else:
+                    _, expected = reader.fetch(walk_start, walk_end, 1)
+            if args.skip_empty and expected == 0:
+                continue
+
+            generated = datetime.now(timezone.utc).isoformat()
+            meta = dict(base_meta, generated=generated, range={
+                "start": convert(seg_start).as_dict(),
+                "end": convert(seg_end).as_dict(),
+                "note": "half-open: start <= t < end",
+            }, expected=expected)
+            if label is not None:
+                meta["piece"] = {"split": args.split, "label": label}
+
+            paths = []
+            if args.csv:
+                path = segment_path(args.csv, label)
+                comments = [] if args.no_comments else [
+                    "darpa-spill-dump {} generated {}".format(
+                        __version__, generated),
+                    "origin: {}".format(reader.description),
+                    "range: {} <= t < {}".format(convert(seg_start).utc,
+                                                 convert(seg_end).utc),
+                    "selection: {}; sources: {}".format(
+                        ", ".join(meta["selection"]),
+                        ", ".join(meta["sources"])),
+                ]
+                _make_parent(path)
+                sinks.append(CsvSink(path, columns, comments,
+                                     header=not args.no_header))
+                paths.append(path)
+            if args.json:
+                path = segment_path(args.json, label)
+                _make_parent(path)
+                sinks.append(JsonSink(path, columns, meta, indent=args.indent))
+                paths.append(path)
+
+            def progress(cursor, seg_rows, seg_requests, _r=rows, _q=requests):
+                printer(cursor, _r + seg_rows, _q + seg_requests)
+
+            seg_started = time.monotonic()
+            got = got_requests = 0
+            if walk_end > walk_start:
+                got, got_requests = dump_range(
+                    reader, sinks, walk_start, walk_end,
+                    window_seconds=args.window, page_size=args.page_size,
+                    progress=progress if printer else None)
+            summary = {
+                "returned": got,
+                "expected": expected,
+                "complete": got == expected,
+                "requests": got_requests,
+                "seconds": round(time.monotonic() - seg_started, 3),
+            }
+            for sink in sinks:
+                sink.close(summary)
+            sinks = []
+            rows += got
+            requests += got_requests
+            if got != expected:
+                mismatched.append((label, got, expected))
+            written.extend(p for p in paths if p != "-")
+            if args.split and not quiet:
+                print("darpa-spill-dump: {}  {:>10,} events  {}".format(
+                    label, got, ", ".join(paths)), file=log, flush=True)
+        seconds = time.monotonic() - started
     except DumpError as exc:
         for sink in sinks:
             sink.abort()
         _err(str(exc))
+        _report_kept(written)
         return 1
     except KeyboardInterrupt:
         for sink in sinks:
             sink.abort()
-        _err("interrupted; no output files written")
+        _err("interrupted")
+        _report_kept(written)
         return 130
     finally:
         reader.close()
 
     if not quiet:
-        if progress is not None:
-            progress(end_nova, rows, requests, final=True)
-        written = ", ".join(p for p in (args.csv, args.json) if p and p != "-")
+        if printer is not None:
+            printer(snap_end, rows, requests, final=True)
+        shown = written if len(written) <= 4 else written[:2] + [
+            "... ({} files)".format(len(written))]
         print("darpa-spill-dump: wrote {:,} events in {:.1f} s{}".format(
-            rows, summary["seconds"],
-            " to " + written if written else ""), file=log)
-    if rows != expected:
-        # Rows inserted or pruned mid-run inside the window (a backfill, or
+            rows, seconds, " to " + ", ".join(shown) if shown else ""),
+            file=log)
+    for label, got, expected in mismatched:
+        # Rows inserted or pruned mid-run inside the range (a backfill, or
         # retention) change the count; the files are still self-consistent.
-        print("darpa-spill-dump: warning: wrote {:,} events but {:,} matched "
-              "at start; the archive changed during the dump".format(
-                  rows, expected), file=sys.stderr)
-        return 3
-    return 0
+        print("darpa-spill-dump: warning: {}wrote {:,} events but {:,} "
+              "matched at start; the archive changed during the dump".format(
+                  label + ": " if label else "", got, expected),
+              file=sys.stderr)
+    return 3 if mismatched else 0
 
+
+def _make_parent(path: str) -> None:
+    parent = os.path.dirname(path)
+    if path != "-" and parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def _report_kept(written: Sequence[str]) -> None:
+    if written:
+        print("darpa-spill-dump: {} complete file(s) kept: {}".format(
+            len(written), ", ".join(written)), file=sys.stderr)
+    else:
+        print("darpa-spill-dump: no output files written", file=sys.stderr)
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())

@@ -59,6 +59,10 @@ $ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \
 `-k` skips TLS verification for the gateway's self-signed certificate;
 `--ca-bundle FILE` verifies against it instead.
 
+`--split day` or `--split hour` writes one file per calendar day or hour
+(`week.csv` → `week_2026-10-12.csv`, …; or put `{start}` in the path), cut at
+boundaries in `--timezone`.
+
 ## Read this before deploying
 
 **The TDU cannot currently supply a complete event history.** Its two event
@@ -174,7 +178,7 @@ config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
 docs/               guides
 man/                man pages
-tests/              336 tests
+tests/              346 tests
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```
