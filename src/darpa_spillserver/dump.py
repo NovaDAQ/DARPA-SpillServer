@@ -778,7 +778,9 @@ def main(argv: Optional[Sequence[str]] = None,
 
             seg_started = time.monotonic()
             got = got_requests = 0
-            if walk_end > walk_start:
+            # A piece counted empty at the snapshot has nothing to walk; on a
+            # sparse selection that is most of them.
+            if walk_end > walk_start and expected > 0:
                 got, got_requests = dump_range(
                     reader, sinks, walk_start, walk_end,
                     window_seconds=args.window, page_size=args.page_size,
@@ -808,6 +810,12 @@ def main(argv: Optional[Sequence[str]] = None,
         _err(str(exc))
         _report_kept(written)
         return 1
+    except BrokenPipeError:
+        # The reader of '-' went away (| head): stop quietly, as cat would.
+        for sink in sinks:
+            sink.abort()
+        _quiet_stdout()
+        return 141
     except KeyboardInterrupt:
         for sink in sinks:
             sink.abort()
@@ -833,6 +841,13 @@ def main(argv: Optional[Sequence[str]] = None,
                   label + ": " if label else "", got, expected),
               file=sys.stderr)
     return 3 if mismatched else 0
+
+
+def _quiet_stdout() -> None:
+    """Point stdout at /dev/null so the interpreter's final flush of a
+    closed pipe does not print a second BrokenPipeError on exit."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
 
 
 def _make_parent(path: str) -> None:

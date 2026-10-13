@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import List, Optional, Sequence
 
@@ -117,16 +118,15 @@ def _list_signals() -> int:
     return 0
 
 
-def _print_table(events, stream) -> None:
-    """Render events as an aligned text table."""
+def _print_table(rows, stream) -> None:
+    """Render rows shaped by :func:`event_row` as an aligned text table."""
     header = "{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}  {}".format(
         "NOVA TIME", "UTC", "SIGNAL", "TYPE", "GPS TIME", "DELTA", "SOURCE")
     print(header, file=stream)
     print("-" * len(header), file=stream)
 
     count = 0
-    for event in events:
-        row = event_row(event)
+    for row in rows:
         print("{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}  {}".format(
             row["nova_time"],
             row["utc"][:27],
@@ -194,9 +194,35 @@ def _query_server(args, columns) -> int:
 
     stream = open(args.output, "w") if args.output else sys.stdout
     try:
-        stream.write(response.text)
-        if not response.text.endswith("\n"):
-            stream.write("\n")
+        if args.format == "table":
+            # The server has no table format; render its JSON rows here, the
+            # same way a local query is rendered.
+            body = response.json()
+            if "events" in body:
+                rows = body["events"]
+                meta = body.get("meta", {})
+                if meta.get("truncated"):
+                    print("note: {} of {} matching events shown; raise "
+                          "--limit to see more".format(
+                              meta.get("returned"), meta.get("total")),
+                          file=sys.stderr)
+            else:
+                rows = [body["event"]] if body.get("event") else []
+            _print_table(rows, stream)
+        else:
+            text = response.text
+            if args.format == "csv" and args.no_header:
+                # The API always sends the column-name row; drop the first
+                # line that is not a '#' comment.
+                lines = text.splitlines(True)
+                for index, line in enumerate(lines):
+                    if not line.startswith("#"):
+                        del lines[index]
+                        break
+                text = "".join(lines)
+            stream.write(text)
+            if text and not text.endswith("\n"):
+                stream.write("\n")
     finally:
         if args.output:
             stream.close()
@@ -211,6 +237,17 @@ def _source_names(args) -> List[str]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    try:
+        return _main(argv)
+    except BrokenPipeError:
+        # The reader went away (| head): stop quietly, as cat would, and keep
+        # the interpreter's final flush from raising again.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 141
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -335,7 +372,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     stream.write(chunk)
                 stream.write("\n")
             else:
-                _print_table(events, stream)
+                _print_table((event_row(e) for e in events), stream)
         finally:
             if args.output:
                 stream.close()

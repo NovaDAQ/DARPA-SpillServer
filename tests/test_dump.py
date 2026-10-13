@@ -395,3 +395,41 @@ def test_failed_piece_keeps_completed_ones(two_days, tmp_path, monkeypatch):
                 environ={})
     assert code == 1
     assert sorted(f.name for f in tmp_path.glob("s_*")) == ["s_2026-10-12.csv"]
+
+
+def test_empty_pieces_are_not_walked(two_days, tmp_path, monkeypatch):
+    calls = []
+    real = LocalReader.fetch
+
+    def counting(self, start, end, limit):
+        calls.append(limit)
+        return real(self, start, end, limit)
+
+    monkeypatch.setattr(LocalReader, "fetch", counting)
+    main(["-d", two_days.path, "-q", "--timezone", "UTC", "--type", "numi",
+          "--start", "2026-10-12", "--end", "2026-10-13", "--split", "hour",
+          "--csv", str(tmp_path / "n.csv")], environ={})
+    # Only the count requests (limit 1): the whole-range count and one per
+    # piece. No window is read.
+    assert set(calls) == {1}
+    # 00:00 on the 12th to 18:00 on the 13th, the last archived event;
+    # later hours have not been recorded yet and are not written.
+    assert len(list(tmp_path.glob("n_*.csv"))) == 43
+
+
+def test_broken_stdout_pipe_exits_quietly(populated, tmp_path, monkeypatch,
+                                          capsys):
+    class ClosedPipe:
+        def write(self, text):
+            raise BrokenPipeError()
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr("sys.stdout", ClosedPipe())
+    monkeypatch.setattr(dump, "_quiet_stdout", lambda: None)
+    code = main(["-d", populated.path, *RANGE, "-q", "--csv", "-",
+                 "--json", str(tmp_path / "d.json")], environ={})
+    assert code == 141
+    assert list(tmp_path.glob("d.json*")) == []
+    assert "Traceback" not in capsys.readouterr().err
