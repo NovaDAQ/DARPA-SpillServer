@@ -44,3 +44,9 @@ core/
 # NFS silly-rename artefacts (a deleted file still held open)
 .nfs*
 /run/
+
+# Local exports and scratch data in the checkout root
+/*.csv
+/*.json
+/*.part
+/dune_1gbtestfile*
