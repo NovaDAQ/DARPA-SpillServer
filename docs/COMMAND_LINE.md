@@ -6,6 +6,7 @@ Two commands read the spill archive from a terminal:
 |---|---|---|---|
 | `darpa-spill-query` | answer a question: what happened, when, how many | yes (`--limit`, server `query.max_limit`) | table, CSV or JSON to stdout or `-o FILE` |
 | `darpa-spill-dump` | take a copy of a range: a day, a week, the archive | none | CSV and/or JSON files, optionally one per day or hour |
+| `darpa-spill-shift` | blur the timestamps in dump files, reversibly, with a secret token | none | `.shifted` / `.restored` copies of the files |
 
 Both read either the **local SQLite archive** (on the gateway node) or a
 **running server** over HTTPS, accept the same time expressions and the same
@@ -31,6 +32,7 @@ Contents:
 8. [Recipes](#8-recipes)
 9. [Reading the files](#9-reading-the-files)
 10. [Troubleshooting](#10-troubleshooting)
+11. [Blurring timestamps reversibly](#11-blurring-timestamps-reversibly)
 
 ---
 
@@ -591,3 +593,73 @@ exactly, and pandas reads it as one.
 | `--split writes several files; it cannot write to stdout` | `--split` needs real file paths |
 | Exit status 3, `the archive changed during the dump` | a backfill or prune ran mid-dump; the files are consistent, re-run if you need the newer state |
 | Fewer files than days with `--split` | pieces after the newest archived event are not written; check ingest with `/api/status` |
+
+## 11. Blurring timestamps reversibly
+
+`darpa-spill-shift` shifts every event in a dump file by a small random
+offset, so the recipient sees roughly when events happened but not exactly.
+Whoever holds the token can undo the shift exactly. The offsets are flat or
+truncated Gaussian, at most ±500 ms. The design is summarised in
+[TIMESTAMP_SHIFT.md](TIMESTAMP_SHIFT.md) and specified in full, with tests
+and plots, in [TimestampShift.nb](TimestampShift.nb).
+
+**1. Make a token and keep it.** It is the only way to undo the shift.
+
+```console
+$ darpa-spill-shift token --dist gauss --sigma 20ms -o tok.txt
+darpa-spill-shift: wrote Gaussian, sigma 20 ms (1280000 ticks), cut +-60 ms (3840000 ticks) token to tok.txt (fingerprint a8dcfcf5c8a9caa1)
+```
+
+`--dist flat --width 50ms` gives uniform offsets in ±50 ms. For the Gaussian,
+`--cut` defaults to 3σ. `--seed TEXT` makes the token reproducible from a
+passphrase, but then it is only as strong as the passphrase.
+
+**2. Shift.** Each input gets a `.shifted` copy alongside it:
+
+```console
+$ darpa-spill-shift apply --token-file tok.txt r.csv r.json
+darpa-spill-shift: shifted 56,343 events: r.csv -> r.shifted.csv
+darpa-spill-shift: shifted 56,343 events: r.json -> r.shifted.json
+```
+
+`nova_time` moves, and every other time column (`utc`, `gps`, `unix_*`, ...)
+follows it. `pps_offset` and `delta` are transformed too, since otherwise they
+would give the true times away. The file records which token shifted it,
+without the secret:
+
+```
+# darpa-spill-dump 1.2.0 generated 2026-10-13T15:51:12.469919+00:00
+...
+# darpa-spill-shift: dts1 shifted, params=dts1:gauss:sigma=1280000:cut=3840000, fingerprint=a8dcfcf5c8a9caa1
+nova_time,utc,utc_string,...
+```
+
+**3. Restore.** The `.restored` copy is byte-identical to the original:
+
+```console
+$ darpa-spill-shift invert --token-file tok.txt r.shifted.csv r.shifted.json
+darpa-spill-shift: restored 56,343 events: r.shifted.csv -> r.restored.csv
+darpa-spill-shift: restored 56,343 events: r.shifted.json -> r.restored.json
+$ cmp r.csv r.restored.csv && echo identical
+identical
+```
+
+**Split dumps** can be shifted in one call:
+`darpa-spill-shift apply --token-file tok.txt week/nd_*.csv`.
+
+**Safety checks:**
+- Shifting a file twice is refused.
+- Inverting with the wrong token is refused, because it would otherwise give
+  wrong times without any sign of failure. `darpa-spill-shift info FILE
+  --token-file T` tells you whether a token matches a file.
+- The input file is never overwritten.
+
+**What it doesn't hide:**
+- **Event order.** `event_number` stays in the file, and it numbers events in
+  true order.
+- **Predictable events.** The 1 Hz pulser can be snapped back to the second.
+
+Once σ approaches the spacing between events, sorting by time no longer gives
+the true order: 0.6% of successive events swap at 20 ms, and 9% at 50 ms. Sort
+by `event_number` instead.
+

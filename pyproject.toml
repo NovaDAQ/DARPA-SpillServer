@@ -39,6 +39,7 @@ darpa-spill-server = "darpa_spillserver.cli:main"
 darpa-spill-query = "darpa_spillserver.query_cli:main"
 darpa-spill-backfill = "darpa_spillserver.backfill:main"
 darpa-spill-dump = "darpa_spillserver.dump:main"
+darpa-spill-shift = "darpa_spillserver.shift:main"
 
 [project.urls]
 Homepage = "https://github.com/NovaDAQ/DARPA-SpillServer"

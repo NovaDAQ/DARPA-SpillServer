@@ -59,6 +59,16 @@ $ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \
 `-k` skips TLS verification for the gateway's self-signed certificate;
 `--ca-bundle FILE` verifies against it instead.
 
+To blur the timestamps in a dump reversibly, so a recipient sees roughly
+when events happened but only the token holder can recover the exact times,
+use `darpa-spill-shift`:
+
+```console
+$ darpa-spill-shift token --dist gauss --sigma 20ms -o blur.tok
+$ darpa-spill-shift apply  --token-file blur.tok day.csv          # -> day.shifted.csv
+$ darpa-spill-shift invert --token-file blur.tok day.shifted.csv  # -> day.restored.csv, identical to day.csv
+```
+
 `--split day` or `--split hour` writes one file per calendar day or hour
 (`week.csv` → `week_2026-10-12.csv`, …; or put `{start}` in the path), cut at
 boundaries in `--timezone`.
@@ -129,7 +139,7 @@ additive, touches no DAQ process, and removes the event loss entirely.
   unknown keys rejected rather than ignored.
 - **OIDC hooks ready for Fermilab SSO** — off by default, as specified;
   enabling it is a config change, not a code change.
-- **Man pages** for the server, query and dump commands and the library.
+- **Man pages** for the server, query, dump and shift commands and the library.
 
 ## Documentation
 
@@ -138,12 +148,14 @@ additive, touches no DAQ process, and removes the event loss entirely.
 | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | from checkout to first query, including the Python 3.9+ problem on the gateways |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every setting, and how the four layers merge |
 | [docs/API.md](docs/API.md) | endpoints, parameters, signals, output columns |
+| [docs/TIMESTAMP_SHIFT.md](docs/TIMESTAMP_SHIFT.md) | reversible timestamp blurring: design, decisions, verification; full specification in [docs/TimestampShift.nb](docs/TimestampShift.nb) |
 | [docs/COMMAND_LINE.md](docs/COMMAND_LINE.md) | `darpa-spill-query` and `darpa-spill-dump` by example: times, selection, exports, splitting into files |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | systemd, reverse proxy, backups, enabling SSO |
 | [contrib/tduweb/README.md](contrib/tduweb/README.md) | the TDU-side changes and what each unlocks |
 
 Man pages: `man -l man/darpa-spill-server.1`, `man -l man/darpa-spill-query.1`,
-`man -l man/darpa-spill-dump.1`, `man -l man/darpa_spillserver.3`.
+`man -l man/darpa-spill-dump.1`, `man -l man/darpa-spill-shift.1`,
+`man -l man/darpa_spillserver.3`.
 
 ## Requirements
 
@@ -174,12 +186,15 @@ src/darpa_spillserver/
     query_cli.py    darpa-spill-query
     backfill.py     darpa-spill-backfill
     dump.py         darpa-spill-dump
+    shift.py        darpa-spill-shift (dts1 reversible timestamp blur)
     web/            browser UI (templates, CSS, masthead logo)
 config/             default and Near Detector configurations
 contrib/tduweb/     upstream changes needed on the TDU
-docs/               guides
+docs/               guides; TimestampShift.nb (dts1 specification)
+docs/shift/         dts1 reference implementation, notebook builder,
+                    sample data and test vectors
 man/                man pages
-tests/              353 tests
+tests/              433 tests
 novadaq-logo.png    full-resolution masthead artwork; the served copy under
                     src/darpa_spillserver/web/static/ is scaled from it
 ```

@@ -1,0 +1,266 @@
+.TH DARPA-SPILL-SHIFT 1 "October 2026" "darpa_spillserver 1.3.0" "User Commands"
+.SH NAME
+darpa-spill-shift \- blur event timestamps reversibly with a secret token (dts1)
+.SH SYNOPSIS
+.B darpa-spill-shift token
+.B \-\-dist flat \-\-width
+.I DURATION
+|
+.B \-\-dist gauss \-\-sigma
+.I DURATION
+.RB [ \-\-cut
+.IR DURATION | N sigma]
+.RB [ \-\-seed
+.IR TEXT ]
+.RB [ \-o
+.IR FILE ]
+.PP
+.B darpa-spill-shift apply
+.RB [ \-\-token\-file
+.IR FILE ]
+.IR FILE ...
+.PP
+.B darpa-spill-shift invert
+.RB [ \-\-token\-file
+.IR FILE ]
+.IR FILE ...
+.PP
+.B darpa-spill-shift info
+.RI [ TOKEN | FILE ]
+.SH DESCRIPTION
+.B darpa-spill-shift
+moves the timestamp of every event in a
+.BR darpa-spill-dump (1)
+file by a small pseudorandom offset, drawn from a flat or a truncated Gaussian
+distribution and never larger than \(+-500 ms, and can undo the shift
+exactly.  The offsets are derived from a secret
+.IR token :
+whoever holds the token can invert the file; whoever does not sees only the
+blurred times.
+.PP
+The transform is called
+.BR dts1 .
+Its specification, proofs of invertibility, statistical tests and a
+discussion of what it hides are in
+.I docs/TimestampShift.nb
+(Mathematica), with a summary in
+.IR docs/TIMESTAMP_SHIFT.md .
+.SS How it works
+Each hardware event, identified by
+.RB ( source ", " event_number ),
+gets its own offset
+.IR o ( n )
+from HMAC-SHA256 of the token's secret.  Those two columns are not changed,
+so the offset can be recomputed from a shifted row and subtracted.
+.PP
+.RS
+.nf
+nova_time'  = nova_time + o(n)
+pps_offset' = (pps_offset + o(n)) mod 1 s
+delta'      = delta + o(n) \- o(n\-1)
+.fi
+.RE
+.PP
+.B pps_offset
+is the true sub-second phase and
+.B delta
+the exact gap to the previous hardware event; either would reveal the true
+times if left alone.  Every other time column
+.RB ( utc ", " gps ", " unix_sec ,
+\&...) is recomputed from the shifted
+.BR nova_time .
+Other columns are unchanged.
+.SS What it does not hide
+.B event_number
+must stay in the file and numbers events in true order, so order is not
+hidden.  Events whose times are predictable (the 1 Hz pulser fires on the
+second) can be snapped back to their true times by anyone who knows the
+pattern.  See section 11 of the notebook.
+.SH COMMANDS
+.TP
+.B token
+Create a token and print it, or write it to
+.B \-o
+.I FILE
+with mode 0600.  The token is the only way to invert data shifted with it:
+keep it.
+.TP
+.B apply
+Shift each input file.  Output is
+.IB NAME .shifted. EXT
+beside the input, or
+.B \-o
+.I FILE
+for a single input.  With
+.B \-\-dist
+and
+.B \-\-token\-out
+.IR FILE ,
+a new token is created, saved, and used in one step.
+.TP
+.B invert
+Restore each input file.  Output is
+.IB NAME .restored. EXT
+(a
+.B .shifted
+in the name is replaced), or
+.BR \-o .
+The result is byte-identical to the original dump.
+.TP
+.B info
+Describe a token, a token file, or a data file.  With a data file and a
+token, report whether the token is the one the file was shifted with (exit
+status 1 if not).
+.SH OPTIONS
+.SS New tokens (token, apply)
+.TP
+.BR \-\-dist " flat|gauss"
+The offset distribution.
+.TP
+.BI \-\-width " DURATION"
+Flat: offsets are uniform on the whole ticks in \(+-DURATION.
+.TP
+.BI \-\-sigma " DURATION"
+Gaussian: the standard deviation before truncation.
+.TP
+.BI \-\-cut " DURATION\fR|\fPN" sigma
+Gaussian: truncate at \(+-DURATION, or at N standard deviations.  Default
+.BR 3sigma ,
+lowered to 500 ms if 3\(*s would exceed it.  Must lie between \(*s/2 and
+500 ms.  The standard deviation after truncation at 3\(*s is 0.987\(*s.
+.TP
+.BI \-\-seed " TEXT\fR, \fP" \-\-seed\-file " FILE"
+Derive the secret from TEXT with PBKDF2-HMAC-SHA256 (600,000 iterations)
+instead of at random.  The same seed and parameters always give the same
+token, which is convenient, but anyone who can guess the seed can invert the
+data.  Use a generated token when the blur protects something.
+.PP
+Durations take a unit:
+.BR s ", " ms ", " us ", " ns ,
+or
+.B ticks
+(64 MHz, 15.625 ns).  They are rounded to whole ticks.
+.SS Existing tokens (apply, invert, info)
+.TP
+.BI \-\-token " TOKEN"
+The token itself.  It is then visible in
+.BR ps (1)
+and shell history; prefer a file.
+.TP
+.BI \-\-token\-file " FILE"
+Read the token from the first line of FILE.
+.SS Files (apply, invert)
+.TP
+.BI \-o " FILE"
+Output for a single input;
+.B \-
+for standard output.  The input is never overwritten.
+.TP
+.B \-\-force
+Skip the safety checks: shifting an already-shifted file, inverting a file
+with no marker, or inverting with a token whose fingerprint differs from the
+file's.
+.TP
+.BR \-q ", " \-\-quiet
+Print nothing but errors.
+.SH FILES
+Inputs are CSV or JSON written by
+.BR darpa-spill-dump (1)
+or the server's
+.IR /api/events ,
+detected by extension or content; standard input is read as CSV.  They must
+include the
+.BR nova_time ,
+.B source
+and
+.B event_number
+columns.  Files split by
+.B \-\-split
+can be given all at once.
+.PP
+A shifted CSV gains a comment line
+.PP
+.RS
+.nf
+# darpa-spill-shift: dts1 shifted, params=..., fingerprint=...
+.fi
+.RE
+.PP
+and a shifted JSON a
+.B meta.shift
+object with the same information.  Neither contains the secret; the
+fingerprint is a public 64-bit identifier of the token.  Inversion removes
+the marker.
+.PP
+Outputs are written as
+.IB FILE .part
+and renamed when complete.
+.SH ENVIRONMENT
+.TP
+.B DARPA_SPILL_SHIFT_TOKEN
+The token, as
+.BR \-\-token .
+.TP
+.B DARPA_SPILL_SHIFT_TOKEN_FILE
+A token file, as
+.BR \-\-token\-file .
+.PP
+Precedence: \-\-token, \-\-token\-file, DARPA_SPILL_SHIFT_TOKEN,
+DARPA_SPILL_SHIFT_TOKEN_FILE.  The token is deliberately not read from the
+YAML configuration.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+A file could not be processed: already shifted, wrong token, no marker,
+missing columns, unreadable.  No partial output is left.  For
+.BR info ,
+the token does not match the file.
+.TP
+.B 2
+Usage error, or a bad or missing token.
+.SH EXAMPLES
+Create a token for a Gaussian blur of \(*s = 20 ms, cut at 60 ms:
+.PP
+.RS
+.nf
+darpa-spill-shift token --dist gauss --sigma 20ms -o ~/nd-blur.tok
+.fi
+.RE
+.PP
+Shift a day's dump, then restore it:
+.PP
+.RS
+.nf
+darpa-spill-shift apply --token-file ~/nd-blur.tok day.csv day.json
+darpa-spill-shift invert --token-file ~/nd-blur.tok day.shifted.csv
+cmp day.csv day.restored.csv        # identical
+.fi
+.RE
+.PP
+Create a flat \(+-50 ms token and shift a week of hourly files in one step:
+.PP
+.RS
+.nf
+darpa-spill-shift apply --dist flat --width 50ms --token-out week.tok \e
+    week/nd_*.csv
+.fi
+.RE
+.PP
+Check which token a file needs:
+.PP
+.RS
+.nf
+darpa-spill-shift info day.shifted.csv --token-file ~/nd-blur.tok
+.fi
+.RE
+.SH SEE ALSO
+.BR darpa-spill-dump (1),
+.BR darpa-spill-query (1)
+.PP
+.I docs/TimestampShift.nb
+and
+.I docs/TIMESTAMP_SHIFT.md
+in the source tree.
