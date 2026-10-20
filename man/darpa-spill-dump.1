@@ -74,9 +74,8 @@ Each piece is named from the
 .B \-\-csv
 and
 .B \-\-json
-paths.  A path containing
-.B {start}
-has it replaced by the piece's label, so a directory per piece is
+paths.  A path containing any of the placeholders below has each one
+replaced for the piece, so a directory per piece is
 .BR "out/{start}/spills.csv" ;
 missing directories are created.  Otherwise the label goes before the
 extension:
@@ -91,6 +90,38 @@ for hours, with the UTC offset appended outside UTC
 .RB ( 2026-11-01T01-0500 ,
 .BR 2026-11-01T01-0600 )
 so the two autumn 01:00 hours do not collide.
+.PP
+The placeholders, shown for the hour piece
+.BR 2026-10-15T14-0500 :
+.RS
+.TP 10
+.B {start}
+the whole label,
+.B 2026-10-15T14-0500
+.TP
+.B {date}
+.B 2026-10-15
+.TP
+.BR {year} ", " {month} ", " {day}
+.BR 2026 ", " 10 ", " 15
+.TP
+.B {hour}
+.BR 14 ;
+.B 00
+for a day piece
+.TP
+.B {offset}
+.BR -0500 ;
+empty in UTC and for a day piece
+.RE
+.PP
+A path that leaves out part of the label, such as
+.B {hour}
+without
+.BR {offset} ,
+can name two pieces alike on the autumn changeover; the dump then refuses
+to start, with exit status 2, before writing anything.  Placeholders need
+.BR \-\-split .
 .PP
 Pieces that begin after the newest event in the archive are not written;
 pieces before it are, even when empty, so a week gives seven files.
@@ -366,9 +397,18 @@ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \e
 .fi
 .RE
 .PP
-Quote a path containing
-.B {start}
-so the shell leaves the braces alone.
+The past five days, one CSV per Chicago hour, in a directory per month and
+day:
+.PP
+.RS
+.nf
+darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \e
+    --start=-5d --timezone America/Chicago --split hour \e
+    --csv 'hourly/{year}-{month}/{day}/neardet-signals-all-{date}-{hour}00.csv'
+.fi
+.RE
+.PP
+Quote a path containing placeholders so the shell leaves the braces alone.
 .PP
 The whole local archive, on the gateway node itself:
 .PP

@@ -40,6 +40,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, time as dtime, timedelta, timezone
@@ -60,7 +61,8 @@ from .novatime import (
 from .signals import parse_signal, parse_spill_type
 from .storage import UNKNOWN_SIGNAL, SpillStore, StoreError
 
-__all__ = ["main", "dump_range", "split_range", "segment_path", "CsvSink",
+__all__ = ["main", "dump_range", "split_range", "segment_path",
+           "label_fields", "SPLIT_FIELDS", "CsvSink",
            "JsonSink", "LocalReader", "RemoteReader", "DumpError"]
 
 #: Seconds of archive time per request.  The near detector archive holds
@@ -411,19 +413,53 @@ def split_range(start_nova: int, end_nova: int, unit: Optional[str],
     return pieces
 
 
+#: Placeholders a split path may contain, in the order they are documented.
+SPLIT_FIELDS = ("start", "date", "year", "month", "day", "hour", "offset")
+
+_LABEL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})([+-]\d{4})?)?$")
+
+
+def label_fields(label: str) -> Dict[str, str]:
+    """The path placeholders for one piece, parsed from its *label*.
+
+    ``{hour}`` is ``00`` for a day piece, which starts at local midnight, and
+    ``{offset}`` is empty unless the label carries one (hour pieces outside
+    UTC), so ``{hour}`` alone repeats on the autumn changeover.
+    """
+    match = _LABEL.match(label)
+    if match is None:
+        raise ValueError("not a piece label: {!r}".format(label))
+    year, month, day, hour, offset = match.groups()
+    return {"start": label, "date": "{}-{}-{}".format(year, month, day),
+            "year": year, "month": month, "day": day,
+            "hour": hour or "00", "offset": offset or ""}
+
+
 def segment_path(template: str, label: Optional[str]) -> str:
     """The output path for one piece of a split dump.
 
-    ``{start}`` in *template* is replaced by the piece's label, which allows
-    a directory per day (``out/{start}/spills.csv``).  Otherwise the label
-    goes before the extension: ``week.csv`` becomes ``week_2026-10-12.csv``.
+    Each ``{field}`` of :data:`SPLIT_FIELDS` in *template* is replaced from
+    the piece's label, which allows a directory per day
+    (``out/{start}/spills.csv``) or per month and day
+    (``out/{year}-{month}/{day}/nd-{date}-{hour}00.csv``).  A template with
+    none of them gets the label before the extension: ``week.csv`` becomes
+    ``week_2026-10-12.csv``.
     """
     if label is None:
         return template
-    if "{start}" in template:
-        return template.replace("{start}", label)
-    root, ext = os.path.splitext(template)
-    return "{}_{}{}".format(root, label, ext)
+    fields = label_fields(label)
+    if not any("{" + name + "}" in template for name in fields):
+        root, ext = os.path.splitext(template)
+        return "{}_{}{}".format(root, label, ext)
+    for name, value in fields.items():
+        template = template.replace("{" + name + "}", value)
+    return template
+
+
+def _path_fields(template: Optional[str]) -> List[str]:
+    """The :data:`SPLIT_FIELDS` placeholders used in *template*."""
+    return [name for name in SPLIT_FIELDS
+            if template and "{" + name + "}" in template]
 
 
 # --------------------------------------------------------------------- CLI
@@ -508,7 +544,9 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--split", choices=["day", "hour"],
                         help="write one file per day or hour, cut at "
                              "boundaries in --timezone; FILE gains a _LABEL "
-                             "suffix, or replaces {start} if it contains it")
+                             "suffix, or has {start} {date} {year} {month} "
+                             "{day} {hour} {offset} replaced if it contains "
+                             "them")
     output.add_argument("--skip-empty", action="store_true",
                         help="with --split, write no file for a piece "
                              "holding no events")
@@ -653,6 +691,11 @@ def main(argv: Optional[Sequence[str]] = None,
     if args.skip_empty and not args.split:
         _err("--skip-empty only applies with --split")
         return 2
+    used = _path_fields(args.csv) + _path_fields(args.json)
+    if used and not args.split:
+        _err("{{{}}} in a file name needs --split day or --split hour".format(
+            used[0]))
+        return 2
     if args.page_size < 1 or args.window <= 0:
         _err("--page-size and --window must be positive")
         return 2
@@ -703,6 +746,21 @@ def main(argv: Optional[Sequence[str]] = None,
         if args.split:
             # Pieces wholly after the snapshot have not happened yet.
             pieces = [p for p in pieces if p[0] < snap_end]
+            # A template that drops part of the label, such as {hour}
+            # without {offset} on the autumn changeover, would send two
+            # pieces to one file; refuse before anything is written.
+            for template in (args.csv, args.json):
+                if not template:
+                    continue
+                seen: Dict[str, str] = {}
+                for _, _, label in pieces:
+                    path = segment_path(template, label)
+                    if path in seen:
+                        _err("pieces {} and {} would both be written to {}; "
+                             "add {{offset}} or use {{start}}".format(
+                                 seen[path], label, path))
+                        return 2
+                    seen[path] = label
 
         _, expected_total = (reader.fetch(snap_start, snap_end, 1)
                              if snap_end > snap_start else (None, 0))

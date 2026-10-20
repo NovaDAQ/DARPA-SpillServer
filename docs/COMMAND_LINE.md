@@ -395,10 +395,25 @@ The `--csv` / `--json` path is a template:
 | `week.csv` | `week_2026-10-05.csv`, `week_2026-10-06.csv`, ... |
 | `out/nd.json` | `out/nd_2026-10-12T00.json`, `out/nd_2026-10-12T01.json`, ... |
 | `'hours/{start}/nd.json'` | `hours/2026-10-12T00/nd.json`, ... (directories are created) |
+| `'{year}-{month}/{day}/nd-{date}-{hour}00.csv'` | `2026-10/12/nd-2026-10-12-0000.csv`, `2026-10/12/nd-2026-10-12-0100.csv`, ... |
 
-Without `{start}` the label goes before the extension; with it, `{start}` is
-replaced. Quote paths containing braces. Labels are `YYYY-MM-DD` for days and
-`YYYY-MM-DDTHH` for hours.
+Without a placeholder the label goes before the extension; with one, every
+placeholder is replaced. Quote paths containing braces. Labels are
+`YYYY-MM-DD` for days and `YYYY-MM-DDTHH` for hours, with the UTC offset
+appended outside UTC.
+
+| Placeholder | Hour piece `2026-10-15T14-0500` | Day piece `2026-10-15` |
+|---|---|---|
+| `{start}` | `2026-10-15T14-0500` | `2026-10-15` |
+| `{date}` | `2026-10-15` | `2026-10-15` |
+| `{year}` `{month}` `{day}` | `2026` `10` `15` | `2026` `10` `15` |
+| `{hour}` | `14` | `00` |
+| `{offset}` | `-0500` (empty in UTC) | empty |
+
+`{hour}` without `{offset}` names the two autumn 01:00 hours alike under a
+daylight-saving zone. A path that would send two pieces to one file is refused
+before anything is written (exit status 2); add `{offset}` or use `{start}`.
+Placeholders without `--split` are a usage error.
 
 ### Hourly files
 

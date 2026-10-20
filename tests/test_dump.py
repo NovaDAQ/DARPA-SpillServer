@@ -317,6 +317,62 @@ def test_segment_path():
     assert segment_path("week.csv", None) == "week.csv"
 
 
+def test_segment_path_fields():
+    template = "{year}-{month}/{day}/nd-{date}-{hour}00{offset}.csv"
+    assert segment_path(template, "2026-10-15T14-0500") == \
+        "2026-10/15/nd-2026-10-15-1400-0500.csv"
+    assert segment_path(template, "2026-10-15T14") == \
+        "2026-10/15/nd-2026-10-15-1400.csv"
+    # A day piece starts at local midnight.
+    assert segment_path(template, "2026-10-15") == \
+        "2026-10/15/nd-2026-10-15-0000.csv"
+    # Any one field selects replacement; unknown braces are left alone.
+    assert segment_path("{date}/{x}.csv", "2026-10-15") == \
+        "2026-10-15/{x}.csv"
+    with pytest.raises(ValueError):
+        segment_path("{date}.csv", "not-a-label")
+
+
+def test_split_by_hour_into_month_and_day_directories(two_days, tmp_path):
+    template = str(tmp_path / "{year}-{month}" / "{day}" /
+                   "neardet-signals-all-{date}-{hour}00.csv")
+    code = main(["-d", two_days.path, "-q", "--timezone", "UTC",
+                 "--start", "2026-10-12T00:00", "--end", "2026-10-12T12:00",
+                 "--split", "hour", "--skip-empty", "--csv", template],
+                environ={})
+    assert code == 0
+    assert sorted(str(f.relative_to(tmp_path))
+                  for f in tmp_path.rglob("*.csv")) == [
+        "2026-10/12/neardet-signals-all-2026-10-12-0000.csv",
+        "2026-10/12/neardet-signals-all-2026-10-12-0600.csv"]
+
+
+def test_split_path_collision_is_refused(tmp_path, capsys):
+    from darpa_spillserver.storage import SpillStore
+    store = SpillStore(str(tmp_path / "fall.db"))
+    # One event in each of the two 01:00 hours of 2026-11-01 in Chicago.
+    store.insert_events([
+        SpillEvent(nova_time=utc(2026, 11, 1, hour, 30),
+                   spill_type=SpillType.ACCEL_ONE_HZ_TCLK, signal_code=0x8F,
+                   event_number=i, source=SOURCE_A, route="spill_history")
+        for i, hour in enumerate((6, 7))
+    ])
+    out = tmp_path / "out"
+    args = ["-d", store.path, "-q", "--timezone", "America/Chicago",
+            "--start", "2026-11-01T06:00Z", "--end", "2026-11-01T08:00Z",
+            "--split", "hour"]
+    code = main(args + ["--csv", str(out / "{date}-{hour}.csv")], environ={})
+    assert code == 2
+    assert "2026-11-01T01-0500 and 2026-11-01T01-0600" in \
+        capsys.readouterr().err
+    assert not out.exists()
+    assert main(args + ["--csv", str(out / "{date}-{hour}{offset}.csv")],
+                environ={}) == 0
+    assert sorted(f.name for f in out.iterdir()) == [
+        "2026-11-01-01-0500.csv", "2026-11-01-01-0600.csv"]
+    store.close()
+
+
 @pytest.fixture
 def two_days(tmp_path):
     """Events every 6 h across 2026-10-12 and -13 UTC, all one source."""
@@ -378,6 +434,8 @@ def test_split_usage_errors(two_days, tmp_path):
                 environ={}) == 2
     assert main(["-d", two_days.path, "--skip-empty",
                  "--csv", str(tmp_path / "x.csv")], environ={}) == 2
+    assert main(["-d", two_days.path,
+                 "--csv", str(tmp_path / "{date}.csv")], environ={}) == 2
 
 
 def test_failed_piece_keeps_completed_ones(two_days, tmp_path, monkeypatch):
