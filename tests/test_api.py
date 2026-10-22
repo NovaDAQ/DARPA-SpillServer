@@ -321,6 +321,75 @@ def test_query_page_shows_the_logo(client):
     assert logo.headers["content-type"] == "image/png"
 
 
+# ------------------------------------------------------------ status pages
+
+
+def _status_client(config, store, status_dir, root_path=""):
+    from fastapi.testclient import TestClient
+
+    from darpa_spillserver.app import create_app
+
+    config.server.status_dir = str(status_dir)
+    config.server.root_path = root_path
+    return TestClient(create_app(config, store=store, start_ingest=False))
+
+
+@pytest.fixture
+def status_dir(tmp_path):
+    directory = tmp_path / "status"
+    (directory / "empty").mkdir(parents=True)
+    (directory / "index.html").write_text("<h1>publisher status</h1>")
+    (directory / "status.json").write_text('{"ok": true}')
+    return directory
+
+
+def test_status_dir_is_served_at_status(config, store, status_dir):
+    with _status_client(config, store, status_dir) as client:
+        page = client.get("/status/")
+        assert page.status_code == 200
+        assert "publisher status" in page.text
+        assert page.headers["content-type"].startswith("text/html")
+        assert client.get("/status/status.json").json() == {"ok": True}
+
+
+def test_bare_status_redirects_to_the_slash(config, store, status_dir):
+    with _status_client(config, store, status_dir) as client:
+        response = client.get("/status", follow_redirects=False)
+        assert response.status_code in (307, 308)
+        assert response.headers["location"].endswith("/status/")
+
+
+def test_status_does_not_list_directories(config, store, status_dir):
+    with _status_client(config, store, status_dir) as client:
+        assert client.get("/status/empty/").status_code == 404
+        assert client.get("/status/nonexistent.html").status_code == 404
+
+
+def test_status_respects_root_path(config, store, status_dir):
+    """Served under the prefix exactly as /static is."""
+    with _status_client(config, store, status_dir, "/spills") as client:
+        assert "publisher status" in client.get("/spills/status/").text
+        response = client.get("/spills/status", follow_redirects=False)
+        assert response.headers["location"].endswith("/spills/status/")
+
+
+def test_status_is_not_mounted_when_unset(client):
+    assert client.get("/status/").status_code == 404
+    assert client.get("/status/index.html").status_code == 404
+
+
+def test_missing_status_dir_is_skipped_with_a_warning(
+    config, store, tmp_path, caplog
+):
+    missing = tmp_path / "not-there"
+    with caplog.at_level("WARNING", logger="darpa_spillserver.app"):
+        with _status_client(config, store, missing) as client:
+            assert client.get("/status/").status_code == 404
+            assert client.get("/").status_code == 200
+    assert not missing.exists(), "the directory must not be created"
+    assert any("status_dir" in r.getMessage() for r in caplog.records)
+
+
 #: The issue form the report link drives. It ships with the repository rather
 #: than the package, so the tests reach for it by path.
 ISSUE_FORM = (

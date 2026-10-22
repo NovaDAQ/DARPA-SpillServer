@@ -31,6 +31,14 @@ server:
   ssl_certfile: ""
   ssl_keyfile: ""
 
+  # Directory of static status pages served at /status/ (index.html for
+  # /status/; no directory listings). Empty serves nothing there. Must exist
+  # when the server starts: a missing directory is logged and skipped, never
+  # created. Unauthenticated, like /static. Env: DARPA_SPILL_STATUS_DIR.
+  # On the gateway it must equal darpa-spill-publish's paths.status_dir:
+  # status_dir: /data/DARPA-spilldata/publish/status
+  status_dir: ""
+
 tdu:
   # The TDUs to record from, each "URL" or "NAME=URL". Every event is tagged
   # with its source's name, which is what queries select with source=. A bare

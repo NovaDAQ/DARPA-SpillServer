@@ -1,0 +1,187 @@
+# darpa-spill-publish -- deployed configuration for novadaq-near-gateway-01.
+#
+# Installed by deploy/gateway/install.sh as /home/novadaq/DARPA/publish/
+# publish.yaml (copied only when absent; an existing copy is never
+# overwritten, so local edits survive re-installs).  cron passes it with -c
+# through /home/novadaq/DARPA/publish/bin/run-publish.sh.  The design record
+# is docs/deployment/GATEWAY_DEPLOYMENT_PLAN.md; config/publish.yaml in the
+# repository documents every key and holds the built-in defaults.
+#
+# Gateway layout:
+#   repository / venv   /home/novadaq/DARPA/DARPA-SpillServer
+#   data (raw, shifted) /data/DARPA-spilldata
+#   state, status, logs /data/DARPA-spilldata/publish/{state,status,logs}
+#   FDP area            /home/novadaq/anorman-fdp (env.sh, certificates,
+#                       tokens/ mode 0700, .env mode 0600)
+#
+# Precedence, highest first:
+#   command line   --set section.key=value  (repeatable)
+#   environment    DARPA_SPILL_PUBLISH_<SECTION>_<KEY>, plus the short forms
+#                  _SERVER, _CA_BUNDLE, _INSECURE, _TIMEZONE, _DATA_ROOT,
+#                  _STATE_DIR, _STATUS_DIR, _LOG_DIR, _DOTENV
+#   .env           paths.dotenv (DARPA_SPILL_PUBLISH_* lines only)
+#   this file
+#   defaults
+#
+# Unknown keys are an error.  Check a change with:
+#   /home/novadaq/DARPA/publish/bin/run-publish.sh check
+
+server:
+  # The darpa-spill-server to dump from.  The FQDN, not localhost, which
+  # hangs on the gateway (IPv6 vs IPv4 bind; plan D18).
+  url: https://novadaq-near-gateway-01.fnal.gov:8443
+  # The server's own self-signed certificate verifies it.
+  ca_bundle: /home/novadaq/DARPA/DARPA-SpillServer/tls/cert.pem
+  # true skips TLS verification (darpa-spill-dump -k); ca_bundle is ignored.
+  insecure: false
+  # Per-request HTTP timeout in seconds, for darpa-spill-dump and the
+  # /api/sources ingest check.
+  timeout: 120
+
+# Hour and day boundaries, labels and directory dates (plan D2).  On DST
+# changeover days a day file covers 23 or 25 hours and the repeated autumn
+# hour gets its own file, labelled with its UTC offset.
+timezone: America/Chicago
+
+# Local files: {data_root}/raw/{mon}/{year}-{mon}-{day}/ and
+# {data_root}/shifted/{mon}/{year}-{mon}-{day}/, {mon} = jan..dec (D1, D3).
+data_root: /data/DARPA-spilldata
+
+# Both formats are written from one fetch, so they hold the same events (D6).
+formats: [csv, json]
+
+# File names: {prefix}-{stream}-{label}.{ext}, and .shifted.{ext} for the
+# shifted copy.  Labels: hourly 2026-10-22T13-0500, daily 2026-10-22 (D4).
+prefix: nd
+
+# Event streams (D5).  Each may select by signals, types and/or sources,
+# passed to darpa-spill-dump as --signal / --type / --source.  An empty
+# stream takes every event.  This mapping replaces the default one whole.
+streams:
+  numi:
+    signals: ["$74", "$A9"]
+  all: {}
+  booster:
+    types: [BNB, BNB_TCLK]
+
+hourly:
+  # Each hourly run also redoes any hour of the last N that is not complete
+  # (dumped and shifted for every stream and format).
+  catchup_hours: 24
+
+daily:
+  # Each daily run also redoes any of the N days before the target day that
+  # is not complete.
+  catchup_days: 3
+
+ingest_check:
+  # Before dumping [start, end), every enabled source in GET /api/sources
+  # must be read up to end: its watermark_nova (newest event) or its
+  # polled_through_nova (start of its last complete poll) less 'settle'
+  # seconds.  The latter lets a quiet beam through, so empty hours are still
+  # written.  Wait up to 'wait' seconds, polling every 'poll'; otherwise
+  # alert and exit 75 (D10).  A dry run (-n) reads it once and does not wait.
+  enabled: true
+  wait: 300
+  poll: 30
+  # Seconds allowed for a TDU to record an event after its timestamp.
+  settle: 60
+
+shift:
+  # One dts1 token per month of DATA (not of the run), so the hourly and
+  # daily copies of an event are shifted identically (D7).  Tokens are
+  # created when missing and never overwritten; back each one up (D8).
+  token_dir: /home/novadaq/anorman-fdp/tokens
+  # {year} {month} (01..12) and {mon} (jan..dec) are replaced.
+  token_name: "dts1-{year}-{month}.token"
+  # Parameters for new tokens: darpa-spill-shift token --dist gauss
+  # --sigma 50us --cut 3sigma (for dist flat, sigma is the half-width).
+  dist: gauss
+  sigma: 50us
+  cut: 3sigma
+
+fdp:
+  # false: dump and shift only; files stay pending until it is turned on.
+  enabled: true
+  # Sourced (bash) before fdp-put and htgettoken run.
+  env_script: /home/novadaq/anorman-fdp/env.sh
+  # CA directory for amsc.fnal.gov (D12); also exported as
+  # FDP_TRANSFER_CA_PATH.
+  ca_path: /home/novadaq/anorman-fdp/certificates
+  # Bearer token for the amsc issuer, novaendwrite role; written by 'creds'.
+  token_file: /home/novadaq/anorman-fdp/tokens/fdp_bt_u46550_amsc_novaendwrite
+  # Remote roots; the local {mon}/{year}-{mon}-{day}/ layout is kept (D9).
+  raw_dest: /amsc/novaend/raw
+  shifted_dest: /amsc/public/novaend/shifted
+  # fdp-put -j: parallel transfers.
+  parallel: 4
+  # Seconds allowed per fdp-put call.
+  timeout: 3600
+  # Appended to every fdp-put command line.  Never --replace (D9).
+  extra_args: []
+
+credentials:
+  # The 'creds' job: renew Kerberos, then refresh the bearer token (D11).
+  enabled: true
+  # A fixed ticket cache that cron can see.
+  krb5ccname: "FILE:/home/novadaq/anorman-fdp/tokens/krb5cc_anorman"
+  principal: anorman@FNAL.GOV
+  # kinit -R when the ticket expires within this many hours.
+  renew_below_hours: 12
+  # Alert when the renewable lifetime ends within this many hours; then a
+  # person must run: kinit -r 7d -c <krb5ccname> <principal>
+  warn_renew_until_hours: 24
+  # FERMI_USER / FERMI_PASSWORD (non-MFA account).  When both are filled in
+  # (not empty, not CHANGEME), htgettoken may fall back to SSO password
+  # approval; otherwise it runs with --nooidc.  Mode 0600.
+  env_file: /home/novadaq/anorman-fdp/.env
+  htgettoken_args: ["-a", "htvaultprod.fnal.gov", "-i", "amsc", "-r", "novaendwrite"]
+  sso_cookie_file: /home/novadaq/anorman-fdp/tokens/fermi_sso.cookies
+  # htgettoken --minsecs: refresh when the bearer token has less left.
+  min_token_seconds: 3600
+  # Seconds allowed for htgettoken.
+  timeout: 300
+  # After htgettoken fails in SSO password mode, use --nooidc for this many
+  # hours (or until env_file changes), so a stale password is not replayed
+  # every 30 minutes and cannot lock the account.
+  sso_backoff_hours: 12
+
+paths:
+  # publish.db (SQLite state) and the job lock files.
+  state_dir: /data/DARPA-spilldata/publish/state
+  # index.html and status.json, served by darpa-spill-server at /status/
+  # (its server.status_dir must point here).
+  status_dir: /data/DARPA-spilldata/publish/status
+  # Where cron sends stderr; used by the crontab and logrotate files.
+  log_dir: /data/DARPA-spilldata/publish/logs
+  # Optional KEY=VALUE file of DARPA_SPILL_PUBLISH_* overrides.
+  dotenv: ""
+
+alerts:
+  enabled: true
+  email: [anorman@fnal.gov]
+  # Run as: <mail_command> -s "[darpa-spill-publish] <subject>" <email...>
+  # with the body on stdin.
+  mail_command: mailx
+  # A condition is mailed at once, then after min_interval seconds, twice
+  # that, four times, ... up to max_interval, until it clears.
+  min_interval: 3600
+  max_interval: 86400
+  # Alert when the file system holding data_root is this full (D16).
+  disk_warn_percent: 85
+  # Alert when a job finds its own previous run still holding its lock
+  # after this many hours (a hung dump or upload).  Not for backfill.
+  stale_job_hours: 3
+  # Alerts are mailed from whatever host runs the tool.  Trying it off the
+  # gateway with this file, pass --set alerts.enabled=false.
+
+tools:
+  # darpa-spill-dump and darpa-spill-shift.  Empty: the ones beside the
+  # Python running darpa-spill-publish (its venv), else from PATH.
+  dump: ""
+  shift: ""
+  # Seconds allowed per darpa-spill-dump call, per day of data it covers
+  # (a 30-day backfill call gets 30 times this); then it is killed, exit 124.
+  dump_timeout: 7200
+  # Seconds allowed per darpa-spill-shift apply or token call.
+  shift_timeout: 3600

@@ -215,6 +215,34 @@ def _bug_report_url(config: Config) -> str:
     return "{}?{}".format(ISSUES_URL, query)
 
 
+def _mount_status(app: FastAPI, config: Config) -> None:
+    """Serve ``server.status_dir`` at ``/status/``, if it is set and exists.
+
+    The pages are written by another program (the publisher), so the
+    directory is never created here: a missing one is most likely a typo or
+    an unmounted disk, and is reported rather than papered over with an empty
+    page.  ``html=True`` serves ``index.html`` for ``/status/``; StaticFiles
+    never lists a directory.  A bare ``/status`` matches no route and the
+    router's slash redirect sends it to ``/status/``.
+    """
+    setting = config.server.status_dir
+    if not setting:
+        return
+    status_dir = Path(setting).expanduser()
+    if not status_dir.is_dir():
+        log.warning(
+            "server.status_dir %s is not a directory; /status/ is not served",
+            status_dir,
+        )
+        return
+    app.mount(
+        "/status",
+        StaticFiles(directory=str(status_dir), html=True),
+        name="status",
+    )
+    log.info("serving %s at /status/", status_dir)
+
+
 def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
     """Attach the browser-facing pages."""
     templates = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
@@ -222,8 +250,9 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
     static_dir = _WEB_DIR / "static"
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    _mount_status(app, config)
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/",response_class=HTMLResponse, include_in_schema=False)
     async def index(request: Request):
         """The query form and results table."""
         return templates.TemplateResponse(

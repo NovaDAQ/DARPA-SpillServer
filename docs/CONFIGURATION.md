@@ -63,14 +63,38 @@ the archive has already been pruned — or has grown without bound.
 | `cors_origins` | `["*"]` | narrow this once authentication is on |
 | `ssl_certfile` | `""` | PEM certificate, intermediates appended; setting it serves HTTPS |
 | `ssl_keyfile` | `""` | PEM private key; required whenever `ssl_certfile` is set |
+| `status_dir` | `""` | directory of static pages served at `/status/`; empty serves nothing there |
 
 CLI: `--host`, `--port`, `--root-path`, `--cors-origin` (repeatable),
-`--ssl-certfile`, `--ssl-keyfile`.
+`--ssl-certfile`, `--ssl-keyfile`, `--status-dir`.
 
 Setting one of the two TLS files without the other is a configuration error.
 Both files are opened at startup, so a missing or unreadable key stops the
 server with a message naming it. `--print-config` does not open them, so it
 works for users who can't read the key.
+
+`status_dir` publishes pages another program writes — on the gateway,
+`darpa-spill-publish status` renders `index.html` and `status.json` there.
+`/status/` serves `index.html`, `/status` redirects to `/status/`, and other
+files are served by name; directories are never listed. Under `root_path` the
+pages appear at `<root_path>/status/`, as `/static` does. The directory is
+checked once, at startup: if it does not exist the server logs a warning and
+runs without `/status/` rather than creating it, so create it before starting
+the server. Files inside it may change freely while the server runs. The
+pages are served without authentication, like `/static`, so do not put
+anything there that the API itself would protect.
+
+Besides `DARPA_SPILL_SERVER_STATUS_DIR`, the setting also answers to the
+shorter `DARPA_SPILL_STATUS_DIR`; the full name wins when both are set.
+
+It must be the same directory as darpa-spill-publish's `paths.status_dir`
+(default `/data/DARPA-spilldata/publish/status`), or `/status/` shows a
+stale page or nothing:
+
+```console
+$ mkdir -p /data/DARPA-spilldata/publish/status
+$ darpa-spill-server -c config/spillserver.yaml --status-dir /data/DARPA-spilldata/publish/status
+```
 
 ### `tdu`
 

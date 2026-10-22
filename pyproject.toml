@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "darpa-spillserver"
-version = "1.4.0"
+version = "1.5.0"
 description = "Web and API server for NOvA accelerator event timestamps collected from a TDU"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,6 +40,7 @@ darpa-spill-query = "darpa_spillserver.query_cli:main"
 darpa-spill-backfill = "darpa_spillserver.backfill:main"
 darpa-spill-dump = "darpa_spillserver.dump:main"
 darpa-spill-shift = "darpa_spillserver.shift:main"
+darpa-spill-publish = "darpa_spillserver.publish:main"
 
 [project.urls]
 Homepage = "https://github.com/NovaDAQ/DARPA-SpillServer"

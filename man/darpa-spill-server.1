@@ -1,4 +1,4 @@
-.TH DARPA-SPILL-SERVER 1 "September 2026" "darpa_spillserver 1.4.0" "User Commands"
+.TH DARPA-SPILL-SERVER 1 "September 2026" "darpa_spillserver 1.5.0" "User Commands"
 .SH NAME
 darpa-spill-server \- serve NOvA accelerator event timestamps collected from a TDU
 .SH SYNOPSIS
@@ -72,6 +72,21 @@ instead of HTTP; \fB\-\-ssl\-keyfile\fR is then required.
 .TP
 .BI \-\-ssl\-keyfile " FILE"
 PEM private key for \fB\-\-ssl\-certfile\fR.
+.TP
+.BI \-\-status\-dir " DIR"
+Serve the static files in \fIDIR\fR at
+.IR /status/ ,
+with
+.I index.html
+answering
+.I /status/
+and
+.I /status
+redirected there. Directories are never listed, and the pages are served
+without authentication. \fIDIR\fR must exist at startup: if it does not, a
+warning is logged and
+.I /status/
+is not served; it is never created. Setting \fBserver.status_dir\fR.
 .SS TDU data sources
 .TP
 .BI \-\-tdu\-source " [NAME=]URL"
@@ -197,6 +212,10 @@ Path to the configuration file, equivalent to \fB\-\-config\fR.
 .TP
 .BI DARPA_SPILL_ SECTION _ KEY
 Overrides any single setting.
+.TP
+.B DARPA_SPILL_STATUS_DIR
+Alias for \fBDARPA_SPILL_SERVER_STATUS_DIR\fR, equivalent to
+\fB\-\-status\-dir\fR. The full name wins when both are set.
 .SH EXIT STATUS
 .TP
 .B 0

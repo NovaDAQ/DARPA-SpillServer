@@ -202,6 +202,39 @@ async def test_healthy_mode_is_not_flagged(config, store):
     assert "degraded_reason" not in poller.status.as_dict()
 
 
+async def test_a_quiet_tdu_is_still_polled_through(config, store):
+    """No events (beam off) still advances polled_through_nova, which the
+    publisher's ingest gate relies on; watermark_nova stays put."""
+    events = make_events(3)
+    client = StubClient(events=events)
+    poller = Poller(config, store, client=client)
+    await poller.poll_once()
+    assert poller.status.watermark_nova == events[-1].nova_time
+
+    client.events = []
+    before = nova_now()
+    await poller.poll_once()
+    assert poller.status.watermark_nova == events[-1].nova_time
+    assert poller.status.polled_through_nova >= before
+    assert poller.status.as_dict()["polled_through_nova"] >= before
+
+    # An empty archive and a quiet TDU: covered from the first poll on.
+    fresh = Poller(config, SpillStore(config.storage.path + "2"),
+                   client=StubClient(events=[]))
+    await fresh.poll_once()
+    assert fresh.status.watermark_nova is None
+    assert fresh.status.polled_through_nova >= before
+    fresh.store.close()
+
+
+async def test_a_truncated_read_covers_only_what_it_fetched(config, store):
+    events = make_events(5)
+    poller = Poller(config, store,
+                    client=StubClient(events=events, truncated=True))
+    await poller.poll_once()
+    assert poller.status.polled_through_nova == events[-1].nova_time
+
+
 async def test_start_and_stop_run_the_loop(config, store):
     client = StubClient(events=make_events(5))
     poller = Poller(config, store, client=client)

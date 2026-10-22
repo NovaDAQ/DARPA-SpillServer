@@ -62,6 +62,12 @@ class IngestStatus:
     last_error: str = ""
     last_error_at: Optional[float] = None
     watermark_nova: Optional[int] = None
+    polled_through_nova: Optional[int] = None
+    """NOvA time up to which the TDU has been read completely: the start of
+    the last successful poll that was not cut short by the batch limit.
+    Unlike :attr:`watermark_nova` it advances while no events arrive, so a
+    quiet beam (shutdown, a silent TDU) still counts as caught up."""
+
     pruned_total: int = 0
 
     def as_dict(self) -> dict:
@@ -80,6 +86,7 @@ class IngestStatus:
             "last_error": self.last_error,
             "last_error_at": self.last_error_at,
             "watermark_nova": self.watermark_nova,
+            "polled_through_nova": self.polled_through_nova,
             "pruned_total": self.pruned_total,
         }
         if self.degraded:
@@ -214,6 +221,7 @@ class Poller:
     async def poll_once(self) -> int:
         """Run one ingest pass; returns the number of rows inserted."""
         started_at = int(time.time())
+        started_nova = nova_now()
         since = await asyncio.to_thread(self._watermark)
 
         # A fetch from a slow TDU can take timeout x (retries + 1) seconds,
@@ -261,6 +269,16 @@ class Poller:
         self.status.degraded = result.route != HISTORY_ROUTE
         if result.events:
             self.status.watermark_nova = max(e.nova_time for e in result.events)
+        # A history read that hit the batch limit left events behind, so it
+        # covers only up to the newest one fetched; otherwise everything the
+        # TDU held when the poll began has been read.
+        if result.truncated and result.route == HISTORY_ROUTE:
+            through = self.status.watermark_nova
+        else:
+            through = started_nova
+        if through is not None:
+            self.status.polled_through_nova = max(
+                through, self.status.polled_through_nova or 0)
 
         await asyncio.to_thread(
             self.store.record_ingest,

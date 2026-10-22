@@ -62,7 +62,7 @@ from .signals import parse_signal, parse_spill_type
 from .storage import UNKNOWN_SIGNAL, SpillStore, StoreError
 
 __all__ = ["main", "dump_range", "split_range", "segment_path",
-           "label_fields", "SPLIT_FIELDS", "CsvSink",
+           "label_fields", "SPLIT_FIELDS", "MONTH_ABBREVIATIONS", "CsvSink",
            "JsonSink", "LocalReader", "RemoteReader", "DumpError"]
 
 #: Seconds of archive time per request.  The near detector archive holds
@@ -184,6 +184,10 @@ class RemoteReader:
                 raise DumpError("{} returned unparseable JSON: {}".format(url, exc))
         raise DumpError("cannot reach {}".format(url))  # pragma: no cover
 
+    # /api/status counts the whole archive and takes minutes on a large one
+    # (plan D18), so a dump asks for it only when --timezone is missing; the
+    # limit and the extent come from cheap requests.
+
     def status(self) -> Dict[str, Any]:
         if self._status is None:
             self._status = self._get("/api/status")
@@ -192,16 +196,37 @@ class RemoteReader:
     def server_timezone(self) -> str:
         return self.status().get("query_defaults", {}).get("timezone", "UTC")
 
-    def max_limit(self) -> Optional[int]:
-        return self.status().get("query_defaults", {}).get("max_limit")
+    def max_limit(self, wanted: int = DEFAULT_PAGE_SIZE) -> Optional[int]:
+        """The server's ``query.max_limit`` if *wanted* exceeds it, else None.
+
+        Probed with a one-tick query, which the server refuses with the
+        ceiling in its message when the limit is too high.
+        """
+        if self._status is not None:
+            return self._status.get("query_defaults", {}).get("max_limit")
+        try:
+            self._get("/api/events", [("start", "nova:0"), ("end", "nova:1"),
+                                      ("format", "json"),
+                                      ("limit", str(wanted))])
+        except DumpError as exc:
+            match = re.search(r"server maximum of (\d+)", str(exc))
+            if match:
+                return int(match.group(1))
+            raise
+        return None
 
     def extent(self) -> Tuple[Optional[int], Optional[int]]:
-        # The status summary covers the whole archive, not the selected
-        # sources; that is fine for clamping, which only needs a bound.
-        archive = self.status().get("archive", {})
-        first, last = archive.get("earliest"), archive.get("latest")
-        return (first["nova"] if first else None,
-                last["nova"] if last else None)
+        # Only the newest event is cheap to ask for (/api/latest).  The whole
+        # archive's, not the selected sources'; clamping only needs a bound.
+        # Without the earliest the walk starts at --start, which costs a few
+        # empty windows before the archive begins and nothing else.
+        try:
+            body = self._get("/api/latest")
+        except DumpError as exc:
+            if " returned 404" in str(exc):
+                return None, None
+            raise
+        return None, int((body.get("event") or {})["nova_time"])
 
     def fetch(self, start_nova: int, end_nova: int,
               limit: int) -> Tuple[List[Dict[str, Any]], int]:
@@ -414,7 +439,13 @@ def split_range(start_nova: int, end_nova: int, unit: Optional[str],
 
 
 #: Placeholders a split path may contain, in the order they are documented.
-SPLIT_FIELDS = ("start", "date", "year", "month", "day", "hour", "offset")
+SPLIT_FIELDS = ("start", "date", "year", "month", "mon", "day", "hour",
+                "offset")
+
+#: ``{mon}`` values, fixed rather than ``strftime("%b")`` so a path does not
+#: depend on the locale the dump runs under.
+MONTH_ABBREVIATIONS = ("jan", "feb", "mar", "apr", "may", "jun",
+                       "jul", "aug", "sep", "oct", "nov", "dec")
 
 _LABEL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})([+-]\d{4})?)?$")
 
@@ -422,16 +453,21 @@ _LABEL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})([+-]\d{4})?)?$")
 def label_fields(label: str) -> Dict[str, str]:
     """The path placeholders for one piece, parsed from its *label*.
 
-    ``{hour}`` is ``00`` for a day piece, which starts at local midnight, and
-    ``{offset}`` is empty unless the label carries one (hour pieces outside
-    UTC), so ``{hour}`` alone repeats on the autumn changeover.
+    ``{mon}`` is the lowercase English month abbreviation (``oct``) from
+    :data:`MONTH_ABBREVIATIONS`, whatever the locale.  ``{hour}`` is ``00``
+    for a day piece, which starts at local midnight, and ``{offset}`` is
+    empty unless the label carries one (hour pieces outside UTC), so
+    ``{hour}`` alone repeats on the autumn changeover.
     """
     match = _LABEL.match(label)
     if match is None:
         raise ValueError("not a piece label: {!r}".format(label))
     year, month, day, hour, offset = match.groups()
+    if not 1 <= int(month) <= 12:
+        raise ValueError("not a piece label: {!r}".format(label))
     return {"start": label, "date": "{}-{}-{}".format(year, month, day),
-            "year": year, "month": month, "day": day,
+            "year": year, "month": month,
+            "mon": MONTH_ABBREVIATIONS[int(month) - 1], "day": day,
             "hour": hour or "00", "offset": offset or ""}
 
 
@@ -441,7 +477,8 @@ def segment_path(template: str, label: Optional[str]) -> str:
     Each ``{field}`` of :data:`SPLIT_FIELDS` in *template* is replaced from
     the piece's label, which allows a directory per day
     (``out/{start}/spills.csv``) or per month and day
-    (``out/{year}-{month}/{day}/nd-{date}-{hour}00.csv``).  A template with
+    (``out/{year}-{month}/{day}/nd-{date}-{hour}00.csv``, or
+    ``raw/{mon}/{year}-{mon}-{day}/nd-all-{start}.csv``).  A template with
     none of them gets the label before the extension: ``week.csv`` becomes
     ``week_2026-10-12.csv``.
     """
@@ -545,8 +582,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="write one file per day or hour, cut at "
                              "boundaries in --timezone; FILE gains a _LABEL "
                              "suffix, or has {start} {date} {year} {month} "
-                             "{day} {hour} {offset} replaced if it contains "
-                             "them")
+                             "{mon} {day} {hour} {offset} replaced if it "
+                             "contains them ({mon} is jan..dec)")
     output.add_argument("--skip-empty", action="store_true",
                         help="with --split, write no file for a piece "
                              "holding no events")
@@ -599,7 +636,7 @@ def _open_reader(args, environ) -> Tuple[Any, str]:
             token=args.token or environ.get(ENV_TOKEN),
             verify=verify, timeout=args.timeout,
         )
-        return reader, reader.server_timezone()
+        return reader, args.timezone or reader.server_timezone()
 
     # Validate the selection locally before touching the archive.
     try:
@@ -723,7 +760,8 @@ def main(argv: Optional[Sequence[str]] = None,
     written: List[str] = []
     try:
         # A server refuses a limit above its query.max_limit.
-        ceiling = reader.max_limit() if hasattr(reader, "max_limit") else None
+        ceiling = reader.max_limit(args.page_size) \
+            if hasattr(reader, "max_limit") else None
         if ceiling and args.page_size > ceiling:
             args.page_size = ceiling
 

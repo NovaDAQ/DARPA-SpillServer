@@ -181,6 +181,38 @@ def test_tls_settings_select_https():
     assert Config().server.scheme == "http"
 
 
+def test_status_dir_is_off_by_default():
+    assert load_config(argv=[], environ={}, search_paths=[]).server.status_dir == ""
+
+
+def test_status_dir_layers(tmp_path):
+    path = write_yaml(tmp_path, "server:\n  status_dir: /from/yaml\n")
+    assert load_config(argv=["-c", path], environ={}).server.status_dir == (
+        "/from/yaml"
+    )
+    config = load_config(
+        argv=["-c", path], environ={"DARPA_SPILL_STATUS_DIR": "/from/env"}
+    )
+    assert config.server.status_dir == "/from/env"
+    config = load_config(
+        argv=["-c", path, "--status-dir", "/from/cli"],
+        environ={"DARPA_SPILL_STATUS_DIR": "/from/env"},
+    )
+    assert config.server.status_dir == "/from/cli"
+
+
+def test_status_dir_canonical_env_name_beats_the_alias():
+    config = load_config(
+        argv=[],
+        environ={
+            "DARPA_SPILL_STATUS_DIR": "/alias",
+            "DARPA_SPILL_SERVER_STATUS_DIR": "/canonical",
+        },
+        search_paths=[],
+    )
+    assert config.server.status_dir == "/canonical"
+
+
 def test_max_limit_below_default_limit_is_rejected():
     with pytest.raises(ConfigError):
         load_config(argv=["--default-limit", "100", "--max-limit", "50"],

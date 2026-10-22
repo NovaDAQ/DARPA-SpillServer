@@ -1,4 +1,4 @@
-.TH DARPA-SPILL-DUMP 1 "October 2026" "darpa_spillserver 1.4.0" "User Commands"
+.TH DARPA-SPILL-DUMP 1 "October 2026" "darpa_spillserver 1.5.0" "User Commands"
 .SH NAME
 darpa-spill-dump \- export a time range of NOvA accelerator events to CSV and JSON
 .SH SYNOPSIS
@@ -104,6 +104,12 @@ the whole label,
 .TP
 .BR {year} ", " {month} ", " {day}
 .BR 2026 ", " 10 ", " 15
+.TP
+.B {mon}
+.BR oct ;
+the lowercase English month abbreviation,
+.BR jan " to " dec ,
+whatever the locale
 .TP
 .B {hour}
 .BR 14 ;
@@ -405,6 +411,17 @@ day:
 darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \e
     --start=-5d --timezone America/Chicago --split hour \e
     --csv 'hourly/{year}-{month}/{day}/neardet-signals-all-{date}-{hour}00.csv'
+.fi
+.RE
+.PP
+The gateway layout, one CSV per Chicago day under a month directory such as
+.BR raw/oct/2026-oct-22/ :
+.PP
+.RS
+.nf
+darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k \e
+    --start=-1d --timezone America/Chicago --split day \e
+    --csv 'raw/{mon}/{year}-{mon}-{day}/nd-all-{start}.csv'
 .fi
 .RE
 .PP

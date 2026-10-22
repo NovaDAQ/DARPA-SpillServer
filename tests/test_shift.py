@@ -343,6 +343,23 @@ def test_token_command_writes_private_file(tmp_path, capsys):
     assert Token.parse(path.read_text()) == token
 
 
+def test_token_created_concurrently_is_never_replaced(tmp_path, monkeypatch):
+    """Two runs that both found the file missing: the second must refuse,
+    not truncate the token the first may already have shifted data with."""
+    from darpa_spillserver import shift as shift_module
+    path = tmp_path / "t"
+    real_exists = os.path.exists
+    # Pretend the check ran before the other run created the file.
+    monkeypatch.setattr(shift_module.os.path, "exists",
+                        lambda p: False if p == str(path) else real_exists(p))
+    path.write_text("first\n")
+    assert main(["token", "--dist", "flat", "--width", "50ms", "-o", str(path)],
+                environ={}) == 2
+    assert path.read_text() == "first\n"
+    monkeypatch.undo()
+    assert [p.name for p in tmp_path.iterdir()] == ["t"]   # no tmp left
+
+
 def test_token_command_defaults_and_seed(capsys):
     assert main(["token", "--dist", "gauss", "--sigma", "20ms", "--seed", "x"],
                 environ={}) == 0

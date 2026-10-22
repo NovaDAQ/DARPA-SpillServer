@@ -73,6 +73,20 @@ $ darpa-spill-shift invert --token-file blur.tok day.shifted.csv  # -> day.resto
 (`week.csv` → `week_2026-10-12.csv`, …; or put `{start}` in the path), cut at
 boundaries in `--timezone`.
 
+On the Near Detector gateway, cron runs `darpa-spill-publish` to do all of
+this unattended: every hour and every day it dumps three streams, shifts them
+with the token of the data's month, uploads raw and shifted copies to the
+Fermi Data Platform and writes a status page served at
+<https://novadaq-near-gateway-01.fnal.gov:8443/status/>:
+
+```console
+$ darpa-spill-publish check                          # preflight
+$ darpa-spill-publish -v hourly --hour 2026-10-22T13 # redo one hour
+$ darpa-spill-publish -v backfill --start 2026-09-17 --end now
+```
+
+The operator runbook is [docs/GATEWAY_OPERATIONS.md](docs/GATEWAY_OPERATIONS.md).
+
 ## Read this before deploying
 
 **The TDU cannot currently supply a complete event history.** Its two event
@@ -139,7 +153,10 @@ additive, touches no DAQ process, and removes the event loss entirely.
   unknown keys rejected rather than ignored.
 - **OIDC hooks ready for Fermilab SSO** — off by default, as specified;
   enabling it is a config change, not a code change.
-- **Man pages** for the server, query, dump and shift commands and the library.
+- **Unattended publishing** on the gateway (`darpa-spill-publish`): hourly and
+  daily dumps, timestamp shifting, upload to the Fermi Data Platform, alerts
+  by mail and a status page.
+- **Man pages** for the server, query, dump, shift and publish commands and the library.
 
 ## Documentation
 
@@ -149,13 +166,15 @@ additive, touches no DAQ process, and removes the event loss entirely.
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every setting, and how the four layers merge |
 | [docs/API.md](docs/API.md) | endpoints, parameters, signals, output columns |
 | [docs/TIMESTAMP_SHIFT.md](docs/TIMESTAMP_SHIFT.md) | reversible timestamp blurring: design, decisions, verification; full specification in [docs/TimestampShift.nb](docs/TimestampShift.nb) |
-| [docs/COMMAND_LINE.md](docs/COMMAND_LINE.md) | `darpa-spill-query` and `darpa-spill-dump` by example: times, selection, exports, splitting into files |
+| [docs/COMMAND_LINE.md](docs/COMMAND_LINE.md) | `darpa-spill-query`, `darpa-spill-dump`, `darpa-spill-shift` and `darpa-spill-publish` by example: times, selection, exports, splitting into files |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | systemd, reverse proxy, backups, enabling SSO |
+| [docs/GATEWAY_OPERATIONS.md](docs/GATEWAY_OPERATIONS.md) | runbook for `darpa-spill-publish` on novadaq-near-gateway-01: layout, schedule, weekly `kinit`, token backup, alerts, re-runs, backfill, recovery |
+| [docs/deployment/GATEWAY_DEPLOYMENT_PLAN.md](docs/deployment/GATEWAY_DEPLOYMENT_PLAN.md) | the gateway publishing deployment: decisions D1–D18, status tracker, test matrix |
 | [contrib/tduweb/README.md](contrib/tduweb/README.md) | the TDU-side changes and what each unlocks |
 
 Man pages: `man -l man/darpa-spill-server.1`, `man -l man/darpa-spill-query.1`,
 `man -l man/darpa-spill-dump.1`, `man -l man/darpa-spill-shift.1`,
-`man -l man/darpa_spillserver.3`.
+`man -l man/darpa-spill-publish.1`, `man -l man/darpa_spillserver.3`.
 
 ## Requirements
 
@@ -187,10 +206,16 @@ src/darpa_spillserver/
     backfill.py     darpa-spill-backfill
     dump.py         darpa-spill-dump
     shift.py        darpa-spill-shift (dts1 reversible timestamp blur)
+    publish.py      darpa-spill-publish (gateway cron: dump, shift, upload, status)
     web/            browser UI (templates, CSS, masthead logo)
-config/             default and Near Detector configurations
+config/             default and Near Detector configurations;
+                    publish.yaml (darpa-spill-publish, commented defaults)
 contrib/tduweb/     upstream changes needed on the TDU
-docs/               guides; TimestampShift.nb (dts1 specification)
+deploy/gateway/     gateway install: publish.yaml, crontab fragment, cron wrapper,
+                    server watchdog, logrotate, install.sh
+docs/               guides; TimestampShift.nb (dts1 specification);
+                    GATEWAY_OPERATIONS.md (publishing runbook)
+docs/deployment/    gateway publishing plan and status tracker
 docs/shift/         dts1 reference implementation, notebook builder,
                     sample data and test vectors
 man/                man pages

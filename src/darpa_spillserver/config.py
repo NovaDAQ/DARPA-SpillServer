@@ -10,7 +10,9 @@ a YAML file.  Four layers are merged, each overriding the one before:
 
 An environment variable names its setting by section and key joined with an
 underscore --- ``DARPA_SPILL_TDU_BASE_URL``, ``DARPA_SPILL_STORAGE_PATH`` ---
-which lets a systemd unit or container set anything without a file.
+which lets a systemd unit or container set anything without a file.  A few
+settings also answer to a shorter alias (:data:`ENV_ALIASES`); the full
+section-and-key name wins when both are set.
 
 Unknown keys in the YAML file are an error, not a warning.  A silently ignored
 ``retention_days`` misspelling is exactly the kind of thing that is noticed
@@ -49,6 +51,7 @@ __all__ = [
     "ConfigError",
     "DEFAULT_CONFIG_PATHS",
     "ENV_PREFIX",
+    "ENV_ALIASES",
     "build_parser",
     "load_config",
     "configure_logging",
@@ -57,6 +60,13 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 ENV_PREFIX = "DARPA_SPILL_"
+
+#: Shorter environment names accepted for some settings, mapped onto
+#: ``(section, key)``.  ``DARPA_SPILL_STATUS_DIR`` is the name the gateway
+#: deployment documents; ``DARPA_SPILL_SERVER_STATUS_DIR`` works as well.
+ENV_ALIASES = {
+    ENV_PREFIX + "STATUS_DIR": ("server", "status_dir"),
+}
 
 #: Searched in order when no ``--config`` is given.
 DEFAULT_CONFIG_PATHS = (
@@ -89,6 +99,11 @@ class ServerConfig:
 
     ssl_keyfile: str = ""
     """PEM private key matching ``ssl_certfile``."""
+
+    status_dir: str = ""
+    """Directory of static status pages served at ``/status/``.  Empty serves
+    nothing there; a directory that does not exist at startup is skipped with
+    a warning rather than created, since another program owns its content."""
 
     @property
     def scheme(self) -> str:
@@ -560,6 +575,10 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 def _env_overrides(environ: Mapping[str, str]) -> Dict[str, Dict[str, Any]]:
     """Collect ``DARPA_SPILL_<SECTION>_<KEY>`` variables into nested form."""
     overrides: Dict[str, Dict[str, Any]] = {}
+    # Aliases first, so the canonical name overwrites one when both are set.
+    for name, (section_name, key) in ENV_ALIASES.items():
+        if name in environ:
+            overrides.setdefault(section_name, {})[key] = environ[name]
     for name, value in environ.items():
         if not name.startswith(ENV_PREFIX):
             continue
@@ -604,6 +623,9 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
                        help="PEM certificate; serves HTTPS when given")
     group.add_argument("--ssl-keyfile", metavar="FILE",
                        help="PEM private key for --ssl-certfile")
+    group.add_argument("--status-dir", dest="status_dir", metavar="DIR",
+                       help="directory of static status pages to serve at "
+                            "/status/; must already exist")
 
     group = parser.add_argument_group("TDU data source")
     group.add_argument("--tdu-source", action="append", dest="tdu_sources",
@@ -686,6 +708,7 @@ _ARG_MAP = {
     "cors_origins": ("server", "cors_origins"),
     "ssl_certfile": ("server", "ssl_certfile"),
     "ssl_keyfile": ("server", "ssl_keyfile"),
+    "status_dir": ("server", "status_dir"),
     "tdu_sources": ("tdu", "sources"),
     "tdu_base_url": ("tdu", "base_url"),
     "tdu_timeout": ("tdu", "timeout"),

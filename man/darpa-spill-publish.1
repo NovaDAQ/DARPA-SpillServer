@@ -1,0 +1,742 @@
+.TH DARPA-SPILL-PUBLISH 1 "October 2026" "darpa_spillserver 1.5.0" "User Commands"
+.SH NAME
+darpa-spill-publish \- dump, shift, upload and report spill data, from cron
+.SH SYNOPSIS
+.B darpa-spill-publish
+.RI [ COMMON ]
+.B hourly
+.RB [ \-\-hour
+.IR TIME ]
+.PP
+.B darpa-spill-publish
+.RI [ COMMON ]
+.B daily
+.RB [ \-\-date
+.IR YYYY\-MM\-DD ]
+.PP
+.B darpa-spill-publish
+.RI [ COMMON ]
+.B backfill
+.BI \-\-start " TIME"
+.BI \-\-end " TIME"
+.RB [ \-\-hourly | \-\-no\-hourly ]
+.RB [ \-\-daily | \-\-no\-daily ]
+.RB [ \-\-no\-upload ]
+.PP
+.B darpa-spill-publish
+.RI [ COMMON ]
+.B token
+.RB [ \-\-month
+.IR YYYY\-MM " |"
+.BR \-\-next ]
+.PP
+.B darpa-spill-publish
+.RI [ COMMON ]
+.BR upload " | " creds " | " status " | " check
+.PP
+.B darpa-spill-publish
+.BR \-V " | " \-h
+.PP
+.I COMMON
+is
+.RB [ \-c
+.IR FILE ]
+.RB [ \-\-set
+.IR SECTION.KEY = VALUE " ...]"
+.RB [ \-n ]
+.RB [ \-v | \-q ],
+accepted before or after the subcommand.
+.SH DESCRIPTION
+.B darpa-spill-publish
+turns the archive behind a running
+.BR darpa-spill-server (1)
+into published files on the Near Detector gateway.  cron runs it; each run
+carries its files through four stages, each feeding the next:
+.PP
+.RS
+.nf
+dump  \->  shift  \->  upload  \->  status
+.fi
+.RE
+.TP
+.B dump
+.BR darpa-spill-dump (1)
+.B \-\-split hour
+or
+.B \-\-split day
+against the server, once per configured stream (by default
+.B numi
+=
+.BR "\-\-signal $74 \-\-signal $A9" ,
+.B all
+= every event,
+.B booster
+=
+.BR "\-\-type BNB \-\-type BNB_TCLK" ),
+writing CSV and JSON from one fetch into the
+.B raw
+tree.  Empty pieces are kept, so a gap in the beam is visible as an empty
+file rather than a missing one.
+.TP
+.B shift
+.B darpa-spill-shift apply
+(see
+.BR darpa-spill-shift (1))
+writes a blurred copy of every raw file into the
+.B shifted
+tree, using the
+.B dts1
+token of the month the
+.I data
+belongs to, not the month the job runs in.  An event that appears in an
+hourly and a daily file is then shifted identically in both, and the two
+copies cannot be averaged against each other.  A missing token is created
+(never overwritten) and an alert asks for it to be backed up.
+.TP
+.B upload
+.B fdp\-put \-\-skip\-existing
+copies raw files to
+.B fdp.raw_dest
+and shifted files to
+.B fdp.shifted_dest
+on the Fermi Data Platform, keeping the local directory layout.  It runs
+inside
+.BR fdp.env_script ,
+grouped by destination directory, at most 200 files per call.
+.TP
+.B status
+writes
+.I index.html
+and
+.I status.json
+into
+.BR paths.status_dir ,
+which
+.BR darpa-spill-server (1)
+serves at
+.I /status/
+when its
+.B server.status_dir
+points there.
+.SS Layout
+Hour and day boundaries, labels and directory dates are in
+.B timezone
+(America/Chicago).  For a piece starting on local date YYYY-MM-DD:
+.PP
+.RS
+.nf
+{data_root}/raw/{mon}/{year}\-{mon}\-{day}/{prefix}\-{stream}\-{label}.{ext}
+{data_root}/shifted/{mon}/{year}\-{mon}\-{day}/{prefix}\-{stream}\-{label}.shifted.{ext}
+.fi
+.RE
+.PP
+where
+.I {mon}
+is
+.BR jan " ... " dec
+(independent of the locale), the hourly label is the local hour and its UTC
+offset
+.RB ( 2026\-10\-22T13\-0500 )
+and the daily label the local date
+.RB ( 2026\-10\-22 ).
+For example
+.IR raw/oct/2026\-oct\-22/nd\-numi\-2026\-10\-22T13\-0500.csv .
+On daylight-saving changeover days the daily file covers 23 or 25 hours, and
+the repeated autumn hour is two files told apart by their offsets
+.RB ( T01\-0500 " and " T01\-0600 ).
+Labels and paths are computed by the same code
+.BR darpa-spill-dump (1)
+uses, so the two cannot disagree.
+.PP
+The remote directory is the destination root plus the same
+.I {mon}/{year}\-{mon}\-{day}
+path, e.g.
+.IR /amsc/novaend/raw/oct/2026\-oct\-22/ " and"
+.IR /amsc/public/novaend/shifted/oct/2026\-oct\-22/ .
+.SS State
+Every file's progress (dumped, rows, bytes, shifted, raw uploaded, shifted
+uploaded, last error) is a row in the SQLite database
+.IR {state_dir}/publish.db .
+Any stage can fail and be finished by a later run.  A raw file that is
+recorded, or that is found complete on disk, is never dumped again; files are
+never replaced, here or on FDP, where dCache forbids overwriting.
+.SS Ingest gate
+Before a piece
+.RI [ start ", " end )
+is dumped, every enabled source in
+.I /api/sources
+must have been read up to
+.IR end :
+either its newest stored event
+.RB ( watermark_nova )
+or the start of its last complete poll
+.RB ( polled_through_nova ,
+less
+.B ingest_check.settle
+seconds) has reached it.  The second lets a quiet beam (shutdown,
+maintenance, a silent TDU) through: its newest event stops, its polls go on,
+and the empty files are written.  A source that is enabled but not running,
+or has not finished a poll since the server started, holds the gate.
+The tool polls every
+.B ingest_check.poll
+seconds for up to
+.B ingest_check.wait
+seconds; pieces still not covered are left for the next run, an
+.B ingest not ready
+alert is sent and the exit status is 75.  Pieces that are covered are still
+processed.  A piece that leaves the catch-up window
+.RB ( hourly.catchup_hours ,
+.BR daily.catchup_days )
+without being completed is mailed once, with the
+.B backfill
+command that redoes it.
+.SS Alerts
+Problems are mailed with
+.B alerts.mail_command
+.RB ( mailx )
+as
+.BI "\(dq[darpa-spill-publish] " subject \(dq
+to
+.BR alerts.email .
+A condition is mailed at once, then again after
+.B alerts.min_interval
+seconds, twice that, four times, ... up to
+.BR alerts.max_interval ;
+the back-off resets when the condition clears (ingest ready, an upload or
+dump succeeds, a valid ticket, a token refresh).  An authentication failure
+of
+.B fdp\-put
+is not mailed while a Kerberos or token alert is already out.  When the
+state database cannot be written (a full disk) the mail still goes,
+rate-limited by a stamp file in the temporary directory.  A failing mailer is
+logged and never ends the run.
+.PP
+Alerts go out from any host the tool runs on.  Trying it off the gateway
+with the example configuration, add
+.BR "\-\-set alerts.enabled=false" .
+.SH SUBCOMMANDS
+Every subcommand runs under the lock
+.IR {state_dir}/ COMMAND .lock;
+if the same subcommand is already running it exits 75 at once, and mails
+when the holder has run longer than
+.B alerts.stale_job_hours
+(a hung job; not for
+.BR backfill ).
+.BR hourly ,
+.B daily
+and
+.B backfill
+also share
+.I {state_dir}/dump.lock
+around their dump and shift stage, waited for up to 30 minutes, so two of
+them never write the same piece at once; a run that cannot get it exits 75
+(result
+.BR busy ).
+Every
+subcommand re-renders the status page at the end and records a row in the
+.B runs
+table.
+.TP
+.B hourly
+Dump, shift and upload the preceding local hour, and any hour of the last
+.B hourly.catchup_hours
+(24) that is not complete (dumped and shifted for every stream and format).
+Missing hours that abut are dumped with one
+.B darpa-spill-dump
+call per stream.
+.TP
+.BI "hourly \-\-hour " TIME
+Process the hour beginning at
+.I TIME
+as though run in the hour after it, catch-up included.
+.I TIME
+is a label
+.RB ( 2026\-11\-01T01\-0600 ),
+a bare local hour
+.RB ( 2026\-10\-22T13 ),
+or any time expression
+.BR darpa-spill-query (1)
+accepts; a naive time is local.  Use the label to choose one of the two
+repeated autumn hours.
+.TP
+.B daily
+Dump, shift and upload the preceding local day, and any of the
+.B daily.catchup_days
+(3) days before it that is not complete.
+.TP
+.BI "daily \-\-date " YYYY\-MM\-DD
+Process that local day (and the catch-up days before it) instead.
+.TP
+.B backfill
+Process every whole hour and every whole day in
+.BI \-\-start " TIME"
+to
+.BI \-\-end " TIME"
+(half-open; a date-only end includes that day; the end is clamped to now).
+Partial hours or days at either end are dropped, since they would produce a
+short file under a full-period name.  One
+.B darpa-spill-dump
+call per stream per kind covers each contiguous run of missing pieces.
+.RS
+.TP
+.BR \-\-hourly ", " \-\-no\-hourly
+Hourly files (default: yes).
+.TP
+.BR \-\-daily ", " \-\-no\-daily
+Daily files (default: yes).
+.TP
+.B \-\-no\-upload
+Dump and shift only; a later
+.B upload
+sends the files.
+.RE
+.TP
+.B upload
+Upload every raw and shifted file not yet recorded as uploaded.  Holds
+.IR {state_dir}/upload.lock ;
+the upload stage of
+.BR hourly ", " daily " and " backfill
+waits up to 600 s for the same lock and otherwise leaves its files to this
+job.
+.TP
+.B token
+Create the shift token for a data month if it does not exist:
+.B darpa-spill-shift token \-\-dist
+.I shift.dist
+.B \-\-sigma
+.I shift.sigma
+.B \-\-cut
+.I shift.cut
+.B \-o
+.IR FILE .
+An existing token is never touched.
+.RS
+.TP
+.BI \-\-month " YYYY\-MM"
+That month (default: the current local month).
+.TP
+.B \-\-next
+Next month; cron runs this on the 25th.
+.RE
+.TP
+.B creds
+With
+.B KRB5CCNAME
+set to
+.BR credentials.krb5ccname :
+read the ticket with
+.BR klist ;
+if there is none, alert
+.B kinit needed
+with the exact command
+.BI "kinit \-r 7d \-c " "CACHE PRINCIPAL" ;
+if it expires within
+.B credentials.renew_below_hours
+run
+.BI "kinit \-R \-c " CACHE ;
+warn and alert when the renewable lifetime ends within
+.BR credentials.warn_renew_until_hours .
+Then run, inside
+.BR fdp.env_script ,
+.PP
+.RS
+.RS
+.nf
+htgettoken \-a htvaultprod.fnal.gov \-i amsc \-r novaendwrite \e
+    \-\-minsecs=3600 \-\-nooidc \-o FDP_TOKEN_FILE
+.fi
+.RE
+.PP
+If
+.B credentials.env_file
+holds
+.B FERMI_USER
+and
+.B FERMI_PASSWORD
+with real values (not empty, not
+.BR CHANGEME ),
+they are passed in that process's environment only, and
+.B \-\-nooidc
+is replaced by
+.BI "\-\-ssoapprove=password \-\-ssocookiefile=" FILE
+so Vault may fall back to SSO password approval.  The password and token
+contents are never logged.  Kerberos expiry, renew-until, the bearer token's
+expiry (decoded from its JWT payload) and the age of
+.RI /tmp/vt_u UID
+are recorded and shown on the status page.
+.RE
+.TP
+.B status
+Re-render
+.I index.html
+and
+.I status.json
+only.  The page refreshes itself every 60 s and shows: last run, result and
+duration per job; credentials; ingest watermark and lag per source; disk
+usage of
+.BR data_root ;
+a grid of the last 48 hours and 14 days by stream, each cell
+.BR missing ", " partial ", " dumped ", " shifted ,
+.B raw\-up
+(raw uploaded),
+.B public
+(raw and shifted uploaded) or
+.BR error ;
+totals; pending uploads; the last 20 errors.
+.TP
+.B check
+Preflight: server
+.I /api/health
+reachable, CA bundle readable, data root writable, state and status
+directories writable, token directory mode 0700 (no group or other bits),
+.B darpa-spill-dump
+and
+.B darpa-spill-shift
+executable,
+.B fdp.env_script
+present,
+.B fdp\-put \-\-version
+and
+.B htgettoken
+runnable through it, mail command found, disk below
+.BR alerts.disk_warn_percent .
+Prints one line per check
+.RB ( ok " or " FAIL );
+exit status 1 if any fails.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " \fIFILE\fP"
+YAML configuration.  Default:
+.BR $DARPA_SPILL_PUBLISH_CONFIG ,
+else
+.I ~/DARPA/publish/publish.yaml
+if it exists, else the built-in defaults.
+.TP
+.BI \-\-set " SECTION.KEY=VALUE"
+Override one setting; repeatable.  Top-level keys are written without a
+section
+.RB ( \-\-set\ timezone=UTC ).
+Lists as
+.B a,b,c
+or
+.BR "[a, b, c]" .
+.TP
+.BR \-n ", " \-\-dry\-run
+Print every command that would change something (secrets redacted) instead of
+running it, and write nothing: no files, no locks, no status page.  The state
+database is copied into memory, so the decisions are those a real run would
+make.  The ingest gate is read once and reported, not waited for.  Read-only
+probes
+.RB ( klist ,
+the
+.B check
+commands,
+.IR /api/sources )
+still run.
+.TP
+.BR \-v ", " \-\-verbose
+Log every step.
+.TP
+.BR \-q ", " \-\-quiet
+Log only warnings and errors.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Help; after a subcommand, that subcommand's options.
+.PP
+Write relative times with
+.BR = :
+.BR \-\-start=\-2d ,
+or the leading minus is taken for an option.
+.SH CONFIGURATION
+Precedence, highest first: command line
+.RB ( \-\-set ),
+environment, the
+.B .env
+file named by
+.BR paths.dotenv ,
+the YAML file, built-in defaults.  Unknown keys are an error.  The example
+.I config/publish.yaml
+in the source tree holds exactly the defaults, with comments.
+.PP
+.RS
+.nf
+server:       url, ca_bundle, insecure (\-k), timeout (s, per request)
+timezone:     America/Chicago
+data_root:    /data/DARPA\-spilldata
+formats:      [csv, json]
+prefix:       nd
+streams:      NAME: {signals: [...], types: [...], sources: [...]}
+hourly:       catchup_hours (24)
+daily:        catchup_days (3)
+ingest_check: enabled, wait (300 s), poll (30 s), settle (60 s)
+shift:        token_dir, token_name ("dts1\-{year}\-{month}.token"),
+              dist (gauss), sigma (50us), cut (3sigma)
+fdp:          enabled, env_script, ca_path, token_file, raw_dest,
+              shifted_dest, parallel (\-j 4), timeout (3600 s), extra_args
+credentials:  enabled, krb5ccname, principal, renew_below_hours (12),
+              warn_renew_until_hours (24), env_file, htgettoken_args,
+              sso_cookie_file, min_token_seconds (3600), timeout (300 s),
+              sso_backoff_hours (12)
+paths:        state_dir, status_dir, log_dir, dotenv
+alerts:       enabled, email, mail_command (mailx), min_interval (3600 s),
+              max_interval (86400 s), disk_warn_percent (85),
+              stale_job_hours (3)
+tools:        dump, shift  (empty: beside the running Python, else PATH),
+              dump_timeout (7200 s per day of data in one call),
+              shift_timeout (3600 s per file or token)
+.fi
+.RE
+.PP
+.B streams
+replaces the default mapping as a whole.
+.B fdp.enabled false
+dumps and shifts only; files stay pending until it is turned on.
+.B fdp.extra_args
+is appended to every
+.B fdp\-put
+command; never put
+.B \-\-replace
+there.
+.SH FILES
+.TP
+.I ~/DARPA/publish/publish.yaml
+Deployed configuration, read when no
+.B \-c
+or
+.B DARPA_SPILL_PUBLISH_CONFIG
+is given.
+.TP
+.I {data_root}/raw/ "\fR, \fP" {data_root}/shifted/
+Local copies, kept indefinitely.
+.TP
+.I {state_dir}/publish.db
+SQLite state: tables
+.B files
+(one row per raw file),
+.B runs
+(job, start, finish, result, JSON detail),
+.B alerts
+(last sent, mails sent and occurrences per condition) and
+.B kv
+(the SSO back-off, consecutive partial uploads per directory).
+.TP
+.IR {state_dir}/ JOB .lock ", " {state_dir}/dump.lock ", " {state_dir}/upload.lock
+.BR flock (2)
+locks.  Each holds the PID of its last holder; its mtime is when it was
+taken.
+.TP
+.IR {status_dir}/index.html ", " {status_dir}/status.json
+The status page, written atomically.
+.TP
+.I {log_dir}/
+Where the crontab sends standard error.
+.TP
+.I {shift.token_dir}/dts1\-YYYY\-MM.token
+One shift token per data month, mode 0600, in a 0700 directory.  Without it
+that month's shifted files cannot be restored: back each one up.
+.TP
+.I fdp.token_file
+The FDP bearer token written by
+.BR creds .
+.TP
+.I credentials.env_file
+.BR FERMI_USER " and " FERMI_PASSWORD
+for SSO password approval; mode 0600.
+.SH ENVIRONMENT
+.TP
+.B DARPA_SPILL_PUBLISH_CONFIG
+Configuration file, as
+.BR \-c .
+.TP
+.BI DARPA_SPILL_PUBLISH_ SECTION _ KEY
+Any setting, e.g.
+.BR DARPA_SPILL_PUBLISH_FDP_ENABLED=0 ,
+.BR DARPA_SPILL_PUBLISH_ALERTS_EMAIL=a@fnal.gov,b@fnal.gov .
+Top-level settings have no section:
+.BR DARPA_SPILL_PUBLISH_TIMEZONE ,
+.BR DARPA_SPILL_PUBLISH_DATA_ROOT ,
+.BR DARPA_SPILL_PUBLISH_PREFIX ,
+.BR DARPA_SPILL_PUBLISH_FORMATS .
+.TP
+.BR DARPA_SPILL_PUBLISH_SERVER ", " _CA_BUNDLE ", " _INSECURE
+Short forms of
+.BR server.url ,
+.BR server.ca_bundle ,
+.BR server.insecure .
+.TP
+.BR DARPA_SPILL_PUBLISH_STATE_DIR ", " _STATUS_DIR ", " _LOG_DIR ", " _DOTENV
+Short forms of the
+.B paths
+settings.
+.PP
+The
+.B .env
+file
+.RB ( paths.dotenv )
+holds
+.I KEY=VALUE
+lines; only
+.B DARPA_SPILL_PUBLISH_*
+keys are used.  It is separate from
+.BR credentials.env_file .
+.PP
+Child processes:
+.B KRB5CCNAME
+is set for
+.BR klist ", " kinit " and " htgettoken ;
+.B FDP_TOKEN_DIR
+and
+.B FDP_TRANSFER_CA_PATH
+for
+.BR fdp\-put .
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Failure: nothing could be done, a preflight check failed, or the state
+database cannot be opened.
+.TP
+.B 2
+Usage or configuration error (bad option, unknown key, bad timezone, bad
+.BR \-\-month / \-\-date ).
+.TP
+.B 3
+Partial: some steps succeeded and some failed; see the log, the status page
+and
+.BR last_error .
+.TP
+.B 75
+Temporary: ingest has not reached the end of a piece, the same job is
+already running, or another job held the dump lock.  cron's next run tries
+again.
+.PP
+.B fdp\-put
+exit codes recorded per file: 0 ok, 4 authentication, 6 exists, 7
+network/TLS, 9 checksum mismatch, 12 partial, plus 124 timed out and 125
+.B fdp.env_script
+unreadable.  After 4, 7, 124 or 125 the upload stage stops (every further
+call would fail the same way); after 12 nothing is marked uploaded (fdp\-put
+does not say which files went), the rows note the partial, and the next
+.B upload
+run, with
+.BR \-\-skip\-existing ,
+sends the rest; a directory partial on two runs in a row is mailed.
+.PP
+Every subprocess runs in its own process group with a timeout
+.RB ( tools.dump_timeout ,
+.BR tools.shift_timeout ,
+.BR fdp.timeout ,
+.BR credentials.timeout );
+on timeout the whole group is sent SIGTERM, then SIGKILL, and the step is
+recorded with exit 124.
+.PP
+After
+.B htgettoken
+fails in SSO password mode, that mode is not tried again for
+.B credentials.sso_backoff_hours
+(or until
+.B credentials.env_file
+changes), so a wrong password is not replayed every 30 minutes and cannot
+lock the account.
+.SH EXAMPLES
+The crontab on the gateway (user novadaq; from
+.IR deploy/gateway/crontab.fragment ):
+.PP
+.RS
+.nf
+3,33 * * * *        run\-publish.sh creds
+10 * * * *          run\-publish.sh hourly
+30 0 * * *          run\-publish.sh daily
+0 9 25 * *          run\-publish.sh token \-\-next
+7,22,37,52 * * * *  run\-publish.sh upload
+*/5 * * * *         run\-publish.sh status \-q
+.fi
+.RE
+.PP
+where
+.I run\-publish.sh
+sets
+.B PATH
+and the locale and runs the venv's
+.B darpa\-spill\-publish \-c ~/DARPA/publish/publish.yaml
+with the arguments given; each line appends to
+.IR {log_dir}/ JOB .log.
+.PP
+Preflight, then see what the next hourly run would do:
+.PP
+.RS
+.nf
+darpa\-spill\-publish check
+darpa\-spill\-publish \-n hourly
+.fi
+.RE
+.PP
+Redo one hour that failed, the second (CST) 01:00 of 1 November 2026:
+.PP
+.RS
+.nf
+darpa\-spill\-publish \-v hourly \-\-hour 2026\-11\-01T01\-0600
+.fi
+.RE
+.PP
+Redo one day:
+.PP
+.RS
+.nf
+darpa\-spill\-publish \-v daily \-\-date 2026\-10\-21
+.fi
+.RE
+.PP
+Backfill the archive from its start, without uploading yet, then upload:
+.PP
+.RS
+.nf
+darpa\-spill\-publish \-v backfill \-\-start 2026\-09\-17 \-\-end now \-\-no\-upload
+darpa\-spill\-publish \-v upload
+.fi
+.RE
+.PP
+Only the daily files of September:
+.PP
+.RS
+.nf
+darpa\-spill\-publish backfill \-\-start 2026\-09\-01 \-\-end 2026\-09\-30 \-\-no\-hourly
+.fi
+.RE
+.PP
+Create next month's token now; dump without uploading:
+.PP
+.RS
+.nf
+darpa\-spill\-publish token \-\-next
+darpa\-spill\-publish \-\-set fdp.enabled=false hourly
+.fi
+.RE
+.PP
+Restore a shifted file with the token of its data month:
+.PP
+.RS
+.nf
+darpa\-spill\-shift invert \-\-token\-file ~/anorman\-fdp/tokens/dts1\-2026\-10.token \e
+    /data/DARPA\-spilldata/shifted/oct/2026\-oct\-22/nd\-all\-2026\-10\-22T13\-0500.shifted.csv \e
+    \-o /tmp/nd\-all\-2026\-10\-22T13\-0500.csv
+.fi
+.RE
+.SH SEE ALSO
+.BR darpa-spill-dump (1),
+.BR darpa-spill-shift (1),
+.BR darpa-spill-server (1),
+.BR darpa-spill-query (1),
+.BR crontab (5),
+.BR klist (1),
+.BR kinit (1)
+.PP
+.IR docs/GATEWAY_OPERATIONS.md ,
+the operator runbook, and
+.IR docs/deployment/GATEWAY_DEPLOYMENT_PLAN.md ,
+the design record (decisions D1\-D18), in the source tree.

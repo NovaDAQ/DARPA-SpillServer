@@ -1,24 +1,30 @@
 # Command-line tools
 
-Two commands read the spill archive from a terminal:
+Four commands work with the spill archive and its exports from a terminal:
 
 | Command | Use it to | Row limit | Output |
 |---|---|---|---|
 | `darpa-spill-query` | answer a question: what happened, when, how many | yes (`--limit`, server `query.max_limit`) | table, CSV or JSON to stdout or `-o FILE` |
 | `darpa-spill-dump` | take a copy of a range: a day, a week, the archive | none | CSV and/or JSON files, optionally one per day or hour |
 | `darpa-spill-shift` | blur the timestamps in dump files, reversibly, with a secret token | none | `.shifted` / `.restored` copies of the files |
+| `darpa-spill-publish` | run the gateway's hourly/daily dump → shift → upload pipeline from cron | none | files under `raw/` and `shifted/`, uploads to FDP, a status page |
 
-Both read either the **local SQLite archive** (on the gateway node) or a
-**running server** over HTTPS, accept the same time expressions and the same
-signal / type / source selection, and produce the same columns as the web API
-(see [API.md](API.md#output-columns)).
+`darpa-spill-query` and `darpa-spill-dump` read either the **local SQLite
+archive** (on the gateway node) or a **running server** over HTTPS, accept the
+same time expressions and the same signal / type / source selection, and
+produce the same columns as the web API (see
+[API.md](API.md#output-columns)). `darpa-spill-shift` reads no archive: it
+works on files `darpa-spill-dump` wrote. `darpa-spill-publish` only drives
+the other two, always against a running server (`darpa-spill-dump -s
+server.url`); it has no local-archive mode.
 
-A third command, `darpa-spill-backfill`, writes *into* the archive from a
+Another command, `darpa-spill-backfill`, writes *into* the archive from a
 TDU's ring buffer; it is covered in [API.md](API.md).
 
 Every example below was run against the Near Detector gateway in October 2026,
 and the output shown is what it printed. Full option lists are in the man
-pages: `man -l man/darpa-spill-query.1`, `man -l man/darpa-spill-dump.1`.
+pages: `man -l man/darpa-spill-query.1`, `man -l man/darpa-spill-dump.1`,
+`man -l man/darpa-spill-shift.1`, `man -l man/darpa-spill-publish.1`.
 
 Contents:
 
@@ -33,6 +39,7 @@ Contents:
 9. [Reading the files](#9-reading-the-files)
 10. [Troubleshooting](#10-troubleshooting)
 11. [Blurring timestamps reversibly](#11-blurring-timestamps-reversibly)
+12. [Publishing on the gateway: darpa-spill-publish](#12-publishing-on-the-gateway-darpa-spill-publish)
 
 ---
 
@@ -396,6 +403,7 @@ The `--csv` / `--json` path is a template:
 | `out/nd.json` | `out/nd_2026-10-12T00.json`, `out/nd_2026-10-12T01.json`, ... |
 | `'hours/{start}/nd.json'` | `hours/2026-10-12T00/nd.json`, ... (directories are created) |
 | `'{year}-{month}/{day}/nd-{date}-{hour}00.csv'` | `2026-10/12/nd-2026-10-12-0000.csv`, `2026-10/12/nd-2026-10-12-0100.csv`, ... |
+| `'raw/{mon}/{year}-{mon}-{day}/nd-all-{start}.csv'` | `raw/oct/2026-oct-22/nd-all-2026-10-22.csv`, ... (gateway layout, `--split day`) |
 
 Without a placeholder the label goes before the extension; with one, every
 placeholder is replaced. Quote paths containing braces. Labels are
@@ -407,13 +415,16 @@ appended outside UTC.
 | `{start}` | `2026-10-15T14-0500` | `2026-10-15` |
 | `{date}` | `2026-10-15` | `2026-10-15` |
 | `{year}` `{month}` `{day}` | `2026` `10` `15` | `2026` `10` `15` |
+| `{mon}` | `oct` | `oct` |
 | `{hour}` | `14` | `00` |
 | `{offset}` | `-0500` (empty in UTC) | empty |
 
 `{hour}` without `{offset}` names the two autumn 01:00 hours alike under a
 daylight-saving zone. A path that would send two pieces to one file is refused
 before anything is written (exit status 2); add `{offset}` or use `{start}`.
-Placeholders without `--split` are a usage error.
+`{mon}` is the lowercase English month abbreviation, `jan` to `dec`, taken
+from a fixed table rather than `strftime`, so paths are the same in every
+locale. Placeholders without `--split` are a usage error.
 
 ### Hourly files
 
@@ -678,3 +689,47 @@ Once σ approaches the spacing between events, sorting by time no longer gives
 the true order: 0.6% of successive events swap at 20 ms, and 9% at 50 ms. Sort
 by `event_number` instead.
 
+## 12. Publishing on the gateway: darpa-spill-publish
+
+`darpa-spill-publish` strings the three commands above together for the
+Near Detector gateway, where cron runs it. Each run dumps a range with
+`darpa-spill-dump --split hour|day` for each stream (`numi`, `all`,
+`booster`), shifts every file with `darpa-spill-shift apply` using the token
+of the month the data belongs to, uploads raw and shifted copies to the Fermi
+Data Platform with `fdp-put --skip-existing`, and rewrites a status page.
+Paths use the `{mon}` placeholder from [section 7](#7-splitting-a-dump-into-files-by-time):
+
+```
+/data/DARPA-spilldata/raw/oct/2026-oct-22/nd-numi-2026-10-22T13-0500.csv
+/data/DARPA-spilldata/shifted/oct/2026-oct-22/nd-numi-2026-10-22T13-0500.shifted.csv
+```
+
+| Subcommand | Does |
+|---|---|
+| `hourly [--hour TIME]` | the preceding local hour, plus any of the last 24 not complete |
+| `daily [--date YYYY-MM-DD]` | the preceding local day (23/24/25 h), plus any of the 3 before it not complete |
+| `backfill --start X --end Y` | every whole hour and day in a range (`--no-hourly`, `--no-daily`, `--no-upload`) |
+| `upload` | retry every upload not yet done |
+| `token [--month YYYY-MM \| --next]` | create a month's shift token if missing; never overwrites |
+| `creds` | renew Kerberos (`kinit -R`), refresh the FDP bearer token (`htgettoken`) |
+| `status` | re-render the status page |
+| `check` | preflight table; exit 1 if anything fails |
+
+```console
+$ darpa-spill-publish check                                # is everything in place?
+$ darpa-spill-publish -n hourly                            # print what the next hourly run would do
+$ darpa-spill-publish -v hourly --hour 2026-11-01T01-0600  # redo the second 01:00 of 1 November
+$ darpa-spill-publish -v daily --date 2026-10-21
+$ darpa-spill-publish -v backfill --start 2026-09-17 --end now --no-upload
+```
+
+Common options (`-c FILE`, `--set SECTION.KEY=VALUE`, `-n`, `-v`, `-q`) go
+before or after the subcommand. Settings come from `config/publish.yaml`
+(deployed as `~/DARPA/publish/publish.yaml`), `DARPA_SPILL_PUBLISH_*`
+variables and `--set`, with the command line winning. Exit status: 0 ok,
+1 failure, 2 usage, 3 partial, 75 temporary (ingest not ready, or the job is
+already running).
+
+The full reference is `man -l man/darpa-spill-publish.1`; the operator
+runbook (weekly `kinit`, token backup, alerts, recovery) is
+[GATEWAY_OPERATIONS.md](GATEWAY_OPERATIONS.md).

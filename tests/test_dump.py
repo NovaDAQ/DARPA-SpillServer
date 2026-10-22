@@ -199,12 +199,55 @@ def test_remote_matches_local(populated, populated_client, tmp_path):
         assert a.read() == b.read()
 
 
+class _Recording:
+    """Wrap a test client and record the paths requested."""
+
+    def __init__(self, client):
+        self.client = client
+        self.paths = []
+
+    def get(self, url, params=None):
+        self.paths.append(url.split("?")[0])
+        return self.client.get(url, params=params)
+
+    def close(self):
+        pass
+
+
 def test_remote_extent_and_limits(populated_client):
-    remote = _remote(populated_client)
+    recorder = _Recording(populated_client)
+    remote = _remote(recorder)
     first, last = remote.extent()
-    assert first == BASE
-    assert remote.max_limit() == 1000
+    # Only the newest event is cheap to ask a server for.
+    assert first is None and last is not None and last >= BASE
+    assert remote.max_limit() == 1000          # probed, above the ceiling
+    assert remote.max_limit(500) is None       # within it
+    assert "/api/status" not in recorder.paths
     assert remote.server_timezone()
+    assert recorder.paths[-1] == "/api/status"
+
+
+def test_remote_dump_with_timezone_never_asks_for_status(
+        monkeypatch, populated_client, tmp_path):
+    # /api/status counts the whole archive: minutes on the gateway (D18).
+    recorder = _Recording(populated_client)
+    monkeypatch.setattr(dump, "RemoteReader",
+                        lambda *a, **k: _remote(recorder))
+    out = tmp_path / "d.csv"
+    code = main([*RANGE, "-q", "-s", "https://example:8443",
+                 "--timezone", "UTC", "--csv", str(out)], environ={})
+    assert code == 0
+    assert len(read_csv(out)) == 65
+    assert "/api/status" not in recorder.paths
+    assert {"/api/latest", "/api/events"} <= set(recorder.paths)
+
+
+def test_remote_extent_of_an_empty_archive(config, store):
+    from fastapi.testclient import TestClient
+    from darpa_spillserver.app import create_app
+    app = create_app(config, store=store, start_ingest=False)
+    with TestClient(app) as client:
+        assert _remote(client).extent() == (None, None)
 
 
 def test_remote_selection_is_forwarded(populated_client):
@@ -331,6 +374,64 @@ def test_segment_path_fields():
         "2026-10-15/{x}.csv"
     with pytest.raises(ValueError):
         segment_path("{date}.csv", "not-a-label")
+
+
+def test_label_fields_mon_all_months():
+    from darpa_spillserver.dump import MONTH_ABBREVIATIONS, label_fields
+    expected = ["jan", "feb", "mar", "apr", "may", "jun",
+                "jul", "aug", "sep", "oct", "nov", "dec"]
+    assert list(MONTH_ABBREVIATIONS) == expected
+    for number, name in enumerate(expected, 1):
+        day = "2026-{:02d}-01".format(number)
+        assert label_fields(day)["mon"] == name
+        assert label_fields(day + "T23-0600")["mon"] == name
+        assert label_fields(day + "T05")["mon"] == name
+    with pytest.raises(ValueError):
+        label_fields("2026-13-01")
+    with pytest.raises(ValueError):
+        label_fields("2026-00-01")
+
+
+def test_segment_path_mon_gateway_layout():
+    template = "raw/{mon}/{year}-{mon}-{day}/nd-all-{start}.csv"
+    assert segment_path(template, "2026-10-22") == \
+        "raw/oct/2026-oct-22/nd-all-2026-10-22.csv"
+    assert segment_path(template, "2026-10-22T14-0500") == \
+        "raw/oct/2026-oct-22/nd-all-2026-10-22T14-0500.csv"
+    assert segment_path(template, "2026-01-05T00") == \
+        "raw/jan/2026-jan-05/nd-all-2026-01-05T00.csv"
+    # {mon} alone selects replacement, and does not disturb {month}.
+    assert segment_path("{mon}.csv", "2026-05-01") == "may.csv"
+    assert segment_path("{month}-{mon}.csv", "2026-05-01") == "05-may.csv"
+
+
+def test_mon_is_locale_independent():
+    import locale
+    saved = locale.setlocale(locale.LC_TIME)
+    try:
+        for name in ("C", "de_DE.UTF-8", "fr_FR.UTF-8", "es_ES.UTF-8"):
+            try:
+                locale.setlocale(locale.LC_TIME, name)
+            except locale.Error:
+                continue
+            assert segment_path("{mon}", "2026-12-01") == "dec"
+            assert segment_path("{mon}", "2026-05-01") == "may"
+            assert segment_path("{mon}", "2026-03-01") == "mar"
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)
+
+
+def test_split_by_day_into_mon_directories(two_days, tmp_path):
+    template = str(tmp_path / "raw" / "{mon}" / "{year}-{mon}-{day}" /
+                   "nd-all-{start}.csv")
+    code = main(["-d", two_days.path, "-q", "--timezone", "UTC",
+                 "--start", "2026-10-12", "--end", "2026-10-12",
+                 "--split", "day", "--csv", template],
+                environ={})
+    assert code == 0
+    assert sorted(str(f.relative_to(tmp_path))
+                  for f in tmp_path.rglob("*.csv")) == [
+        "raw/oct/2026-oct-12/nd-all-2026-10-12.csv"]
 
 
 def test_split_by_hour_into_month_and_day_directories(two_days, tmp_path):

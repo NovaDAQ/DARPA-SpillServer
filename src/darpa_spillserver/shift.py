@@ -686,14 +686,40 @@ def _load_token(args, environ) -> Token:
 
 
 def _write_token_file(path: str, token: Token, force: bool) -> None:
-    if os.path.exists(path) and not force:
-        raise TokenError("{} exists; refusing to overwrite a token file "
+    refusal = TokenError("{} exists; refusing to overwrite a token file "
                          "(pass --force)".format(path))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+    if os.path.exists(path) and not force:
+        raise refusal
+    # Written whole beside the target, then linked into place: os.link fails
+    # if the name exists, so two concurrent runs cannot both "create" the
+    # token and one silently replace the other, and no reader ever sees a
+    # half-written file.
+    tmp = "{}.tmp.{}".format(path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                  stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w") as handle:
-        handle.write(str(token) + "\n")
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(str(token) + "\n")
+        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+        if force:
+            os.replace(tmp, path)
+            return
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            raise refusal from None
+        except OSError:
+            # No hard links on this file system: O_EXCL is still exclusive.
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             stat.S_IRUSR | stat.S_IWUSR)
+            except FileExistsError:
+                raise refusal from None
+            with os.fdopen(fd, "w") as handle:
+                handle.write(str(token) + "\n")
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _new_token(args) -> Token:
