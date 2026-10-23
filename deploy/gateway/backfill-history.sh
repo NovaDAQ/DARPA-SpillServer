@@ -4,8 +4,9 @@
 #
 # darpa-spill-publish backfill holds the shared dump lock for a whole run, so
 # one call over weeks would keep the cron hourly job waiting for hours.  This
-# walks the range a day per call, releasing the lock in between, and retries a
-# day whose run found the lock busy (exit 75).
+# walks the range a day per call, releasing the lock in between; before each
+# day it waits for a cron hourly or daily run that is queued for the lock, and
+# it retries a day whose run found the lock busy (exit 75).
 #
 # Usage (on the gateway, as novadaq; run it under nohup, it takes hours):
 #   backfill-history.sh FIRST_DAY LAST_DAY [extra backfill options]
@@ -31,9 +32,34 @@ shift 2
 RUN="${RUN_PUBLISH:-/home/novadaq/DARPA/publish/bin/run-publish.sh}"
 RETRIES="${BACKFILL_BUSY_RETRIES:-6}"
 
+STATE="${PUBLISH_STATE_DIR:-/data/DARPA-spilldata/publish/state}"
+YIELD_MAX="${BACKFILL_YIELD_MAX:-3600}"
+
+# Let a waiting cron hourly or daily run take the dump lock first.  Those
+# jobs hold {state_dir}/<job>.lock while they wait (up to 30 min) for the
+# dump lock, and a backfill day takes longer than that, so without this they
+# keep giving up ("busy") for as long as the backfill runs.
+yield_to_cron() {
+    local waited=0 job
+    for job in hourly daily; do
+        while [ -f "$STATE/$job.lock" ] && ! flock -n "$STATE/$job.lock" true; do
+            if [ "$waited" -eq 0 ]; then
+                echo "   waiting for the cron $job run to finish"
+            fi
+            if [ "$waited" -ge "$YIELD_MAX" ]; then
+                echo "   $job still running after $YIELD_MAX s; going ahead"
+                return
+            fi
+            sleep 15
+            waited=$((waited + 15))
+        done
+    done
+}
+
 failed=0
 day="$FIRST"
 while [ "$(date -d "$day" +%s)" -le "$(date -d "$LAST" +%s)" ]; do
+    yield_to_cron
     echo "== $(date '+%F %T') backfill $day"
     attempt=0
     while :; do
@@ -43,8 +69,9 @@ while [ "$(date -d "$day" +%s)" -le "$(date -d "$LAST" +%s)" ]; do
             break
         fi
         attempt=$((attempt + 1))
-        echo "   dump lock busy; retry $attempt of $RETRIES in 60 s"
+        echo "   another backfill or the dump lock is busy; retry $attempt of $RETRIES in 60 s"
         sleep 60
+        yield_to_cron
     done
     echo "   $day exit $rc"
     case "$rc" in

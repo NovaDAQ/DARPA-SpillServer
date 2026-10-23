@@ -375,8 +375,8 @@ darpa-spill-publish -v backfill --start 2026-10-01 --end 2026-10-07 --no-daily
 ```
 
 With the cron jobs installed, prefer `backfill-history.sh`, which makes one
-`backfill` call per local day so the dump lock is free between days and the
-hourly job keeps running (about 20-25 minutes per day of data, uploads
+`backfill` call per local day and, before each day, waits for a queued cron
+`hourly` or `daily` run, so those keep running on time (about 20-25 minutes per day of data, uploads
 included):
 
 ```bash
