@@ -80,7 +80,7 @@ if [ "$ANY_USER" -eq 0 ] && [ "$(id -un)" != novadaq ]; then
     echo "error: run this as novadaq on the gateway (or pass --any-user)" >&2
     exit 1
 fi
-for f in publish.yaml run-publish.sh server-watchdog.sh logrotate.conf crontab.fragment; do
+for f in publish.yaml run-publish.sh server-watchdog.sh backfill-history.sh logrotate.conf crontab.fragment; do
     if [ ! -f "$SCRIPT_DIR/$f" ]; then
         echo "error: $SCRIPT_DIR/$f missing; run from a complete checkout" >&2
         exit 1
@@ -129,6 +129,7 @@ install_file() {   # mode name
 }
 install_file 0755 run-publish.sh
 install_file 0755 server-watchdog.sh
+install_file 0755 backfill-history.sh
 install_file 0644 logrotate.conf
 
 # --- credentials area -------------------------------------------------------

@@ -374,6 +374,17 @@ darpa-spill-publish -v backfill --start 2026-09-17 --end 2026-09-30 --no-hourly
 darpa-spill-publish -v backfill --start 2026-10-01 --end 2026-10-07 --no-daily
 ```
 
+With the cron jobs installed, prefer `backfill-history.sh`, which makes one
+`backfill` call per local day so the dump lock is free between days and the
+hourly job keeps running (about 20-25 minutes per day of data, uploads
+included):
+
+```bash
+nohup ~/DARPA/publish/bin/backfill-history.sh 2026-09-17 2026-10-20 \
+    >> /data/DARPA-spilldata/publish/logs/backfill.log 2>&1 < /dev/null &
+grep -E '^==|exit' /data/DARPA-spilldata/publish/logs/backfill.log   # progress
+```
+
 Sizes for the full range: about 860 hours × 3 streams × 2 formats, ~160 GB
 locally and ~80 GB to FDP. Re-running a backfill is safe: complete pieces
 are skipped.
