@@ -181,3 +181,10 @@ tools:
   dump_timeout: 7200
   # Seconds allowed per darpa-spill-shift apply or token call.
   shift_timeout: 3600
+
+locks:
+  # Seconds hourly, daily and backfill wait for the shared dump lock before
+  # giving up (exit 75, result busy).  Keep it longer than one backfill day
+  # takes (deploy/gateway/backfill-history.sh), or cron runs give up while a
+  # history backfill runs.
+  dump_wait: 1800

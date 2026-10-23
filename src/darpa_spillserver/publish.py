@@ -153,9 +153,11 @@ UPLOAD_BATCH = 200
 #: files to the next ``upload`` run.
 UPLOAD_LOCK_WAIT = 600.0
 
-#: Seconds hourly, daily and backfill wait for one another's dump stage.
-#: They share the ``dump`` lock because darpa-spill-dump writes each piece to
-#: a fixed ``FILE.part``: two writers of one label would interleave there.
+#: Default seconds hourly, daily and backfill wait for one another's dump
+#: stage (``locks.dump_wait``).  They share the ``dump`` lock because
+#: darpa-spill-dump writes each piece to a fixed ``FILE.part``: two writers of
+#: one label would interleave there.  Make it longer than one backfill day
+#: takes, or cron runs give up while a history backfill is running.
 DUMP_LOCK_WAIT = 1800.0
 
 #: Seconds between SIGTERM and SIGKILL for a subprocess past its timeout.
@@ -277,6 +279,7 @@ DEFAULTS: Dict[str, Any] = {
     },
     "tools": {"dump": "", "shift": "", "dump_timeout": 7200.0,
               "shift_timeout": 3600.0},
+    "locks": {"dump_wait": DUMP_LOCK_WAIT},
 }
 
 #: Short environment names, besides ``DARPA_SPILL_PUBLISH_<SECTION>_<KEY>``.
@@ -2120,13 +2123,14 @@ class Publisher:
 
         Runs under the ``dump`` lock shared by hourly, daily and backfill, so
         two jobs never dump the same piece at once (see
-        :data:`DUMP_LOCK_WAIT`).
+        ``locks.dump_wait``).
         """
-        with self.lock("dump", wait=DUMP_LOCK_WAIT) as got:
+        wait = float(self.cfg["locks"]["dump_wait"])
+        with self.lock("dump", wait=wait) as got:
             if not got:
                 self.busy = True
                 self.warn("another job held the dump lock for {:.0f} s; {} "
-                          "left for the next run".format(DUMP_LOCK_WAIT, kind))
+                          "left for the next run".format(wait, kind))
                 return
             self._run_pieces_locked(kind, pieces)
 

@@ -1469,9 +1469,9 @@ def test_a_fresh_install_does_not_report_hours_before_it(rig):
     assert not [m for m in rig.mails() if "backfill" in m["argv"][1]]
 
 
-def test_dumping_jobs_share_the_dump_lock(rig, monkeypatch):
+def test_dumping_jobs_share_the_dump_lock(rig):
     import fcntl
-    monkeypatch.setattr(publish, "DUMP_LOCK_WAIT", 0.0)
+    rig.configure(locks={"dump_wait": 0})
     rig.state_dir.mkdir()
     with open(rig.state_dir / "dump.lock", "w") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)

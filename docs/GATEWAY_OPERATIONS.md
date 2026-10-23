@@ -391,7 +391,8 @@ are skipped.
 
 `backfill`, `hourly` and `daily` share `state/dump.lock` around their dump
 and shift stage, so they never write the same piece at once: while a long
-backfill holds it, the cron runs wait up to 30 minutes and then exit 75
+backfill holds it, the cron runs wait up to `locks.dump_wait` (3900 s on the
+gateway, longer than one backfill day) and then exit 75
 (result `busy`), and the catch-up windows pick their hours up afterwards. A
 backfill longer than the catch-up window can therefore leave recent hours to
 an `expired ... backfill needed` alert; running it before the cron lines are

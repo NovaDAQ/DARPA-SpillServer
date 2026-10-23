@@ -1,4 +1,4 @@
-.TH DARPA-SPILL-PUBLISH 1 "October 2026" "darpa_spillserver 1.5.1" "User Commands"
+.TH DARPA-SPILL-PUBLISH 1 "October 2026" "darpa_spillserver 1.5.2" "User Commands"
 .SH NAME
 darpa-spill-publish \- dump, shift, upload and report spill data, from cron
 .SH SYNOPSIS
@@ -266,7 +266,9 @@ and
 .B backfill
 also share
 .I {state_dir}/dump.lock
-around their dump and shift stage, waited for up to 30 minutes, so two of
+around their dump and shift stage, waited for up to
+.B locks.dump_wait
+(1800 s; 3900 s on the gateway), so two of
 them never write the same piece at once; a run that cannot get it exits 75
 (result
 .BR busy ).
