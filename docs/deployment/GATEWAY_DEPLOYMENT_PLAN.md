@@ -86,7 +86,7 @@ cron (novadaq)
 | 1.4 | Tests for 1.3: paths and labels across DST, data-month token choice, manifest, upload command construction against a fake `fdp-put`, status rendering, alert rate limit, watermark check | done |
 | 1.5 | Gateway files in `deploy/gateway/`: `publish.yaml`, `crontab.fragment`, `logrotate.conf`, `server-watchdog.sh`, `install.sh`, README | done |
 | 1.6 | Docs: man page `darpa-spill-publish.1`, `docs/GATEWAY_OPERATIONS.md` (runbook: weekly kinit, token backup, recovery), README and docs table | done |
-| 1.7 | Independent review of 1.1–1.6; full test suite green; release 1.5.0 (version strings, tag, push). Review done and fixes applied (log 2026-10-22). Release step: bump `__version__`, `pyproject.toml` and the `.TH` line of every `man/*.1` together (`man/darpa-spill-publish.1` already says 1.5.0, the rest 1.4.0) | doing |
+| 1.7 | Independent review of 1.1–1.6; full test suite green; release 1.5.0 (version strings, tag, push). Review done and fixes applied (log 2026-10-22). Release step: bump `__version__`, `pyproject.toml` and the `.TH` line of every `man/*.1` together (`man/darpa-spill-publish.1` already says 1.5.0, the rest 1.4.0) | done: v1.5.0 (2026-10-22), v1.5.1 (2026-10-23: verified uploads, future-event guard) |
 
 ### WP2. Gateway preparation (needs the user in places)
 
@@ -105,26 +105,26 @@ cron (novadaq)
 
 | ID | Task | Status |
 |---|---|---|
-| 3.1 | `git pull` v1.5.0 in `~/DARPA/DARPA-SpillServer`, `pip install -e .`, run tests there | todo |
-| 3.2 | Install `~/DARPA/publish/` (config, state, status, logs) via `deploy/gateway/install.sh` | todo |
-| 3.3 | Add `server.status_dir` to `spillserver.yaml`; `stop.sh` / `start.sh` (short ingest gap, covered by the 3600 s backfill) | todo |
-| 3.4 | Create shift tokens for 2026-09, 2026-10, 2026-11; back them up to the Mac | todo |
+| 3.1 | `git pull` v1.5.0 in `~/DARPA/DARPA-SpillServer`, `pip install -e .`, run tests there | done: v1.5.1 deployed; 526 tests passed on the gateway at 1.5.0 |
+| 3.2 | Install `~/DARPA/publish/` (config, state, status, logs) via `deploy/gateway/install.sh` | done |
+| 3.3 | Add `server.status_dir` to `spillserver.yaml`; `stop.sh` / `start.sh` (short ingest gap, covered by the 3600 s backfill) | done: /status/ live |
+| 3.4 | Create shift tokens for 2026-09, 2026-10, 2026-11; back them up to the Mac | done: SHA-256 of the Mac copies match |
 
 ### WP4. Validation (before cron)
 
 | ID | Task | Status |
 |---|---|---|
-| 4.1 | One manual `hourly` run: files, row counts vs `/api/events`, shifted files invert byte-identically | todo |
-| 4.2 | One manual `daily` run for 2026-10-21; daily rows = sum of that day's hourly rows | todo |
-| 4.3 | Upload check: `fdp-stat --checksum` matches local adler32 for raw and shifted | todo |
-| 4.4 | Status page loads at `:8443/status/` and shows the runs and credential state | todo |
+| 4.1 | One manual `hourly` run: files, row counts vs `/api/events`, shifted files invert byte-identically | done: 2026-10-22T14; counts = /api/events; 6/6 shifted files invert byte-identically |
+| 4.2 | One manual `daily` run for 2026-10-21; daily rows = sum of that day's hourly rows | done: 2026-10-21 daily = Σ 24 hourly for all, booster, numi in csv and json (708,313 / 589,952 / 31,961 rows) |
+| 4.3 | Upload check: `fdp-stat --checksum` matches local adler32 for raw and shifted | done: fdp-stat size + adler32 verification built into upload (1.5.1); upload --verify 12/12 ok |
+| 4.4 | Status page loads at `:8443/status/` and shows the runs and credential state | done |
 
 ### WP5. Backfill and go-live
 
 | ID | Task | Status |
 |---|---|---|
-| 5.1 | Backfill hourly + daily from 2026-09-17 to the last complete hour (about 860 hours × 3 streams × 2 formats, ~160 GB local, ~80 GB raw + shifted upload) | todo |
-| 5.2 | Install the crontab fragment (alec's `grabSpills.sh` line kept) | todo |
+| 5.1 | Backfill hourly + daily from 2026-09-17 to the last complete hour (about 860 hours × 3 streams × 2 formats, ~160 GB local, ~80 GB raw + shifted upload) | doing: 2026-10-21..22 done; backfill-history.sh 2026-09-17..2026-10-20 started 2026-10-23 11:01 CDT (~23 min/day) |
+| 5.2 | Install the crontab fragment (alec's `grabSpills.sh` line kept) | done 2026-10-23 10:25 (backup crontab.backup-20261023-102540) |
 | 5.3 | Observe 24 h: every hour's files present, uploaded, status page green | todo |
 | 5.4 | Final artifacts: this tracker updated, test matrix, runbook | todo |
 
@@ -170,3 +170,4 @@ cron (novadaq)
 | 2026-10-22 | Bug (live, darpa-spill-publish 1.5.0): `fdp-put` failed single files with `PUT ...: SSL connect error` (bad dCache pool node), exit 12, leaving zombie namespace entries (`fdp-stat`: `size -1`, no checksum); the next `upload` ran `fdp-put --skip-existing`, which skipped them and exited 0, so 5 broken remote files were recorded uploaded. Fix: a file is recorded uploaded only after `fdp-stat --json` shows its local size and adler32 (local adler32 cached in new `raw_adler32`/`shifted_adler32` columns); missing copies stay pending; incomplete/differing copies not yet recorded are removed with `fdp-rm -f` and re-sent next run; recorded copies are never removed (error + `uploaded file differs on FDP` alert); new `upload --verify [--since YYYY-MM-DD]` re-checks recorded uploads, removes zombies and resets them (and missing copies) to pending, then uploads, to repair the 5 files on the gateway. `check` also probes `fdp-stat` and `fdp-rm`. 534 tests pass. |
 | 2026-10-22 | Power outage took the TDUs down 16:16 CDT. On return ppc-01 reported one event at INT64_MAX ticks (year 6576, type FAKE); stored, it became ppc-01's resume point and stopped its ingest. |
 | 2026-10-23 | ppc-01 gap 2026-10-22T21:15Z..2026-10-23T14:39Z recovered from the TDU ring with darpa-spill-backfill (221,841 events); 21:15Z..~02:00Z is the outage itself. 1.5.1: poller drops events more than ingest.max_future (1 day) ahead and the resume point ignores them; upload verification narrowed so only size -1 leftovers are ever removed. |
+| 2026-10-23 | Crontab installed. Upload verify repaired the 5 zombie files (12/12 ok). Daily validation for 2026-10-21 passed. History backfill 2026-09-17..2026-10-20 started (backfill-history.sh). |
