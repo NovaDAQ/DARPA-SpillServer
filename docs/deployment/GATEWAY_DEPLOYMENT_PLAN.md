@@ -123,7 +123,7 @@ cron (novadaq)
 
 | ID | Task | Status |
 |---|---|---|
-| 5.1 | Backfill hourly + daily from 2026-09-17 to the last complete hour (about 860 hours × 3 streams × 2 formats, ~160 GB local, ~80 GB raw + shifted upload) | doing: 2026-10-21..22 done; backfill-history.sh 2026-09-17..2026-10-20 started 2026-10-23 11:01 CDT (~23 min/day) |
+| 5.1 | Backfill hourly + daily from 2026-09-17 to the last complete hour (about 860 hours × 3 streams × 2 formats, ~160 GB local, ~80 GB raw + shifted upload) | paused (user, 2026-10-23 16:40): published 09-17..09-26, 10-21..; 09-27 partial (raw numi/all hourly only); 09-28..10-20 not published. Resume: backfill-history.sh 2026-09-27 2026-10-20 |
 | 5.2 | Install the crontab fragment (alec's `grabSpills.sh` line kept) | done 2026-10-23 10:25 (backup crontab.backup-20261023-102540) |
 | 5.3 | Observe 24 h: every hour's files present, uploaded, status page green | todo |
 | 5.4 | Final artifacts: this tracker updated, test matrix, runbook | todo |
@@ -174,3 +174,4 @@ cron (novadaq)
 | 2026-10-23 12:03 | First cron hourly (11:10) caught up 2026-10-23 00:00–11:00: 264 steps, 0 errors, 132 files verified on FDP. Backfill 09-17..09-19 done (~22 min/day); 0 file errors; /data 14 GB used. |
 | 2026-10-23 15:07 | Backfill days grew to ~50 min (> the 30 min hourly lock wait); the 14:10 hourly gave up (busy). backfill-history.sh now yields to queued cron hourly/daily runs; driver restarted from 2026-09-25 (09-17..09-24 done, 0 errors). ETA ~09:00 CDT 10-24. |
 | 2026-10-23 16:12 | 15:10 hourly also gave up (the 09-25 day held the lock to 15:47). 1.5.2: dump-lock wait is now `locks.dump_wait`; gateway set to 3900 s (> one backfill day). Deployed; applies from the 17:10 run. Today 13:00+ hours are queued in the catch-up window. |
+| 2026-10-23 16:40 | Backfill stopped at the user's request (driver, run and dump killed by PID; no .part left). 16:10 hourly then caught up 13:00–15:00. 1,992 files raw-uploaded, 1,896 public; 0 errors. |
