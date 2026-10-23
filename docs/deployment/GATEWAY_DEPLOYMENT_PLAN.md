@@ -177,3 +177,4 @@ cron (novadaq)
 | 2026-10-23 16:40 | Backfill stopped at the user's request (driver, run and dump killed by PID; no .part left). 16:10 hourly then caught up 13:00–15:00. 1,992 files raw-uploaded, 1,896 public; 0 errors. |
 | 2026-10-23 17:24 | Shift tokens dts1-2026-09/10/11 uploaded to /amsc/novaend/tokens/ (private area) at the user's request; size and adler32 verified. Later months are not uploaded automatically. |
 | 2026-10-23 17:26 | At the user's explicit request (consequence confirmed), shift tokens dts1-2026-09/10/11 also published to /amsc/public/novaend/tokens/; verified. The public shifted data for those months is therefore reversible by anyone. |
+| 2026-10-23 17:30 | Data-user guide docs/DECODING_DATA.md written; every example run from a clean venv (install from GitHub, anonymous public download, info, invert CSV+JSON byte-identical to raw, wrong-token refusal). Uploaded as DECODING.md to /amsc/novaend and /amsc/public/novaend (adler32 60c2227d). |

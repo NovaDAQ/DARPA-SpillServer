@@ -165,6 +165,7 @@ additive, touches no DAQ process, and removes the event loss entirely.
 | [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | from checkout to first query, including the Python 3.9+ problem on the gateways |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every setting, and how the four layers merge |
 | [docs/API.md](docs/API.md) | endpoints, parameters, signals, output columns |
+| [docs/DECODING_DATA.md](docs/DECODING_DATA.md) | for data users: downloading the published files from FDP and restoring true times with the monthly tokens (published as `DECODING.md` in `/amsc/novaend` and `/amsc/public/novaend`) |
 | [docs/TIMESTAMP_SHIFT.md](docs/TIMESTAMP_SHIFT.md) | reversible timestamp blurring: design, decisions, verification; full specification in [docs/TimestampShift.nb](docs/TimestampShift.nb) |
 | [docs/COMMAND_LINE.md](docs/COMMAND_LINE.md) | `darpa-spill-query`, `darpa-spill-dump`, `darpa-spill-shift` and `darpa-spill-publish` by example: times, selection, exports, splitting into files |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | systemd, reverse proxy, backups, enabling SSO |
