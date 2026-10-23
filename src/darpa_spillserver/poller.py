@@ -61,6 +61,8 @@ class IngestStatus:
     last_success_at: Optional[float] = None
     last_error: str = ""
     last_error_at: Optional[float] = None
+    events_rejected: int = 0
+    """Events dropped for lying more than ``ingest.max_future`` ahead."""
     watermark_nova: Optional[int] = None
     polled_through_nova: Optional[int] = None
     """NOvA time up to which the TDU has been read completely: the start of
@@ -80,6 +82,7 @@ class IngestStatus:
             "polls": self.polls,
             "events_fetched": self.events_fetched,
             "events_inserted": self.events_inserted,
+            "events_rejected": self.events_rejected,
             "consecutive_errors": self.consecutive_errors,
             "last_poll_at": self.last_poll_at,
             "last_success_at": self.last_success_at,
@@ -257,6 +260,20 @@ class Poller:
         # source an event belongs to is decided by which poller fetched it.
         for event in result.events:
             event.source = self.source.name
+        ceiling = self._future_ceiling(started_nova)
+        if ceiling is not None:
+            kept = [e for e in result.events if e.nova_time < ceiling]
+            if len(kept) != len(result.events):
+                dropped = [e for e in result.events if e.nova_time >= ceiling]
+                self.status.events_rejected += len(dropped)
+                log.warning(
+                    "ingest from %s: dropped %d event(s) stamped more than "
+                    "%.0f s in the future (e.g. event %s at %d ticks); is the "
+                    "TDU clock set?", self.source.name, len(dropped),
+                    self.config.ingest.max_future, dropped[0].event_number,
+                    dropped[0].nova_time,
+                )
+                result = replace(result, events=kept)
         inserted = await asyncio.to_thread(self.store.insert_events, result.events)
 
         self.status.polls += 1
@@ -304,9 +321,21 @@ class Poller:
 
     # -- helpers ------------------------------------------------------------
 
+    def _future_ceiling(self, now_nova: int) -> Optional[int]:
+        """Events at or after this tick are treated as bad clocks; None when
+        ``ingest.max_future`` is 0."""
+        if self.config.ingest.max_future <= 0:
+            return None
+        return now_nova + int(self.config.ingest.max_future * TICKS_PER_SECOND)
+
     def _watermark(self) -> int:
-        """The NOvA tick to resume from, allowing for the configured overlap."""
-        latest = self.store.latest(sources=[self.source.name])
+        """The NOvA tick to resume from, allowing for the configured overlap.
+
+        Events beyond ``ingest.max_future`` (stored before that check
+        existed) are ignored, so one bad clock cannot stall the source.
+        """
+        latest = self.store.latest(sources=[self.source.name],
+                                   before=self._future_ceiling(nova_now()))
         overlap_ticks = int(self.config.ingest.overlap * TICKS_PER_SECOND)
 
         if latest is None:

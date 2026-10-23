@@ -111,6 +111,29 @@ The `novaendwrite` role can write only under `/amsc/novaend` and
 passes `--replace`: a file, once uploaded, is final. The older manual uploads
 under `/amsc/novaend/{numi,booster,all-accelerator}-timing/` are not touched.
 
+**Upload verification.** `fdp-put`'s exit status alone never marks a file
+uploaded. A PUT that fails part-way (seen live: `PUT ...: SSL connect error`
+from a bad pool node, `fdp-put` exit 12) leaves an empty namespace entry on
+dCache (`fdp-stat` shows `size: -1`, no checksum), and the retry's
+`--skip-existing` skips it and exits 0. So after every `fdp-put` batch
+(unless it failed with exit 4 or 125) the publisher runs
+`fdp-stat --json` on the same files, inside `env.sh` with the same
+`--token-file`/`--ca-path`/`fdp.extra_args` (one call per batch; one per
+file if that fails; exit 5 = not found), and per file:
+
+| On FDP | Result |
+|---|---|
+| size and adler32 equal the local file's | recorded uploaded, error cleared |
+| not there | stays pending, error noted; the next run sends it |
+| `size -1` (left by a failed PUT) | removed with `fdp-rm -f`; stays pending with `removed incomplete remote copy (size X, adler32 Y); will retry`; the next run sends it |
+| complete, but size/adler32 differ | never removed (it may be the published copy, D9/D10); stays pending, error recorded and `uploaded file differs on FDP` mailed. Compare the copies and `fdp-rm -f` the remote one by hand if it is wrong |
+
+The local adler32 is computed once (1 MiB chunks, 8 lowercase hex digits)
+and cached in the `raw_adler32`/`shifted_adler32` columns of the state
+database. The pending count on the status page follows the verified state.
+A dry run (`-n`) prints the `fdp-stat` command but runs neither it nor
+`fdp-rm`.
+
 To look at FDP by hand:
 
 ```bash
@@ -263,6 +286,8 @@ mails for real; add `--set alerts.enabled=false` there.
 | `<job> has been running for <time>` | A job found its previous run still holding its lock after `alerts.stale_job_hours` (3 h): hung. Every later run of it exits 75. | `ps -fp <PID>` from the body; kill it if hung. Subprocesses have timeouts (`tools.dump_timeout`, `fdp.timeout`, ...), so this should be rare. |
 | `state database unwritable (disk full?)` | `publish.db` cannot be written. Nothing is processed. | [Disk full, section 11](#disk-full). |
 | `upload failed: fdp-put exit 12 (partial), again` | Uploads to one directory were partial on two runs in a row: some file fails every time. | `darpa-spill-publish -v upload` and read `fdp-put`'s output; see exit 6/9 above. |
+| `uploaded file differs on FDP` | A copy recorded as uploaded has a different size or adler32 on FDP (found by `upload --verify`, or a race). It is **not** removed: dCache forbids overwriting and the pipeline never uses `--replace`. | Compare (section 12). If the remote copy is wrong, remove it with the `fdp-rm -f` command in the body, then `darpa-spill-publish -v upload --verify --since <date>`: the copy is then missing, goes back to pending, and is sent again. |
+| `cannot remove an incomplete upload on FDP` | `fdp-rm -f` failed on an empty entry left by a failed PUT. Until it is gone `--skip-existing` skips the file. | Retried every upload run. If it persists: `source ~/anorman-fdp/env.sh; fdp-rm -f <path from the body>`, then `darpa-spill-publish -v upload`. |
 | `upload failed: fdp-put exit 125 (env script unreadable)` | `fdp.env_script` is missing or unreadable. | Check `~/anorman-fdp/env.sh`. |
 | `darpa-spill-dump failed` | The dump exited with an error (server down, timeout, disk full). | Read the body; fix the cause; the next run retries (section 8). |
 | `new shift token created - back it up` | A `dts1` token was made for a data month. | [Section 6](#6-monthly-back-up-the-shift-token), now. |
@@ -270,10 +295,11 @@ mails for real; add `--set alerts.enabled=false` there.
 | `darpa-spill-shift failed` | A raw file could not be shifted. | Read the body; the next hourly run retries anything dumped but not shifted. |
 | `disk NN% full` | The file system holding `/data/DARPA-spilldata` passed 85 %. | [Disk full, section 11](#disk-full). |
 
-A single partial upload (exit 12) is not alerted: nothing is marked uploaded
-(the rows note the partial and show as `error` on the status page), and the
-next `upload` run, with `--skip-existing`, sends the rest. Two in a row for
-one directory are mailed.
+A single partial upload (exit 12) is not alerted: the `fdp-stat` that
+follows marks the files that arrived intact, removes the empty entries the
+failed PUTs left (those rows show `removed incomplete remote copy ...` and
+`error` on the status page), and the next `upload` run sends them again. Two
+in a row for one directory are mailed.
 
 Test the mail path: `echo test | mailx -s "[darpa-spill-publish] test alert" anorman@fnal.gov`.
 
@@ -298,6 +324,12 @@ darpa-spill-publish -v --set daily.catchup_days=0 daily --date 2026-10-21
 
 # uploads only
 darpa-spill-publish -v upload
+
+# re-check files already recorded uploaded (size + adler32 via fdp-stat),
+# repair empty entries left by failed PUTs, then upload what is pending;
+# dry run first (prints the fdp-stat commands, runs nothing)
+darpa-spill-publish -n upload --verify --since 2026-10-21
+darpa-spill-publish -v upload --verify --since 2026-10-21
 
 # see first what it would do (reads the ingest gate once; does not wait)
 darpa-spill-publish -n hourly --hour 2026-10-22T13
@@ -525,8 +557,15 @@ q "SELECT stream, fmt, rows, bytes, dumped_at, shifted_at, raw_uploaded_at, shif
 q "SELECT key, last_sent, count FROM alerts"
 ```
 
-To compare a local file with its FDP copy (adler32, as `fdp-stat --checksum`
-reports it):
+`upload --verify` (section 8) does this comparison for every uploaded file;
+the cached local value is in `raw_adler32`/`shifted_adler32`:
+
+```bash
+q "SELECT raw_path, raw_adler32, shifted_adler32 FROM files WHERE label = '2026-10-22T13-0500'"
+```
+
+To compare a local file with its FDP copy by hand (adler32, as
+`fdp-stat --checksum` reports it):
 
 ```bash
 python3 -c 'import sys,zlib; a=1

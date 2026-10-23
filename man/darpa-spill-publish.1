@@ -1,4 +1,4 @@
-.TH DARPA-SPILL-PUBLISH 1 "October 2026" "darpa_spillserver 1.5.0" "User Commands"
+.TH DARPA-SPILL-PUBLISH 1 "October 2026" "darpa_spillserver 1.5.1" "User Commands"
 .SH NAME
 darpa-spill-publish \- dump, shift, upload and report spill data, from cron
 .SH SYNOPSIS
@@ -32,7 +32,14 @@ darpa-spill-publish \- dump, shift, upload and report spill data, from cron
 .PP
 .B darpa-spill-publish
 .RI [ COMMON ]
-.BR upload " | " creds " | " status " | " check
+.B upload
+.RB [ \-\-verify
+.RB [ \-\-since
+.IR YYYY\-MM\-DD ]]
+.PP
+.B darpa-spill-publish
+.RI [ COMMON ]
+.BR creds " | " status " | " check
 .PP
 .B darpa-spill-publish
 .BR \-V " | " \-h
@@ -103,6 +110,37 @@ on the Fermi Data Platform, keeping the local directory layout.  It runs
 inside
 .BR fdp.env_script ,
 grouped by destination directory, at most 200 files per call.
+.IP
+The exit status of
+.B fdp\-put
+is not trusted on its own: a PUT that fails part-way (e.g.
+.IR "SSL connect error" )
+can leave an empty namespace entry on dCache
+.RB ( "size \-1" ,
+no checksum), which the next
+.B \-\-skip\-existing
+call skips while exiting 0.  After every batch (except one that failed with
+exit 4 or 125) the same files are checked with
+.B fdp\-stat \-\-json
+(one call per batch; one per file if that fails), through the same
+environment script and with the same
+.BR \-\-token\-file ", " \-\-ca\-path
+and
+.BR fdp.extra_args .
+A copy is recorded uploaded only when its remote size and adler32 equal the
+local ones (the local adler32 is cached in the state database).  A copy not
+on FDP stays pending.  An incomplete copy (size \-1, what a failed PUT
+leaves behind) is removed with
+.B fdp\-rm \-f
+and stays pending with
+.IR "removed incomplete remote copy (size X, adler32 Y); will retry" ;
+the next run sends it again.  A complete copy that differs is never removed,
+since it may be the published one: the copy stays pending, the mismatch is
+recorded and
+.I "uploaded file differs on FDP"
+is mailed.
+.B \-\-replace
+is never used.
 .TP
 .B status
 writes
@@ -155,7 +193,7 @@ path, e.g.
 .IR /amsc/public/novaend/shifted/oct/2026\-oct\-22/ .
 .SS State
 Every file's progress (dumped, rows, bytes, shifted, raw uploaded, shifted
-uploaded, last error) is a row in the SQLite database
+uploaded, adler32 of each copy, last error) is a row in the SQLite database
 .IR {state_dir}/publish.db .
 Any stage can fail and be finished by a later run.  A raw file that is
 recorded, or that is found complete on disk, is never dumped again; files are
@@ -297,7 +335,36 @@ Upload every raw and shifted file not yet recorded as uploaded.  Holds
 the upload stage of
 .BR hourly ", " daily " and " backfill
 waits up to 600 s for the same lock and otherwise leaves its files to this
-job.
+job.  Files already recorded uploaded are not checked again, except with
+.BR \-\-verify .
+.RS
+.TP
+.B \-\-verify
+First re-check every copy recorded as uploaded with
+.BR "fdp\-stat \-\-json" ,
+then upload as usual.  A copy missing on FDP goes back to pending; an empty
+entry
+.RB ( "size \-1" )
+is removed with
+.B fdp\-rm \-f
+and goes back to pending; both are then sent by the upload that follows.  A
+copy whose size or adler32 differs otherwise cannot be replaced (dCache
+forbids overwriting, and
+.B \-\-replace
+is never used): it stays recorded uploaded, its row gets the error, and the
+alert
+.I "uploaded file differs on FDP"
+is mailed with the
+.B fdp\-rm
+command to remove it by hand.  Counts (checked, ok, reset, mismatch,
+unchecked) are logged and kept in the run's detail.  A one-off repair, not
+for cron.
+.TP
+.BI \-\-since " YYYY\-MM\-DD"
+With
+.BR \-\-verify :
+only copies recorded uploaded at or after local midnight of that date.
+.RE
 .TP
 .B token
 Create the shift token for a data month if it does not exist:
@@ -396,9 +463,9 @@ executable,
 .B fdp.env_script
 present,
 .B fdp\-put \-\-version
-and
-.B htgettoken
-runnable through it, mail command found, disk below
+runnable and
+.BR fdp\-stat ", " fdp\-rm " and " htgettoken
+found through it, mail command found, disk below
 .BR alerts.disk_warn_percent .
 Prints one line per check
 .RB ( ok " or " FAIL );
@@ -432,7 +499,11 @@ the
 .B check
 commands,
 .IR /api/sources )
-still run.
+still run;
+.B fdp\-stat
+and
+.B fdp\-rm
+are only printed, so a dry run neither verifies nor repairs uploads.
 .TP
 .BR \-v ", " \-\-verbose
 Log every step.
@@ -621,11 +692,20 @@ network/TLS, 9 checksum mismatch, 12 partial, plus 124 timed out and 125
 .B fdp.env_script
 unreadable.  After 4, 7, 124 or 125 the upload stage stops (every further
 call would fail the same way); after 12 nothing is marked uploaded (fdp\-put
-does not say which files went), the rows note the partial, and the next
+does not say which files went), the rows note the partial, the
+.B fdp\-stat
+that follows marks the files that arrived intact and removes the empty
+entries the failed ones left, and the next
 .B upload
 run, with
 .BR \-\-skip\-existing ,
 sends the rest; a directory partial on two runs in a row is mailed.
+.B fdp\-stat
+exit 5 means not found.  When
+.B fdp\-rm \-f
+cannot remove an incomplete copy the alert
+.I "cannot remove an incomplete upload on FDP"
+is mailed: until it is gone the file cannot be uploaded.
 .PP
 Every subprocess runs in its own process group with a timeout
 .RB ( tools.dump_timeout ,
@@ -689,6 +769,16 @@ Redo one day:
 .RS
 .nf
 darpa\-spill\-publish \-v daily \-\-date 2026\-10\-21
+.fi
+.RE
+.PP
+Re-check what was uploaded since 21 October (dry run first), repairing
+empty entries left by failed PUTs:
+.PP
+.RS
+.nf
+darpa\-spill\-publish \-n upload \-\-verify \-\-since 2026\-10\-21
+darpa\-spill\-publish \-v upload \-\-verify \-\-since 2026\-10\-21
 .fi
 .RE
 .PP

@@ -14,7 +14,9 @@ On the gateway, cron runs this tool to turn the archive behind a running
   identically and cannot be averaged against each other (plan D7).
 * **upload** copies raw files to ``fdp.raw_dest`` and shifted files to
   ``fdp.shifted_dest`` with ``fdp-put --skip-existing``, run inside the FDP
-  environment script.
+  environment script.  A file counts as uploaded only once ``fdp-stat``
+  shows its size and adler32 on FDP; an incomplete copy left by a failed
+  PUT (``size -1``) is removed with ``fdp-rm -f`` and sent again.
 * **status** writes ``index.html`` and ``status.json`` for the server's
   ``/status/`` mount.
 
@@ -78,6 +80,7 @@ import ssl
 import subprocess
 import sys
 import time
+import zlib
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -112,6 +115,8 @@ __all__ = [
     "parse_klist",
     "jwt_expiry",
     "render_html",
+    "adler32_file",
+    "parse_fdp_stat",
 ]
 
 log = logging.getLogger("darpa_spillserver.publish")
@@ -164,6 +169,12 @@ EXIT_ENV_SCRIPT = 125
 FDP_EXIT = {0: "ok", 4: "authentication", 6: "exists", 7: "network/TLS",
             9: "checksum mismatch", 12: "partial",
             EXIT_ENV_SCRIPT: "env script unreadable", 124: "timed out"}
+
+#: ``fdp-stat`` exit status for a path that does not exist.
+FDP_STAT_NOT_FOUND = 5
+
+#: Bytes per read when checksumming a local file.
+ADLER32_CHUNK = 1 << 20
 
 #: Values in the credentials ``.env`` that mean "not filled in yet".
 PLACEHOLDERS = ("", "CHANGEME")
@@ -719,6 +730,62 @@ def http_get_json(url: str, ca_bundle: str, insecure: bool,
 _sleep = time.sleep
 
 
+def adler32_file(path: str) -> str:
+    """The adler32 of a file as dCache reports it: 8 lowercase hex digits."""
+    value = 1
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(ADLER32_CHUNK)
+            if not chunk:
+                break
+            value = zlib.adler32(chunk, value)
+    return "{:08x}".format(value & 0xFFFFFFFF)
+
+
+def _norm_adler32(value: Any) -> Optional[str]:
+    """A remote adler32 in the form of :func:`adler32_file`, or ``None``."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if not text or not re.match(r"^[0-9a-f]{1,8}$", text):
+        return None
+    return text.zfill(8)
+
+
+def parse_fdp_stat(text: str) -> List[Dict[str, Any]]:
+    """The entries printed by ``fdp-stat --json``; ValueError if not JSON.
+
+    The tool prints a list of objects; a single object is accepted too.
+    """
+    data = json.loads(text or "")
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise ValueError("fdp-stat --json printed {}".format(type(data).__name__))
+    return [e for e in data if isinstance(e, dict)]
+
+
+def _stat_size(entry: Mapping[str, Any]) -> Optional[int]:
+    try:
+        return int(entry.get("size"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _stat_adler32(entry: Mapping[str, Any]) -> Optional[str]:
+    sums = entry.get("checksums")
+    if isinstance(sums, dict):
+        return _norm_adler32(sums.get("adler32") or sums.get("ADLER32"))
+    if isinstance(sums, list):          # [{"type": "adler32", "value": ...}]
+        for item in sums:
+            if isinstance(item, dict) and str(
+                    item.get("type", "")).lower() == "adler32":
+                return _norm_adler32(item.get("value"))
+    return None
+
+
 def _contiguous(pieces: Sequence[Tuple[int, int, str]]
                 ) -> List[List[Tuple[int, int, str]]]:
     """Split time-ordered pieces into runs that abut."""
@@ -774,7 +841,9 @@ CREATE TABLE IF NOT EXISTS files (
     raw_uploaded_at TEXT,
     shifted_uploaded_at TEXT,
     last_error TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    raw_adler32 TEXT,
+    shifted_adler32 TEXT
 );
 CREATE INDEX IF NOT EXISTS files_kind_label ON files (kind, label);
 CREATE TABLE IF NOT EXISTS runs (
@@ -828,6 +897,11 @@ class State:
         if "sent" not in columns:       # a database from before 'sent'
             self.db.execute("ALTER TABLE alerts ADD COLUMN sent INTEGER "
                             "NOT NULL DEFAULT 0")
+        columns = [r[1] for r in self.db.execute("PRAGMA table_info(files)")]
+        for column in ("raw_adler32", "shifted_adler32"):
+            if column not in columns:   # a database from before the cache
+                self.db.execute("ALTER TABLE files ADD COLUMN {} TEXT"
+                                .format(column))
         self.db.commit()
 
     def close(self) -> None:
@@ -850,6 +924,7 @@ class State:
             "ON CONFLICT (raw_path) DO UPDATE SET rows = excluded.rows, "
             "bytes = excluded.bytes, dumped_at = excluded.dumped_at, "
             "shifted_path = excluded.shifted_path, last_error = NULL, "
+            "raw_adler32 = NULL, shifted_adler32 = NULL, "
             "updated_at = excluded.updated_at",
             (raw_path, stream, kind, label, fmt, rows, size, when,
              shifted_path, when))
@@ -889,6 +964,15 @@ class State:
             "SELECT * FROM files WHERE (dumped_at IS NOT NULL AND "
             "raw_uploaded_at IS NULL) OR (shifted_at IS NOT NULL AND "
             "shifted_uploaded_at IS NULL) ORDER BY raw_path").fetchall()
+        return [dict(r) for r in rows]
+
+    def uploaded(self, since: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Rows with a copy recorded uploaded (at or after *since*)."""
+        rows = self.db.execute(
+            "SELECT * FROM files WHERE (raw_uploaded_at IS NOT NULL AND "
+            "raw_uploaded_at >= ?) OR (shifted_uploaded_at IS NOT NULL AND "
+            "shifted_uploaded_at >= ?) ORDER BY raw_path",
+            (since or "", since or "")).fetchall()
         return [dict(r) for r in rows]
 
     def recent_errors(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -1527,7 +1611,8 @@ class Publisher:
         proc = self.run(cmd, timeout=self.cfg["tools"]["shift_timeout"] or None)
         if proc.returncode == 0:
             self.state.update(row["raw_path"], self.stamp(),
-                              shifted_at=self.stamp(), last_error=None)
+                              shifted_at=self.stamp(), last_error=None,
+                              shifted_adler32=None)
             self.done += 1
             log.debug("shifted %s", out)
         else:
@@ -1640,8 +1725,16 @@ class Publisher:
         for dest in sorted(groups):
             items = groups[dest]
             for first in range(0, len(items), UPLOAD_BATCH):
-                code = self._fdp_put(dest, items[first:first + UPLOAD_BATCH])
-                failed = failed or code != 0
+                batch = items[first:first + UPLOAD_BATCH]
+                code = self._fdp_put(dest, batch)
+                ok = code == 0
+                if code not in (4, EXIT_ENV_SCRIPT):
+                    # fdp-put's exit status is not trusted on its own: a
+                    # failed PUT can leave an empty namespace entry that
+                    # --skip-existing then skips.  Only a copy whose size
+                    # and adler32 match on FDP counts as uploaded.
+                    ok = self._verify_batch(dest, batch, code) and ok
+                failed = failed or not ok
                 if code in (4, 7, 124, EXIT_ENV_SCRIPT):
                     # Credentials, the network or the environment: every
                     # further call would fail the same way.  The next
@@ -1650,45 +1743,52 @@ class Publisher:
         if not failed and not self.dry_run:
             self.resolve("upload-exit-%")
 
-    def _fdp_put(self, dest: str, items: Sequence[Tuple[str, str, str]]) -> int:
+    # -- FDP commands
+
+    def _fdp_options(self) -> List[str]:
+        """``--token-file`` and ``--ca-path``, shared by every FDP tool."""
         fdp = self.cfg["fdp"]
-        token_file = os.path.expanduser(fdp["token_file"])
-        argv = ["fdp-put", "--skip-existing", "--token-file", token_file]
+        argv = ["--token-file", os.path.expanduser(fdp["token_file"])]
         if fdp["ca_path"]:
             argv += ["--ca-path", os.path.expanduser(fdp["ca_path"])]
-        argv += ["-j", str(fdp["parallel"])] + list(fdp["extra_args"])
-        argv += [local for _, _, local in items] + [dest + "/"]
+        return argv
+
+    def _fdp_run(self, argv: Sequence[str]) -> subprocess.CompletedProcess:
+        """Run an FDP tool inside ``fdp.env_script``.
+
+        Always *mutating* for :meth:`run`: a dry run prints even the
+        read-only ``fdp-stat`` and contacts nothing.
+        """
+        fdp = self.cfg["fdp"]
         cmd, env = self.via_env_script(argv)
-        env["FDP_TOKEN_DIR"] = os.path.dirname(token_file)
+        env["FDP_TOKEN_DIR"] = os.path.dirname(
+            os.path.expanduser(fdp["token_file"]))
         if fdp["ca_path"]:
             env["FDP_TRANSFER_CA_PATH"] = os.path.expanduser(fdp["ca_path"])
-        proc = self.run(cmd, env=env, timeout=fdp["timeout"])
+        return self.run(cmd, env=env, timeout=fdp["timeout"])
+
+    def _fdp_put(self, dest: str, items: Sequence[Tuple[str, str, str]]) -> int:
+        """``fdp-put`` one batch; records failures, marks nothing uploaded
+        (that is :meth:`_verify_batch`'s job)."""
+        fdp = self.cfg["fdp"]
+        argv = ["fdp-put", "--skip-existing"] + self._fdp_options()
+        argv += ["-j", str(fdp["parallel"])] + list(fdp["extra_args"])
+        argv += [local for _, _, local in items] + [dest + "/"]
+        proc = self._fdp_run(argv)
         code = proc.returncode
-        column = {"raw": "raw_uploaded_at", "shifted": "shifted_uploaded_at"}
         if code == 0:
-            for raw_path, area, local in items:
-                # A row holds both copies: an upload error of the other
-                # copy stays until that copy goes too.
-                other = "shifted" if area == "raw" else "raw"
-                error = (self.state.get(raw_path) or {}).get("last_error")
-                keep = error if error and error.startswith(other + " ") \
-                    else None
-                self.state.update(raw_path, self.stamp(),
-                                  **{column[area]: self.stamp(),
-                                     "last_error": keep})
-            self.done += len(items)
             self.state.kv_set("partial:" + dest, None)
             log.info("%s %d file(s) to %s", "would upload" if self.dry_run
-                     else "uploaded", len(items), dest)
+                     else "fdp-put sent", len(items), dest)
             return code
         meaning = FDP_EXIT.get(code, "error")
         message = "fdp-put to {} exited {} ({}): {}".format(
             dest, code, meaning, _redact(_tail(proc.stderr or proc.stdout)))
         if code == 12:
-            # Some files went, but fdp-put does not say which: nothing is
-            # marked uploaded, and the retry, with --skip-existing, sends
-            # only the rest.  Each row notes the partial so the status grid
-            # shows it; a directory partial twice running is mailed.
+            # Some files went, but fdp-put does not say which; the stat that
+            # follows does.  Each row notes the partial until it is
+            # verified, so the status grid shows it; a directory partial
+            # twice running is mailed.
             note = "partial upload (fdp-put exit 12)"
             key = "partial:" + dest
             repeated = int(self.state.kv_get(key) or 0) + 1
@@ -1725,6 +1825,293 @@ class Publisher:
                    "upload failed: fdp-put exit {} ({})".format(code, meaning),
                    message + "\n\n" + hint.get(code, ""))
         return code
+
+    def remote_stat(self, paths: Sequence[str]
+                    ) -> Tuple[Dict[str, Optional[Dict[str, Any]]],
+                               Dict[str, str]]:
+        """``fdp-stat --json`` *paths*: ``({path: entry or None}, {path:
+        error})``.  ``None`` means not on FDP; a path in the second map
+        could not be checked.
+
+        One call stats the lot; if it fails (``fdp-stat`` exits 5 when any
+        path is missing) each path is asked alone.  A dry run prints the
+        command and returns nothing.
+        """
+        found: Dict[str, Optional[Dict[str, Any]]] = {}
+        errors: Dict[str, str] = {}
+        if not paths:
+            return found, errors
+        base = ["fdp-stat", "--json"] + self._fdp_options() + list(
+            self.cfg["fdp"]["extra_args"])
+        proc = self._fdp_run(base + list(paths))
+        if self.dry_run:
+            return found, errors
+        entries = None
+        if proc.returncode == 0:
+            try:
+                entries = parse_fdp_stat(proc.stdout)
+            except ValueError as exc:
+                problem = "fdp-stat printed no JSON list: {}".format(exc)
+            else:
+                problem = ""
+        else:
+            problem = "fdp-stat exit {}: {}".format(
+                proc.returncode, _redact(_tail(proc.stderr or proc.stdout, 2)))
+        if entries is not None:
+            self._match_stat(paths, entries, found)
+            return found, errors
+        if len(paths) == 1:
+            if proc.returncode == FDP_STAT_NOT_FOUND:
+                found[paths[0]] = None
+            else:
+                errors[paths[0]] = problem
+            return found, errors
+        if proc.returncode in (4, 124, 126, 127, EXIT_ENV_SCRIPT):
+            # Credentials, a timeout or no fdp-stat at all: asking path by
+            # path would only fail the same way, many times over.
+            errors.update((path, problem) for path in paths)
+            return found, errors
+        log.debug("fdp-stat of %d paths failed (%s); one at a time",
+                  len(paths), problem)
+        for path in paths:
+            one, bad = self.remote_stat([path])
+            found.update(one)
+            errors.update(bad)
+        return found, errors
+
+    @staticmethod
+    def _match_stat(paths: Sequence[str], entries: Sequence[Dict[str, Any]],
+                    found: Dict[str, Optional[Dict[str, Any]]]) -> None:
+        """Pair stat entries with the requested paths, by path, else name."""
+        by_path = {str(e.get("path", "")).rstrip("/"): e for e in entries
+                   if e.get("path")}
+        names: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in entries:
+            name = entry.get("name") or os.path.basename(
+                str(entry.get("path", "")).rstrip("/"))
+            names.setdefault(str(name), []).append(entry)
+        for path in paths:
+            entry = by_path.get(path.rstrip("/"))
+            if entry is None:
+                same = names.get(path.rstrip("/").rsplit("/", 1)[-1], [])
+                entry = same[0] if len(same) == 1 else None
+            found[path] = entry
+
+    def local_adler32(self, raw_path: str, area: str, local: str) -> str:
+        """The adler32 of a local copy, cached in the state database."""
+        column = area + "_adler32"
+        cached = (self.state.get(raw_path) or {}).get(column)
+        if cached:
+            return cached
+        value = adler32_file(local)
+        self.state.update(raw_path, self.stamp(), **{column: value})
+        return value
+
+    def remove_remote(self, path: str) -> subprocess.CompletedProcess:
+        argv = ["fdp-rm", "-f"] + self._fdp_options() + list(
+            self.cfg["fdp"]["extra_args"]) + [path]
+        return self._fdp_run(argv)
+
+    def _mark_uploaded(self, raw_path: str, area: str) -> None:
+        # A row holds both copies: an upload error of the other copy stays
+        # until that copy goes too.
+        other = "shifted" if area == "raw" else "raw"
+        error = (self.state.get(raw_path) or {}).get("last_error")
+        keep = error if error and error.startswith(other + " ") else None
+        self.state.update(raw_path, self.stamp(),
+                          **{area + "_uploaded_at": self.stamp(),
+                             "last_error": keep})
+
+    def _verify_batch(self, dest: str, items: Sequence[Tuple[str, str, str]],
+                      put_code: int) -> bool:
+        """Stat one fdp-put batch on FDP and settle each copy.
+
+        Size and adler32 match: uploaded.  Not there: still pending.  There
+        but incomplete (``size -1``, the trace of a failed PUT): removed with
+        ``fdp-rm -f`` so the next run can send it again, unless it was
+        already recorded as uploaded, which is only reported.  Complete but
+        different: never removed, reported and left pending.
+        Returns whether every copy was verified.
+        """
+        remote = {local: dest + "/" + os.path.basename(local)
+                  for _, _, local in items}
+        found, errors = self.remote_stat([remote[local]
+                                          for _, _, local in items])
+        if self.dry_run:
+            self.done += len(items)
+            log.info("would verify %d file(s) on %s", len(items), dest)
+            return True
+        verified = 0
+        for raw_path, area, local in items:
+            path = remote[local]
+            if path in errors:
+                message = "{} upload: cannot verify {}: {}".format(
+                    area, path, errors[path])
+                self.error(message)
+                self.state.update(raw_path, self.stamp(), last_error=message)
+                continue
+            entry = found.get(path)
+            if entry is None:
+                if put_code == 0:
+                    message = ("{} upload: fdp-put exited 0 but {} is not on "
+                               "FDP; will retry".format(area, path))
+                    self.error(message)
+                    self.state.update(raw_path, self.stamp(),
+                                      last_error=message)
+                # Otherwise fdp-put's failure, already recorded, says why.
+                continue
+            size, adler = _stat_size(entry), _stat_adler32(entry)
+            local_size = os.path.getsize(local)
+            local_adler = self.local_adler32(raw_path, area, local)
+            if size == local_size and adler == local_adler:
+                self._mark_uploaded(raw_path, area)
+                verified += 1
+                continue
+            what = "size {}, adler32 {}".format(
+                "?" if size is None else size, adler or "none")
+            if size != -1:
+                # A complete file that differs is never removed (D9, D10):
+                # it may be a published copy from an earlier dump.
+                message = ("{} upload: {} on FDP ({}) differs from {} (size "
+                           "{}, adler32 {}); not replaced".format(
+                               area, path, what, local, local_size,
+                               local_adler))
+                self.error(message)
+                self.state.update(raw_path, self.stamp(), last_error=message)
+                self.alert("upload-mismatch", "uploaded file differs on FDP",
+                           message + "\n\ndCache forbids overwriting (D9); "
+                           "compare the copies and remove the remote one by "
+                           "hand if it is wrong: fdp-rm -f " + path)
+                continue
+            if (self.state.get(raw_path) or {}).get(area + "_uploaded_at"):
+                message = ("{} upload: {} on FDP ({}) differs from {} (size "
+                           "{}, adler32 {}) but is recorded uploaded; not "
+                           "removed".format(area, path, what, local,
+                                            local_size, local_adler))
+                self.error(message)
+                self.state.update(raw_path, self.stamp(), last_error=message)
+                self.alert("upload-mismatch", "uploaded file differs on FDP",
+                           message)
+                continue
+            self._remove_bad_copy(raw_path, area, path, what)
+        self.done += verified
+        log.info("verified %d of %d file(s) on %s", verified, len(items), dest)
+        return verified == len(items)
+
+    def _remove_bad_copy(self, raw_path: str, area: str, path: str,
+                         what: str, repair: bool = False) -> bool:
+        """``fdp-rm -f`` an incomplete remote copy; the row stays pending.
+
+        In an upload that copy is still missing, an error of the run; for
+        ``upload --verify`` (*repair*) it is a repair, and the upload that
+        follows decides.
+        """
+        proc = self.remove_remote(path)
+        if proc.returncode == 0:
+            message = "{} upload: removed {} remote copy ({}); will retry" \
+                .format(area, "incomplete" if what.startswith("size -1")
+                        else "differing", what)
+            (self.warn if repair else self.error)(
+                "{}: {}".format(message, path))
+            self.state.update(raw_path, self.stamp(), last_error=message)
+            return True
+        message = ("{} upload: incomplete remote copy {} ({}) and fdp-rm -f "
+                   "exited {}: {}".format(area, path, what, proc.returncode,
+                                          _redact(_tail(proc.stderr
+                                                        or proc.stdout, 2))))
+        self.error(message)
+        self.state.update(raw_path, self.stamp(), last_error=message)
+        self.alert("upload-rm-failed", "cannot remove an incomplete upload "
+                   "on FDP", message + "\n\nUntil it is removed, fdp-put "
+                   "--skip-existing skips the file.  Remove it by hand: "
+                   "fdp-rm -f " + path)
+        return False
+
+    def verify_uploaded(self, since: Optional[str] = None) -> None:
+        """Re-stat every copy recorded uploaded (``upload --verify``).
+
+        A copy that is gone, or is an incomplete ``size -1`` entry (which is
+        removed), goes back to pending for the upload that follows; one
+        that differs otherwise cannot be replaced (D9) and is reported.
+        """
+        groups: Dict[str, List[Tuple[str, str, str]]] = {}
+        for row in self.state.uploaded(since):
+            for area, local in (("raw", row["raw_path"]),
+                                ("shifted", row["shifted_path"])):
+                stamp = row[area + "_uploaded_at"]
+                if not stamp or (since and stamp < since) or not local:
+                    continue
+                dest = self.remote_dir(local, area)
+                if dest is not None:
+                    groups.setdefault(dest, []).append(
+                        (row["raw_path"], area, local))
+        counts = {"checked": 0, "ok": 0, "reset": 0, "mismatch": 0,
+                  "unchecked": 0}
+        self.detail["verify"] = counts
+        log.info("verifying %d uploaded file(s) in %d director(y/ies)",
+                 sum(len(v) for v in groups.values()), len(groups))
+        for dest in sorted(groups):
+            items = groups[dest]
+            for first in range(0, len(items), UPLOAD_BATCH):
+                self._reverify(dest, items[first:first + UPLOAD_BATCH], counts)
+        log.info("verify: %s", ", ".join("{} {}".format(v, k)
+                                          for k, v in counts.items()))
+
+    def _reverify(self, dest: str, items: Sequence[Tuple[str, str, str]],
+                  counts: Dict[str, int]) -> None:
+        remote = {local: dest + "/" + os.path.basename(local)
+                  for _, _, local in items}
+        found, errors = self.remote_stat([remote[local]
+                                          for _, _, local in items])
+        if self.dry_run:
+            return
+        column = {"raw": "raw_uploaded_at", "shifted": "shifted_uploaded_at"}
+        for raw_path, area, local in items:
+            path = remote[local]
+            counts["checked"] += 1
+            if path in errors:
+                counts["unchecked"] += 1
+                self.error("{} verify: cannot stat {}: {}".format(
+                    area, path, errors[path]))
+                continue
+            entry = found.get(path)
+            if entry is None:
+                counts["reset"] += 1
+                message = ("{} upload: recorded uploaded but {} is not on "
+                           "FDP; will retry".format(area, path))
+                self.warn(message)
+                self.state.update(raw_path, self.stamp(), last_error=message,
+                                  **{column[area]: None})
+                continue
+            size, adler = _stat_size(entry), _stat_adler32(entry)
+            what = "size {}, adler32 {}".format(
+                "?" if size is None else size, adler or "none")
+            if size == -1:
+                counts["reset"] += 1
+                self._remove_bad_copy(raw_path, area, path, what, repair=True)
+                self.state.update(raw_path, self.stamp(),
+                                  **{column[area]: None})
+                continue
+            if not os.path.isfile(local):
+                counts["unchecked"] += 1
+                self.warn("{} verify: {} is on FDP ({}) but {} is gone; not "
+                          "compared".format(area, path, what, local))
+                continue
+            local_size = os.path.getsize(local)
+            local_adler = self.local_adler32(raw_path, area, local)
+            if size == local_size and adler == local_adler:
+                counts["ok"] += 1
+                continue
+            counts["mismatch"] += 1
+            message = ("{} upload: {} on FDP ({}) differs from {} (size {}, "
+                       "adler32 {}); not replaced".format(
+                           area, path, what, local, local_size, local_adler))
+            self.error(message)
+            self.state.update(raw_path, self.stamp(), last_error=message)
+            self.alert("upload-mismatch", "uploaded file differs on FDP",
+                       message + "\n\ndCache forbids overwriting (D9); "
+                       "compare the copies and remove the remote one by hand "
+                       "if it is wrong: fdp-rm -f " + path)
 
     # -- jobs
 
@@ -1895,6 +2282,23 @@ class Publisher:
         return None
 
     def job_upload(self, args) -> Optional[int]:
+        since = None
+        if getattr(args, "since", None):
+            if not getattr(args, "verify", False):
+                log.error("--since needs --verify")
+                return EXIT_USAGE
+            try:
+                day = date.fromisoformat(args.since)
+            except ValueError:
+                log.error("--since wants YYYY-MM-DD, got %r", args.since)
+                return EXIT_USAGE
+            since = _utc_iso(datetime.combine(day, dtime(0), tzinfo=self.zone))
+        if getattr(args, "verify", False):
+            if not self.cfg["fdp"]["enabled"]:
+                log.info("verify skipped: fdp.enabled is false")
+                return None
+            # Under the upload lock: this job's own lock is upload.lock.
+            self.verify_uploaded(since)
         self.upload()
         return None
 
@@ -2182,6 +2586,8 @@ class Publisher:
         script = os.path.expanduser(self.cfg["fdp"]["env_script"])
         add("env script", os.path.isfile(script), script)
         for name, argv in (("fdp-put", ["fdp-put", "--version"]),
+                           ("fdp-stat", ["bash", "-c", "command -v fdp-stat"]),
+                           ("fdp-rm", ["bash", "-c", "command -v fdp-rm"]),
                            ("htgettoken",
                             ["bash", "-c", "command -v htgettoken"])):
             cmd, env = self.via_env_script(argv)
@@ -2774,8 +3180,15 @@ def build_parser() -> argparse.ArgumentParser:
                    default=True, help="daily files")
     p.add_argument("--no-upload", dest="upload", action="store_false",
                    help="dump and shift only")
-    sub.add_parser("upload", parents=[common],
-                   help="retry every upload not yet done")
+    p = sub.add_parser("upload", parents=[common],
+                       help="retry every upload not yet done")
+    p.add_argument("--verify", action="store_true",
+                   help="first re-check every file recorded uploaded "
+                        "against FDP (size and adler32); missing or "
+                        "incomplete copies go back to pending")
+    p.add_argument("--since", metavar="YYYY-MM-DD",
+                   help="with --verify: only files uploaded on or after "
+                        "this local date")
     p = sub.add_parser("token", parents=[common],
                        help="create the shift token for a data month if "
                             "missing")

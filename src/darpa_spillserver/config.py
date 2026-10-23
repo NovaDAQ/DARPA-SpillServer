@@ -232,6 +232,13 @@ class IngestConfig:
     """Stop the poller after this many consecutive failures; 0 means never
     stop, which is what an unattended deployment wants."""
 
+    max_future: float = 86400.0
+    """Seconds an event may lie ahead of this host's clock before it is
+    dropped instead of stored.  A TDU coming up with its clock unset can
+    report a sentinel time (INT64_MAX ticks, the year 6576); stored, it
+    would become the source's resume point and stop all further ingest.
+    0 disables the check."""
+
 
 @dataclass
 class StorageConfig:

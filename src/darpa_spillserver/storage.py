@@ -517,18 +517,24 @@ class SpillStore:
         self,
         spill_type: Optional[SpillType] = None,
         sources: Optional[Sequence[str]] = None,
+        before: Optional[int] = None,
     ) -> Optional[SpillEvent]:
-        """The most recent stored event, optionally of one type or source."""
-        return self._extreme("DESC", spill_type, sources)
+        """The most recent stored event, optionally of one type or source,
+        and optionally only among events earlier than *before* (NOvA ticks)."""
+        return self._extreme("DESC", spill_type, sources, before)
 
     def earliest(
         self, sources: Optional[Sequence[str]] = None
     ) -> Optional[SpillEvent]:
         return self._extreme("ASC", None, sources)
 
-    def _extreme(self, order, spill_type, sources) -> Optional[SpillEvent]:
+    def _extreme(self, order, spill_type, sources,
+                 before: Optional[int] = None) -> Optional[SpillEvent]:
         where: List[str] = []
         params: List[object] = []
+        if before is not None:
+            where.append("nova_time < ?")
+            params.append(int(before))
         if spill_type is not None:
             where.append("spill_type = ?")
             params.append(int(spill_type))

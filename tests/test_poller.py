@@ -309,3 +309,52 @@ async def test_default_events_sit_inside_the_cold_start_backfill(config, store):
 
     assert events[0].nova_time >= window_start
     assert events[-1].nova_time <= nova_now()
+
+
+#: What a TDU reported for one event while coming up after a power outage
+#: with its clock unset: the largest signed 64-bit tick count (year 6576).
+SENTINEL_NOVA = 2 ** 63 - 1
+
+
+def sentinel_event():
+    return SpillEvent(nova_time=SENTINEL_NOVA, spill_type=SpillType.FAKE,
+                      signal_code=-1, event_number=10663,
+                      source=DEFAULT_SOURCE, route="spill_history")
+
+
+async def test_an_event_far_in_the_future_is_dropped(config, store):
+    events = make_events(5)
+    client = StubClient(events=events + [sentinel_event()])
+    poller = Poller(config, store, client=client)
+
+    inserted = await poller.poll_once()
+
+    assert inserted == 5
+    assert store.latest().nova_time == events[-1].nova_time
+    assert poller.status.events_rejected == 1
+    assert poller.status.watermark_nova == events[-1].nova_time
+    assert poller.status.as_dict()["events_rejected"] == 1
+
+
+async def test_a_stored_future_event_does_not_stall_the_source(config, store):
+    """The 2026-10-22 failure: a sentinel stored before the check existed
+    became the resume point, and every later poll asked for events after the
+    year 6576.  The watermark now ignores it."""
+    events = make_events(5)
+    store.insert_events(events + [sentinel_event()])
+    client = StubClient(events=events)
+    poller = Poller(config, store, client=client)
+
+    await poller.poll_once()
+
+    expected = events[-1].nova_time - int(config.ingest.overlap * TICKS_PER_SECOND)
+    assert client.calls[0]["since"] == expected
+
+
+async def test_max_future_zero_disables_the_check(config, store):
+    config.ingest.max_future = 0
+    client = StubClient(events=make_events(2) + [sentinel_event()])
+    poller = Poller(config, store, client=client)
+
+    assert await poller.poll_once() == 3
+    assert poller.status.events_rejected == 0

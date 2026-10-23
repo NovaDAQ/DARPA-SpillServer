@@ -145,6 +145,7 @@ removing a source is done here, followed by a restart.
 | `overlap` | `5.0` | seconds of archived time re-read each poll |
 | `backfill` | `3600.0` | seconds requested on a cold start |
 | `max_consecutive_errors` | `0` | `0` never gives up |
+| `max_future` | `86400.0` | seconds an event may lie ahead of this host's clock; later events (e.g. the INT64_MAX sentinel a TDU reports with its clock unset) are dropped and counted in `events_rejected`, and never become a resume point. `0` disables |
 
 CLI: `--no-ingest`, `--interval`, `--batch-limit`, `--overlap`, `--backfill`.
 

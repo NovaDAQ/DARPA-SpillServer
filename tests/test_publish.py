@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -96,25 +97,141 @@ fi
 cp "$last" "$out"
 '''
 
-FAKE_FDP_PUT = r'''#!{python}
-import json, os, sys
+#: The fake FDP tools share a tiny remote store under REMOTE: the entry for
+#: remote path P is the JSON file REMOTE + P holding its size and adler32
+#: ({"size": -1, "adler32": null} for the empty entry a failed PUT leaves).
+FAKE_FDP_COMMON = r'''
+import json, os, sys, zlib
 LOG = {log!r}
 CTL = {ctl!r}
-code = 0
-codes = os.path.join(CTL, "fdp-put.codes")
-if os.path.exists(codes):
-    lines = open(codes).read().split()
-    if lines:
-        code = int(lines[0])
-        open(codes, "w").write("\n".join(lines[1:]))
-with open(os.path.join(LOG, "fdp-put.log"), "a") as h:
-    h.write(json.dumps({{"argv": sys.argv[1:],
-                        "token_dir": os.environ.get("FDP_TOKEN_DIR"),
-                        "ca_path": os.environ.get("FDP_TRANSFER_CA_PATH"),
-                        "sourced": os.environ.get("FAKE_ENV_SOURCED"),
-                        "code": code}}) + "\n")
+REMOTE = {remote!r}
+VALUED = ("--token-file", "--ca-path", "-j")
+
+def next_code(tool):
+    path = os.path.join(CTL, tool + ".codes")
+    if os.path.exists(path):
+        lines = open(path).read().split()
+        if lines:
+            open(path, "w").write("\n".join(lines[1:]))
+            return int(lines[0])
+    return 0
+
+def positional(argv):
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a in VALUED:
+            skip = True
+        elif not a.startswith("-"):
+            out.append(a)
+    return out
+
+def entry_file(path):
+    return REMOTE + path
+
+def read_entry(path):
+    try:
+        return json.load(open(entry_file(path)))
+    except OSError:
+        return None
+
+def write_entry(path, size, adler):
+    os.makedirs(os.path.dirname(entry_file(path)), exist_ok=True)
+    with open(entry_file(path), "w") as h:
+        json.dump({{"size": size, "adler32": adler}}, h)
+
+def adler32(local):
+    value = 1
+    with open(local, "rb") as h:
+        for chunk in iter(lambda: h.read(65536), b""):
+            value = zlib.adler32(chunk, value)
+    return "%08x" % (value & 0xffffffff)
+
+def record(tool, **extra):
+    data = {{"argv": sys.argv[1:], "token_dir": os.environ.get("FDP_TOKEN_DIR"),
+             "ca_path": os.environ.get("FDP_TRANSFER_CA_PATH"),
+             "sourced": os.environ.get("FAKE_ENV_SOURCED")}}
+    data.update(extra)
+    with open(os.path.join(LOG, tool + ".log"), "a") as h:
+        h.write(json.dumps(data) + "\n")
+'''
+
+FAKE_FDP_PUT = r'''#!{python}
+''' + FAKE_FDP_COMMON + r'''
+# exit 0 sends every file; exit 12 leaves an empty entry (size -1) for the
+# files named in fdp-put.fail (default: the first one sent) and sends the
+# rest; any other exit sends nothing.  --skip-existing skips any entry.
+code = next_code("fdp-put")
+if "--version" in sys.argv:
+    print("fdp-put 0.0-fake")
+    sys.exit(0)
+args = positional(sys.argv[1:])
+sources, dest = args[:-1], args[-1].rstrip("/")
+failing = os.path.join(CTL, "fdp-put.fail")
+fail = open(failing).read().split() if os.path.exists(failing) else None
+dropping = os.path.join(CTL, "fdp-put.drop")
+dropped = open(dropping).read().split() if os.path.exists(dropping) else []
+sent, skipped = [], []
+if code in (0, 12):
+    for local in sources:
+        target = dest + "/" + os.path.basename(local)
+        if "--skip-existing" in sys.argv and read_entry(target) is not None:
+            skipped.append(target)
+            continue
+        broken = code == 12 and (os.path.basename(local) in fail
+                                 if fail is not None else not sent)
+        if os.path.basename(local) in dropped:
+            sent.append((target, True))     # "sent", but nothing arrives
+        elif broken:
+            write_entry(target, -1, None)
+            sys.stderr.write("PUT {{}}: SSL connect error\n".format(target))
+        else:
+            write_entry(target, os.path.getsize(local), adler32(local))
+        sent.append((target, broken))
+record("fdp-put", code=code, skipped=skipped)
 if code:
     sys.stderr.write("fake fdp-put exit {{}}\n".format(code))
+sys.exit(code)
+'''
+
+FAKE_FDP_STAT = r'''#!{python}
+''' + FAKE_FDP_COMMON + r'''
+# Prints the entries it finds; exits 5 if any path is missing (after
+# printing the rest), like a tool that treats not-found as an error.
+code = next_code("fdp-stat")
+paths = positional(sys.argv[1:])
+record("fdp-stat", code=code, paths=paths)
+if code:
+    sys.stderr.write("fake fdp-stat exit {{}}\n".format(code))
+    sys.exit(code)
+out, missing = [], False
+for path in paths:
+    e = read_entry(path)
+    if e is None:
+        missing = True
+        continue
+    out.append({{"path": path, "name": os.path.basename(path), "type": "file",
+                "size": e["size"], "mtime": 1792000000,
+                "checksums": {{"adler32": e["adler32"]}} if e["adler32"]
+                else {{}}}})
+print(json.dumps(out))
+if missing:
+    sys.stderr.write("not found\n")
+    sys.exit(5)
+'''
+
+FAKE_FDP_RM = r'''#!{python}
+''' + FAKE_FDP_COMMON + r'''
+code = next_code("fdp-rm")
+paths = positional(sys.argv[1:])
+record("fdp-rm", code=code, paths=paths)
+if not code:
+    for path in paths:
+        if os.path.exists(entry_file(path)):
+            os.remove(entry_file(path))
+        elif "-f" not in sys.argv:
+            sys.exit(5)
 sys.exit(code)
 '''
 
@@ -175,14 +292,18 @@ class Rig:
         self.state_dir = tmp_path / "state"
         self.status_dir = tmp_path / "status"
         self.tokens = tmp_path / "tokens"
-        for d in (self.bin, self.logs, self.ctl):
+        self.remote = tmp_path / "remote"
+        for d in (self.bin, self.logs, self.ctl, self.remote):
             d.mkdir()
         self.tokens.mkdir(mode=0o700)
         fmt = dict(python=sys.executable, log=str(self.logs), ctl=str(self.ctl),
-                   db=str(archive_path), password=PASSWORD)
+                   db=str(archive_path), password=PASSWORD,
+                   remote=str(self.remote))
         for name, text in (("darpa-spill-dump", FAKE_DUMP),
                            ("fake-shift", FAKE_SHIFT),
                            ("fdp-put", FAKE_FDP_PUT),
+                           ("fdp-stat", FAKE_FDP_STAT),
+                           ("fdp-rm", FAKE_FDP_RM),
                            ("htgettoken", FAKE_HTGETTOKEN),
                            ("klist", FAKE_KLIST), ("kinit", FAKE_KINIT),
                            ("mailx", FAKE_MAILX)):
@@ -278,6 +399,16 @@ class Rig:
     def runs(self):
         with self.db() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM runs ORDER BY id")]
+
+    def remote_entry(self, path):
+        """The fake FDP store's entry for remote *path*, or None."""
+        entry = self.remote / path.lstrip("/")
+        return json.loads(entry.read_text()) if entry.exists() else None
+
+    def set_remote(self, path, size, adler32):
+        entry = self.remote / path.lstrip("/")
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text(json.dumps({"size": size, "adler32": adler32}))
 
     def set_codes(self, tool, *codes):
         (self.ctl / "{}.codes".format(tool)).write_text(
@@ -529,7 +660,16 @@ def test_a_hole_in_the_catchup_window_is_refilled_alone(rig):
     lost.unlink()
     with rig.db() as conn:
         conn.execute("DELETE FROM files WHERE raw_path = ?", (str(lost),))
-    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 20)) == 0
+    # The new dump differs from the complete copy already on FDP.  That copy
+    # may be the published one, so it is never removed automatically (D9,
+    # D10): the file stays pending with an error for a person to resolve.
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 20)) == 3
+    assert rig.log("fdp-rm.log") == []
+    error = rig.files()[str(lost)]["last_error"]
+    assert "differs from" in error and "not replaced" in error
+    # Every pending copy conflicts, so the retry fails outright (exit 1).
+    assert rig.main("upload", now=utc(2026, 10, 22, 18, 25)) == 1
+    assert rig.files()[str(lost)]["raw_uploaded_at"] is None
     call = rig.log("dump.log")[-1]
     assert "--start=2026-10-22T11:00:00-05:00" in call
     assert "--end=2026-10-22T12:00:00-05:00" in call
@@ -729,19 +869,252 @@ def test_upload_auth_or_network_failure_then_retry(rig, code):
     assert status["jobs"]["upload"]["result"] == "ok"
 
 
-def test_partial_upload_marks_nothing_and_retry_finishes(rig):
+RAW_DIR = "/amsc/novaend/raw/oct/2026-oct-22/"
+SHIFTED_DIR = "/amsc/public/novaend/shifted/oct/2026-oct-22/"
+ZOMBIE_ERROR = ("raw upload: removed incomplete remote copy (size -1, "
+                "adler32 none); will retry")
+
+
+def test_partial_upload_zombie_is_removed_and_retried(rig):
     rig.set_codes("fdp-put", 12, 0)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 3
-    rows = rig.files().values()
-    assert not any(r["raw_uploaded_at"] for r in rows)
-    # The shifted group (second call) succeeded.
-    assert all(r["shifted_uploaded_at"] for r in rows)
+    zombie = RAW_DIR + "nd-all-2026-10-22T12-0500.csv"
+    files = rig.files()
+    row = files[str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.csv")]
+    # The failed PUT left an empty entry: removed, the copy still pending.
+    assert row["raw_uploaded_at"] is None and row["last_error"] == ZOMBIE_ERROR
+    assert rig.log("fdp-rm.log")[0]["paths"] == [zombie]
+    assert rig.log("fdp-rm.log")[0]["argv"][0] == "-f"
+    assert rig.remote_entry(zombie) is None
+    # The rest of the partial batch is on FDP and verified, so uploaded.
+    others = [r for p, r in files.items() if p != row["raw_path"]]
+    assert len(others) == 1 and others[0]["raw_uploaded_at"]
+    assert all(r["shifted_uploaded_at"] for r in files.values())
+    status = json.loads((rig.status_dir / "status.json").read_text())
+    assert status["pending_uploads"] == 1
     # One partial is not mailed.
     assert not [m for m in rig.mails() if "upload" in m["argv"][1]]
+
     assert rig.main("upload", now=utc(2026, 10, 22, 18, 25)) == 0
-    last = rig.log("fdp-put.log")[-1]["argv"]
-    assert last[-1] == "/amsc/novaend/raw/oct/2026-oct-22/"
-    assert all(r["raw_uploaded_at"] for r in rig.files().values())
+    last = rig.log("fdp-put.log")[-1]
+    assert last["argv"][-1] == RAW_DIR and last["skipped"] == []
+    assert [a for a in last["argv"] if a.endswith(".csv")] == [row["raw_path"]]
+    assert all(r["raw_uploaded_at"] and not r["last_error"]
+               for r in rig.files().values())
+    assert rig.remote_entry(zombie)["size"] == os.path.getsize(row["raw_path"])
+    status = json.loads((rig.status_dir / "status.json").read_text())
+    assert status["pending_uploads"] == 0
+
+
+def test_skip_existing_over_a_zombie_is_not_marked_uploaded(rig):
+    """The gateway bug: the retry's --skip-existing skipped the empty entry
+    a failed PUT left, exited 0, and every file was recorded uploaded."""
+    rig.set_codes("fdp-put", 12, 0)
+    rig.set_codes("fdp-rm", 1)                 # the zombie survives run 1
+    raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.csv")
+    zombie = RAW_DIR + "nd-all-2026-10-22T12-0500.csv"
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 3
+    assert rig.remote_entry(zombie) == {"size": -1, "adler32": None}
+    assert "fdp-rm -f exited 1" in rig.files()[raw]["last_error"]
+    assert "cannot remove an incomplete upload" in rig.mails()[-1]["argv"][1]
+
+    # Retry: fdp-put skips the zombie and exits 0; the stat catches it.
+    assert rig.main("upload", now=utc(2026, 10, 22, 18, 25)) == 1
+    put = rig.log("fdp-put.log")[-1]
+    assert put["code"] == 0 and put["skipped"] == [zombie]
+    row = rig.files()[raw]
+    assert row["raw_uploaded_at"] is None and row["last_error"] == ZOMBIE_ERROR
+    assert rig.remote_entry(zombie) is None
+    assert "--replace" not in [a for c in rig.log("fdp-put.log")
+                               for a in c["argv"]]
+
+    assert rig.main("upload", now=utc(2026, 10, 22, 18, 40)) == 0
+    row = rig.files()[raw]
+    assert row["raw_uploaded_at"] and not row["last_error"]
+
+
+def test_a_missing_remote_file_stays_pending(rig):
+    (rig.ctl / "fdp-put.drop").write_text("nd-all-2026-10-22T12-0500.json\n")
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 3
+    raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.json")
+    row = rig.files()[raw]
+    assert row["raw_uploaded_at"] is None and row["shifted_uploaded_at"]
+    assert "fdp-put exited 0 but" in row["last_error"]
+    assert "is not on FDP" in row["last_error"]
+    assert rig.log("fdp-rm.log") == []
+    # fdp-stat exits 5 for the batch, so each path is asked alone.
+    stats = [c["paths"] for c in rig.log("fdp-stat.log")]
+    assert len(stats[0]) == 2 and stats[1:3] == [[p] for p in stats[0]]
+    status = json.loads((rig.status_dir / "status.json").read_text())
+    assert status["pending_uploads"] == 1
+    assert status["hourly"]["grid"]["2026-10-22T12-0500"]["all"] == "error"
+    (rig.ctl / "fdp-put.drop").unlink()
+    assert rig.main("upload", now=utc(2026, 10, 22, 18, 25)) == 0
+    row = rig.files()[raw]
+    assert row["raw_uploaded_at"] and not row["last_error"]
+
+
+def test_a_good_remote_file_is_uploaded_only_after_the_stat_matches(rig):
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
+    stats = rig.log("fdp-stat.log")
+    assert len(stats) == 2                       # one per batch, both found
+    for call in stats:
+        argv = call["argv"]
+        assert argv[0] == "--json" and call["sourced"] == "yes"
+        assert argv[argv.index("--token-file") + 1] == str(rig.tokens / "fdp_bt_test")
+        assert argv[argv.index("--ca-path") + 1] == str(rig.root / "certs")
+        assert call["token_dir"] == str(rig.tokens)
+    assert sorted(len(c["paths"]) for c in stats) == [2, 2]
+    for row in rig.files().values():
+        assert row["raw_adler32"] == publish.adler32_file(row["raw_path"])
+        assert row["shifted_adler32"] == publish.adler32_file(row["shifted_path"])
+
+    # A complete copy with a wrong checksum keeps the file pending and is
+    # left on FDP: only size -1 leftovers of failed PUTs are removed.
+    rig.configure(fdp={"enabled": False})
+    assert rig.main("hourly", now=utc(2026, 10, 22, 19, 10)) == 0
+    rig.configure(fdp={"enabled": True})
+    name = "nd-all-2026-10-22T13-0500.csv"
+    raw = str(rig.data / "raw/oct/2026-oct-22" / name)
+    rig.set_remote(RAW_DIR + name, os.path.getsize(raw), "0000beef")
+    assert rig.main("upload", now=utc(2026, 10, 22, 19, 20)) == 3
+    row = rig.files()[raw]
+    assert row["raw_uploaded_at"] is None
+    assert "adler32 0000beef) differs from" in row["last_error"]
+    assert "not replaced" in row["last_error"]
+    assert rig.log("fdp-rm.log") == []
+    assert rig.remote_entry(RAW_DIR + name)["adler32"] == "0000beef"
+
+
+def test_upload_verify_repairs_zombies_and_reports_mismatches(rig):
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
+    rows = rig.files()
+    zombie = RAW_DIR + "nd-all-2026-10-22T12-0500.csv"
+    gone = SHIFTED_DIR + "nd-all-2026-10-22T12-0500.shifted.csv"
+    differs = RAW_DIR + "nd-all-2026-10-22T12-0500.json"
+    differs_raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.json")
+    rig.set_remote(zombie, -1, None)
+    (rig.remote / gone.lstrip("/")).unlink()
+    rig.set_remote(differs, rows[differs_raw]["bytes"], "12345678")
+    stats_before = len(rig.log("fdp-stat.log"))
+    # A plain upload does not look at uploaded files.
+    assert rig.main("upload", now=utc(2026, 10, 22, 18, 20)) == 0
+    assert len(rig.log("fdp-stat.log")) == stats_before
+
+    assert rig.main("upload", "--verify", now=utc(2026, 10, 22, 18, 30)) == 3
+    # Only the size -1 entry is removed; a real mismatch is never touched.
+    assert [c["paths"] for c in rig.log("fdp-rm.log")] == [[zombie]]
+    assert rig.remote_entry(differs)["adler32"] == "12345678"
+    row = rig.files()[differs_raw]
+    assert row["raw_uploaded_at"] == rows[differs_raw]["raw_uploaded_at"]
+    assert "differs from" in row["last_error"]
+    assert "not replaced" in row["last_error"]
+    mail = rig.mails()[-1]
+    assert mail["argv"][1] == "[darpa-spill-publish] uploaded file differs on FDP"
+    assert "fdp-rm -f " + differs in mail["body"]
+    # The zombie and the missing copy were reset and sent again.
+    csv = rig.files()[str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.csv")]
+    assert csv["raw_uploaded_at"] > rows[csv["raw_path"]]["raw_uploaded_at"]
+    assert csv["shifted_uploaded_at"] > rows[csv["raw_path"]]["shifted_uploaded_at"]
+    assert not csv["last_error"]
+    assert rig.remote_entry(zombie)["size"] == csv["bytes"]
+    assert rig.remote_entry(gone)["size"] > 0
+    run = rig.runs()[-1]
+    assert json.loads(run["detail"])["verify"] == {
+        "checked": 4, "ok": 1, "reset": 2, "mismatch": 1, "unchecked": 0}
+    status = json.loads((rig.status_dir / "status.json").read_text())
+    assert status["pending_uploads"] == 0
+
+
+def test_a_mismatch_on_a_copy_already_recorded_uploaded_is_never_removed(rig):
+    rig.configure(fdp={"enabled": False})
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
+    raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.csv")
+    remote = RAW_DIR + "nd-all-2026-10-22T12-0500.csv"
+    rig.set_remote(remote, -1, None)
+    pub = publisher(rig, now=utc(2026, 10, 22, 18, 20))
+    # Recorded by another run between the pending query and the stat.
+    pub.state.update(raw, pub.stamp(), raw_uploaded_at=pub.stamp())
+    assert pub._verify_batch(RAW_DIR.rstrip("/"), [(raw, "raw", raw)], 0) is False
+    pub.state.close()
+    assert rig.log("fdp-rm.log") == []
+    assert rig.remote_entry(remote) == {"size": -1, "adler32": None}
+    assert "recorded uploaded; not removed" in rig.files()[raw]["last_error"]
+    assert rig.mails()[-1]["argv"][1] == \
+        "[darpa-spill-publish] uploaded file differs on FDP"
+
+
+def test_upload_verify_since_and_dry_run(rig, capsys):
+    assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
+    stats = len(rig.log("fdp-stat.log"))
+    assert rig.main("upload", "--verify", "--since", "2026-10-23",
+                    now=utc(2026, 10, 23, 18)) == 0
+    assert len(rig.log("fdp-stat.log")) == stats
+    assert rig.main("upload", "--since", "2026-10-23",
+                    now=utc(2026, 10, 23, 18)) == publish.EXIT_USAGE
+    assert rig.main("upload", "--verify", "--since", "10/22",
+                    now=utc(2026, 10, 23, 18)) == publish.EXIT_USAGE
+
+    rig.set_remote(RAW_DIR + "nd-all-2026-10-22T12-0500.csv", -1, None)
+    before = (rig.state_dir / "publish.db").read_bytes()
+    capsys.readouterr()
+    assert rig.main("-n", "upload", "--verify", "--since", "2026-10-22",
+                    now=utc(2026, 10, 23, 18)) == 0
+    out = capsys.readouterr().out
+    assert out.count("fdp-stat --json") == 2
+    assert len(rig.log("fdp-stat.log")) == stats and rig.log("fdp-rm.log") == []
+    assert (rig.state_dir / "publish.db").read_bytes() == before
+
+    assert rig.main("upload", "--verify", "--since", "2026-10-22",
+                    now=utc(2026, 10, 23, 18, 10)) == 0
+    assert len(rig.log("fdp-stat.log")) > stats
+    assert len(rig.log("fdp-rm.log")) == 1
+
+
+def test_adler32_formatting_and_stat_parsing(tmp_path):
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    assert publish.adler32_file(str(empty)) == "00000001"
+    small = tmp_path / "a"
+    small.write_bytes(b"a")
+    assert publish.adler32_file(str(small)) == "00620062"
+    big = tmp_path / "big"
+    data = bytes(range(256)) * 9000             # > 2 MiB: several chunks
+    big.write_bytes(data)
+    assert publish.adler32_file(str(big)) == "{:08x}".format(zlib.adler32(data))
+    assert publish._norm_adler32("620062") == "00620062"
+    assert publish._norm_adler32("0xC4E71A00") == "c4e71a00"
+    assert publish._norm_adler32("") is None and publish._norm_adler32(None) is None
+    entry = {"path": "/x/f", "name": "f", "type": "file", "size": 5509453,
+             "checksums": {"adler32": "c4e71a00"}}
+    assert publish.parse_fdp_stat(json.dumps([entry])) == [entry]
+    assert publish.parse_fdp_stat(json.dumps(entry)) == [entry]
+    with pytest.raises(ValueError):
+        publish.parse_fdp_stat("not json")
+    assert publish._stat_adler32({"checksums": {}}) is None
+    assert publish._stat_adler32({"checksums": [
+        {"type": "ADLER32", "value": "1a00"}]}) == "00001a00"
+    assert publish._stat_size({"size": -1}) == -1
+
+
+def test_old_state_database_gains_the_checksum_columns(tmp_path):
+    path = tmp_path / "publish.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        "CREATE TABLE files (raw_path TEXT PRIMARY KEY, stream TEXT NOT NULL, "
+        "kind TEXT NOT NULL, label TEXT NOT NULL, fmt TEXT NOT NULL, rows "
+        "INTEGER, bytes INTEGER, dumped_at TEXT, shifted_path TEXT, "
+        "shifted_at TEXT, raw_uploaded_at TEXT, shifted_uploaded_at TEXT, "
+        "last_error TEXT, updated_at TEXT);"
+        "INSERT INTO files (raw_path, stream, kind, label, fmt) VALUES "
+        "('/r', 'all', 'hourly', 'L', 'csv');")
+    conn.commit()
+    conn.close()
+    state = publish.State(str(path))
+    assert state.get("/r")["raw_adler32"] is None
+    state.update("/r", "now", raw_adler32="00000001")
+    assert state.get("/r")["raw_adler32"] == "00000001"
+    state.close()
 
 
 def test_upload_groups_by_destination_directory(rig):
@@ -1007,11 +1380,13 @@ def test_dry_run_prints_commands_and_writes_nothing(rig, capsys):
     assert "fake-shift token --dist gauss --sigma 50us --cut 3sigma" in out
     assert "fake-shift apply -q --token-file" in out
     assert "fdp-put --skip-existing" in out
+    assert "fdp-stat --json" in out
     assert "mailx -s" in out
     for path in (rig.data, rig.state_dir, rig.status_dir):
         assert not path.exists()
     assert list(rig.tokens.iterdir()) == []
     assert rig.log("dump.log") == [] and rig.log("fdp-put.log") == []
+    assert rig.log("fdp-stat.log") == [] and rig.log("fdp-rm.log") == []
     assert rig.mails() == []
 
 
@@ -1266,12 +1641,15 @@ def test_a_batch_partial_twice_is_alerted(rig):
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     rig.configure(fdp={"enabled": True})
     rig.set_codes("fdp-put", 12, 12, 12, 12)
-    assert rig.main("upload", now=utc(2026, 10, 22, 18, 25)) == 1
+    # Each batch leaves its first file behind; the rest are verified.
+    assert rig.main("upload", now=utc(2026, 10, 22, 18, 25)) == 3
     assert not [m for m in rig.mails() if "upload" in m["argv"][1]]
-    assert all("partial upload" in r["last_error"]
-               for r in rig.files().values())
+    errors = [r for r in rig.files().values() if r["last_error"]]
+    assert len(errors) == 1
+    assert "removed incomplete remote copy" in errors[0]["last_error"]
     status = json.loads((rig.status_dir / "status.json").read_text())
     assert status["hourly"]["grid"]["2026-10-22T12-0500"]["all"] == "error"
+    assert status["pending_uploads"] == 1
     assert rig.main("upload", now=utc(2026, 10, 22, 18, 40)) == 1
     assert "exit 12 (partial), again" in rig.mails()[-1]["argv"][1]
 
@@ -1455,6 +1833,8 @@ def test_check_reports_a_table(rig, capsys):
     assert "ok" in lines["server"].split()
     assert "ok" in lines["token"].split()                  # token dir 0700
     assert "ok" in lines["fdp-put"].split()
+    assert "ok" in lines["fdp-stat"].split()
+    assert "ok" in lines["fdp-rm"].split()
     assert "ok" in lines["htgettoken"].split()
     assert "ok" in lines["mail"].split()
     assert "ok" in lines["darpa-spill-dump"].split()

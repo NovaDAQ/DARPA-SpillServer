@@ -139,6 +139,12 @@ def test_latest_and_earliest(store):
     assert store.earliest().nova_time == BASE
 
 
+def test_latest_before_a_ceiling(store):
+    store.insert_events([make_event(i) for i in range(10)])
+    assert store.latest(before=BASE + 5).nova_time == BASE + 4
+    assert store.latest(before=BASE) is None
+
+
 def test_latest_by_type(store):
     store.insert_events([
         make_event(0, spill_type=SpillType.NUMI, signal_code=0x74),
