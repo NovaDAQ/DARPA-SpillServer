@@ -123,9 +123,9 @@ cron (novadaq)
 
 | ID | Task | Status |
 |---|---|---|
-| 5.1 | Backfill hourly + daily from 2026-09-17 to the last complete hour (about 860 hours × 3 streams × 2 formats, ~160 GB local, ~80 GB raw + shifted upload) | paused (user, 2026-10-23 16:40): published 09-17..09-26, 10-21..; 09-27 partial (raw numi/all hourly only); 09-28..10-20 not published. Resume: backfill-history.sh 2026-09-27 2026-10-20 |
+| 5.1 | Backfill hourly + daily from 2026-09-17 to the last complete hour (about 860 hours × 3 streams × 2 formats, ~160 GB local, ~80 GB raw + shifted upload) | partly done: published 09-17..09-26 and 10-17..; 10-17..10-22 republished overnight by a separate gateway session (NssTDUApp log backfill, gateway-only commits b0f11ce, 8084391); 09-27 partial; 09-28..10-16 not published |
 | 5.2 | Install the crontab fragment (alec's `grabSpills.sh` line kept) | done 2026-10-23 10:25 (backup crontab.backup-20261023-102540) |
-| 5.3 | Observe 24 h: every hour's files present, uploaded, status page green | todo |
+| 5.3 | Observe 24 h: every hour's files present, uploaded, status page green | doing: first scheduled daily (00:30 10-24) ok, 10-23 daily = Σ hourly for all streams/formats, uploaded; hourly runs ok (one busy at 01:10 while the daily catch-up ran, caught up 03:10) |
 | 5.4 | Final artifacts: this tracker updated, test matrix, runbook | todo |
 
 ## 5. Test matrix
@@ -179,3 +179,4 @@ cron (novadaq)
 | 2026-10-23 17:26 | At the user's explicit request (consequence confirmed), shift tokens dts1-2026-09/10/11 also published to /amsc/public/novaend/tokens/; verified. The public shifted data for those months is therefore reversible by anyone. |
 | 2026-10-23 17:30 | Data-user guide docs/DECODING_DATA.md written; every example run from a clean venv (install from GitHub, anonymous public download, info, invert CSV+JSON byte-identical to raw, wrong-token refusal). Uploaded as DECODING.md to /amsc/novaend and /amsc/public/novaend (adler32 60c2227d). |
 | 2026-10-23 22:28 | 17:10 hourly partial: booster dump of 16:00 hit the 120 s read timeout on /api/events (dumps slow that hour); 18:10 run filled it. Hourly 18:10–22:10 all ok; today 00:00–21:00 published; 0 file errors. Monitoring from the Mac lost connectivity ~19:10–22:00 (gateway unaffected). |
+| 2026-10-24 06:36 | Overnight: separate gateway session re-backfilled 10-17..10-22 from TDU logs (event numbers recovered), 0 days failed. First scheduled daily ok and validated for 10-23. Hourly current to 05:00; 0 file errors. Gateway checkout carries 2 commits not on GitHub (b0f11ce, 8084391). |
