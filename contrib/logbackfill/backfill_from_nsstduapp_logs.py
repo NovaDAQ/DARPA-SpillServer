@@ -25,22 +25,39 @@ holds is recognised as a duplicate rather than stored twice:
   route supplies no event word.  The log does carry one, but recording it
   would change the primary key and duplicate every event already present.
 * ``pps_offset`` is ``nova_time`` modulo one second, as the TDU reports it.
-* ``delta`` is the time since the previous event of any type in the same log
-  file, which is how the TDU computes it; the first event of each file has
-  none.  ``--verify`` checks this against rows the archive already has.
-* ``event_number`` is NULL: the ring's counter is not in the log.
+* ``event_number`` is the TDU's own, recovered as described below, or NULL
+  where it cannot be.
+* ``delta`` is the time since the previous event of any type in the log, i.e.
+  since hardware event ``event_number - 1``, which is how the TDU defines it.
 * ``route`` is ``nsstduapp_log``, so every row this adds can be found, or
   removed, with ``WHERE route = 'nsstduapp_log'``.
+
+**Event numbers.**  ``darpa-spill-shift`` keys each event's offset on
+``(source, event_number)``, so a row without one cannot be published.  The
+log does not print the number, but it does not need to: the TDU numbers every
+event it writes to the ring, SuperCycle included, and NssTDUApp logs every
+one of them.  Sorted by time, an event's position in the log differs from its
+``event_number`` by a constant for the whole TCRMonitor run (checked on 3.3
+million archived rows in October 2026: the constant was 0 or 1 per log).
+Each event the archive already holds from the TDU is an *anchor* giving that
+constant; an event between two anchors that agree is numbered from them.  An
+event whose anchors disagree because the log swapped it with a neighbour a
+tick away takes the one number left free around it.  Anything else with no
+anchor on one side, or anchors that disagree, is left NULL, as is every event
+of a log with no anchors at all.  A number already used by another archived
+event is never assigned.
 
 Only the spill types the ingest records are inserted by default (NuMI, BNB,
 BNB TCLK and 1 Hz TCLK); SuperCycle is logged by NssTDUApp but is not in the
 TDU's history, so adding it would make the backfilled stretch unlike the
-rest of the archive.  ``Fake`` events, and the zero and saturated timestamps
-NssTDUApp logs while the TDU is unsynchronised, fall outside any sensible
-range and are dropped by the ``--start``/``--end`` window.
+rest of the archive.  It still counts towards numbering and ``delta``.
+``Fake`` events and the zero and saturated timestamps NssTDUApp logs while
+the TDU is unsynchronised are dropped.
 
 Inserts use ``ON CONFLICT DO NOTHING``, so re-running is harmless and it is
-safe against the live archive while the server is ingesting.
+safe against the live archive while the server is ingesting.  A run also
+updates ``event_number`` and ``delta`` of rows an earlier run inserted
+(``route = 'nsstduapp_log'``); rows from the TDU itself are never changed.
 
 Usage (from the repository root, in the venv)::
 
@@ -58,7 +75,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter
-from typing import Iterator, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from darpa_spillserver.novatime import (
     TICKS_PER_SECOND, NovaTimeError, convert, parse_range,
@@ -72,6 +89,15 @@ DEFAULT_TYPES = (SpillType.NUMI, SpillType.BNB, SpillType.BNB_TCLK,
                  SpillType.ACCEL_ONE_HZ_TCLK)
 BATCH = 50000
 
+#: Events either side searched for a free number; see :func:`number`.
+WINDOW = 4
+
+#: How far out of time order the ring may hold two events: 1 ms.
+SWAP_TICKS = TICKS_PER_SECOND // 1000
+
+#: NssTDUApp logs 0x7fff... for an unsynchronised TDU; nothing real is near it.
+_LATEST = 1 << 62
+
 _LINE = re.compile(
     r"^Spilltype: \w+\((\d+)\) \(evt 0x[0-9a-fA-F]+\) "
     r"novaTime 0x[0-9a-fA-F]+ (\d+)\s*$"
@@ -81,11 +107,12 @@ _LINE = re.compile(
 Logged = List[Tuple[int, int]]
 
 
-def read_log(path: str, start: int, end: int) -> Logged:
-    """Every event in *path* logged with a time in ``[start, end)``.
+def read_log(path: str) -> Logged:
+    """Every real event in *path*, sorted by time and de-duplicated.
 
     The log is not in time order --- NssTDUApp forwards each type from its
-    own position in the ring --- so the result is sorted and de-duplicated.
+    own position in the ring --- and the whole file is kept, not just the
+    range being backfilled, because an event's place in it is its number.
     """
     found = set()
     with open(path, "r", errors="replace") as handle:
@@ -95,33 +122,135 @@ def read_log(path: str, start: int, end: int) -> Logged:
             match = _LINE.match(line)
             if match is None:
                 continue
+            spill_type = int(match.group(1))
             nova_time = int(match.group(2))
-            if start <= nova_time < end:
-                found.add((nova_time, int(match.group(1))))
+            if spill_type != SpillType.FAKE and 0 < nova_time < _LATEST:
+                found.add((nova_time, spill_type))
     return sorted(found)
 
 
-def to_events(logged: Logged, source: str, types: Sequence[int]) -> Iterator[SpillEvent]:
-    """Rows for the wanted *types*, with delta taken over all logged types."""
+def number(db: sqlite3.Connection, source: str, logged: Logged,
+           tally: Counter) -> List[Optional[int]]:
+    """The TDU event number of each logged event, or None where unknown."""
+    anchors: Dict[Tuple[int, int], int] = {}
+    used = set()
+    for nova_time, spill_type, event_number in db.execute(
+            "SELECT nova_time, spill_type, event_number FROM events "
+            "WHERE source = ? AND route != ? AND nova_time >= ? "
+            "AND nova_time <= ? AND event_number IS NOT NULL",
+            (source, ROUTE, logged[0][0], logged[-1][0])):
+        anchors[(nova_time, spill_type)] = event_number
+        used.add(event_number)
+
+    count = len(logged)
+    before: List[Optional[int]] = [None] * count
+    after: List[Optional[int]] = [None] * count
+    offset = None
+    for i in range(count):
+        anchor = anchors.get(logged[i])
+        if anchor is not None:
+            offset = anchor - i
+        before[i] = offset
+    offset = None
+    for i in range(count - 1, -1, -1):
+        anchor = anchors.get(logged[i])
+        if anchor is not None:
+            offset = anchor - i
+        after[i] = offset
+
+    numbers: List[Optional[int]] = []
+    for i in range(count):
+        anchor = anchors.get(logged[i])
+        if anchor is not None:
+            numbers.append(anchor)
+            tally["anchored"] += 1
+        elif before[i] is None or before[i] != after[i]:
+            numbers.append(None)
+            tally["no number"] += 1
+        elif i + before[i] in used:
+            numbers.append(None)
+            tally["number taken"] += 1
+        else:
+            numbers.append(i + before[i])
+            used.add(i + before[i])
+            tally["numbered"] += 1
+
+    # Events a tick apart are sometimes logged in the other order from the
+    # ring (a BNB TCLK at x.999 s and the BNB at x+1 s), so the anchors on
+    # either side disagree by one.  Where exactly one number is free among
+    # the neighbours and exactly one event lacks one, it is that event's.
+    for i in range(count):
+        if numbers[i] is not None:
+            continue
+        window = range(max(0, i - WINDOW), min(count, i + WINDOW + 1))
+        known = [numbers[j] for j in window if numbers[j] is not None]
+        unknown = [j for j in window if numbers[j] is None]
+        if not known or unknown != [i]:
+            continue
+        free = set(range(min(known), max(known) + 1)) - used
+        if len(free) != 1:
+            continue
+        candidate = free.pop()
+        # The free number must fall where this event does in time, give or
+        # take the swap: a free number can also belong to an event the log
+        # missed, e.g. at the edge of a gap in the log.
+        at = {numbers[j]: logged[j][0] for j in window if numbers[j] is not None}
+        lower = at.get(candidate - 1)
+        upper = at.get(candidate + 1)
+        t = logged[i][0]
+        if (lower is not None and t < lower - SWAP_TICKS) or \
+                (upper is not None and t > upper + SWAP_TICKS):
+            continue
+        numbers[i] = candidate
+        used.add(candidate)
+        tally["no number"] -= 1
+        tally["numbered from neighbours"] += 1
+    return numbers
+
+
+def to_events(logged: Logged, numbers: Sequence[Optional[int]], source: str,
+              types: Sequence[int], start: int, end: int) -> List[SpillEvent]:
+    """Rows for the wanted *types* in ``[start, end)``.
+
+    ``delta`` is taken over every logged event, wanted or not, in or out of
+    range, since it is the gap to the previous hardware event.
+    """
     now = int(time.time())
+    events = []
     previous = None
-    for nova_time, spill_type in logged:
+    for (nova_time, spill_type), event_number in zip(logged, numbers):
         delta = None if previous is None else nova_time - previous
         previous = nova_time
-        if spill_type not in types:
+        if spill_type not in types or not start <= nova_time < end:
             continue
-        yield SpillEvent(
+        events.append(SpillEvent(
             nova_time=nova_time,
             spill_type=SpillType(spill_type),
             signal_code=UNKNOWN_SIGNAL,
             event_word=None,
-            event_number=None,
+            event_number=event_number,
             delta=delta,
             pps_offset=nova_time % TICKS_PER_SECOND,
             source=source,
             route=ROUTE,
             ingested_at=now,
-        )
+        ))
+    return events
+
+
+def renumber(db: sqlite3.Connection, events: List[SpillEvent]) -> int:
+    """Bring rows an earlier run inserted up to date; returns rows changed."""
+    with db:
+        before = db.total_changes
+        db.executemany(
+            "UPDATE events SET event_number = ?, delta = ? "
+            "WHERE nova_time = ? AND spill_type = ? AND signal_code = ? "
+            "AND source = ? AND route = ? AND (event_number IS NOT ? "
+            "OR delta IS NOT ?)",
+            [(e.event_number, e.delta, e.nova_time, int(e.spill_type),
+              UNKNOWN_SIGNAL, e.source, ROUTE, e.event_number, e.delta)
+             for e in events])
+        return db.total_changes - before
 
 
 def verify(db: sqlite3.Connection, events: List[SpillEvent], tally: Counter) -> None:
@@ -133,9 +262,9 @@ def verify(db: sqlite3.Connection, events: List[SpillEvent], tally: Counter) -> 
     if not events:
         return
     held = {
-        (nova_time, spill_type): (delta, pps_offset)
-        for nova_time, spill_type, delta, pps_offset in db.execute(
-            "SELECT nova_time, spill_type, delta, pps_offset FROM events "
+        (nova_time, spill_type): (delta, pps_offset, route)
+        for nova_time, spill_type, delta, pps_offset, route in db.execute(
+            "SELECT nova_time, spill_type, delta, pps_offset, route FROM events "
             "WHERE source = ? AND signal_code = ? AND nova_time >= ? "
             "AND nova_time <= ?",
             (events[0].source, UNKNOWN_SIGNAL, events[0].nova_time,
@@ -146,6 +275,9 @@ def verify(db: sqlite3.Connection, events: List[SpillEvent], tally: Counter) -> 
         row = held.get((event.nova_time, int(event.spill_type)))
         if row is None:
             tally["missing"] += 1
+            continue
+        if row[2] == ROUTE:
+            tally["present from a log"] += 1
             continue
         tally["present"] += 1
         tally["pps_offset agrees" if row[1] == event.pps_offset
@@ -188,43 +320,53 @@ def main(argv: Sequence[str] = None) -> int:
         db = sqlite3.connect("file:{}?mode=ro".format(args.database), uri=True)
         store = None
     else:
-        db = None
         store = SpillStore(args.database)
+        db = store.connection
 
-    total_parsed = total_inserted = 0
+    total_parsed = total_inserted = total_updated = 0
     tally = Counter()
     try:
         for path in args.logs:
-            logged = read_log(path, start, end)
+            logged = read_log(path)
             if not logged:
+                print("{}: no events".format(path))
+                continue
+            file_tally = Counter()
+            numbers = number(db, args.source, logged, file_tally)
+            events = to_events(logged, numbers, args.source, types, start, end)
+            if not events:
                 print("{}: nothing in range".format(path))
                 continue
-            events = list(to_events(logged, args.source, types))
-            line = "{}: {} .. {}  {} logged, {} of wanted types".format(
-                path, convert(logged[0][0]).utc[:19],
-                convert(logged[-1][0]).utc[:19], len(logged), len(events))
+            unnumbered = sum(1 for e in events if e.event_number is None)
+            line = "{}: {} .. {}  {} of wanted types, {} without a number".format(
+                path, convert(events[0].nova_time).utc[:19],
+                convert(events[-1].nova_time).utc[:19], len(events), unnumbered)
             if args.verify:
                 verify(db, events, tally)
                 print(line)
             else:
-                inserted = 0
+                inserted = updated = 0
                 for i in range(0, len(events), BATCH):
                     inserted += store.insert_events(events[i:i + BATCH])
-                print(line + ", {} new".format(inserted))
+                    updated += renumber(db, events[i:i + BATCH])
+                print(line + ", {} new, {} updated".format(inserted, updated))
                 total_inserted += inserted
+                total_updated += updated
+            print("  numbering: " + ", ".join(
+                "{} {}".format(v, k) for k, v in sorted(file_tally.items())))
             total_parsed += len(events)
     finally:
         if store is not None:
             store.close()
-        if db is not None:
+        elif db is not None:
             db.close()
 
     if args.verify:
         for key in sorted(tally):
             print("  {:20} {}".format(key, tally[key]))
     else:
-        print("done: {} event(s) read, {} new row(s)".format(
-            total_parsed, total_inserted))
+        print("done: {} event(s) read, {} new row(s), {} updated".format(
+            total_parsed, total_inserted, total_updated))
     return 0
 
 
