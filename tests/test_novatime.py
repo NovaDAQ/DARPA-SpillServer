@@ -220,14 +220,14 @@ def test_unknown_timezone_raises():
 
 def test_explicit_nova_ticks():
     """!
-    @brief 'nova:<ticks>' is taken verbatim.
+    @brief `nova:<ticks>` is taken verbatim.
     """
     assert parse_instant("nova:{}".format(LIVE_NOVA), now=NOW) == LIVE_NOVA
 
 
 def test_explicit_unix():
     """!
-    @brief 'unix:<sec>' maps to the instant with that UNIX second.
+    @brief `unix:<sec>` maps to the instant with that UNIX second.
     """
     result = parse_instant("unix:{}".format(LIVE_UNIX_SEC), now=NOW)
     assert convert(result).unix_sec == LIVE_UNIX_SEC
@@ -235,7 +235,7 @@ def test_explicit_unix():
 
 def test_explicit_gps_seconds_round_trips():
     """!
-    @brief 'gps:<sec>' maps back to the whole-second tick count of the original
+    @brief `gps:<sec>` maps back to the whole-second tick count of the original
     instant.
     """
     gps = convert(LIVE_NOVA).gps_seconds
@@ -248,7 +248,7 @@ def test_explicit_gps_seconds_round_trips():
 
 def test_explicit_gps_week_and_tow():
     """!
-    @brief 'gps:<week>:<tow>' maps to an instant with that week and time of
+    @brief `gps:<week>:<tow>` maps to an instant with that week and time of
     week.
     """
     reference = convert(LIVE_NOVA)

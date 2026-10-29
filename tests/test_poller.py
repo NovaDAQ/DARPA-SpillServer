@@ -81,6 +81,7 @@ class StubClient:
         since_nova.
         @param since_nova lower bound in ticks, or None for everything.
         @param limit requested batch limit (recorded only).
+        @param kwargs further fetch options of the real client (ignored).
         @return FetchResult over the selected events.
         """
         self.calls.append({"since": since_nova, "limit": limit})

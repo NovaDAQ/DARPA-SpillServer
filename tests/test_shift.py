@@ -48,7 +48,7 @@ TOKENS = {name: Token.parse(text) for name, text in VECTORS["tokens"].items()}
 
 def tagged(path, tag):
     """!
-    @brief d.csv -> d.<tag>.csv, as darpa-spill-shift names its outputs.
+    @brief @c d.csv -> @c d.&lt;tag&gt;.csv, as darpa-spill-shift names its outputs.
     @param path Input file path.
     @param tag Tag to insert, e.g. "shifted" or "restored".
     @return The tagged path, as str.

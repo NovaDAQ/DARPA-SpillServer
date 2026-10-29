@@ -1858,7 +1858,7 @@ def test_an_unwritable_state_database_is_mailed(rig, monkeypatch):
 
 
 def test_a_failed_status_write_leaves_no_temporary_file(rig, monkeypatch):
-    """!@brief A failing status render leaves no ``*.tmp.*`` file."""
+    """!@brief A failing status render leaves no @c *.tmp.* file."""
     monkeypatch.setattr(publish, "render_html", lambda status: 12345)
     pub = publisher(rig, now=utc(2026, 10, 22, 18))
     with pytest.raises(TypeError):
