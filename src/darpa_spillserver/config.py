@@ -1,4 +1,8 @@
-"""Configuration: defaults, YAML file, environment, command line.
+"""!
+@file src/darpa_spillserver/config.py
+@brief Server configuration: dataclass schema and the defaults < YAML < environment < command-line merge.
+
+Configuration: defaults, YAML file, environment, command line.
 
 Design.md requires that everything be settable from either the command line or
 a YAML file.  Four layers are merged, each overriding the one before:
@@ -17,6 +21,16 @@ section-and-key name wins when both are set.
 Unknown keys in the YAML file are an error, not a warning.  A silently ignored
 ``retention_days`` misspelling is exactly the kind of thing that is noticed
 only once the archive has already been pruned.
+
+Precedence, in full: command line > environment > YAML > defaults.  There is
+no ``.env`` layer in the server's own configuration (``.env`` handling exists
+only in :mod:`darpa_spillserver.publish`).  The layers are applied in that
+order onto one :class:`Config`, each by the same :func:`_apply_mapping`, so
+type coercion and unknown-key checks are identical whatever the origin; the
+last writer wins.  :meth:`Config.validate` runs once, on the merged result.
+
+None of these settings concerns the timestamp shift (blurring) of published
+data; that is handled by :mod:`darpa_spillserver.shift` and the publisher.
 """
 
 from __future__ import annotations
@@ -57,18 +71,20 @@ __all__ = [
     "configure_logging",
 ]
 
+## Module logger.
 log = logging.getLogger(__name__)
 
+## Prefix of every environment variable this module reads.
 ENV_PREFIX = "DARPA_SPILL_"
 
-#: Shorter environment names accepted for some settings, mapped onto
-#: ``(section, key)``.  ``DARPA_SPILL_STATUS_DIR`` is the name the gateway
-#: deployment documents; ``DARPA_SPILL_SERVER_STATUS_DIR`` works as well.
+## Shorter environment names accepted for some settings, mapped onto
+## ``(section, key)``.  ``DARPA_SPILL_STATUS_DIR`` is the name the gateway
+## deployment documents; ``DARPA_SPILL_SERVER_STATUS_DIR`` works as well.
 ENV_ALIASES = {
     ENV_PREFIX + "STATUS_DIR": ("server", "status_dir"),
 }
 
-#: Searched in order when no ``--config`` is given.
+## Searched in order when no ``--config`` is given.
 DEFAULT_CONFIG_PATHS = (
     "./spillserver.yaml",
     "~/.config/darpa-spillserver/spillserver.yaml",
@@ -77,67 +93,98 @@ DEFAULT_CONFIG_PATHS = (
 
 
 class ConfigError(ValueError):
-    """Raised when configuration is missing, malformed, or contradictory."""
+    """!
+    @brief Raised when configuration is missing, malformed, or contradictory.
+    """
 
 
 @dataclass
 class ServerConfig:
-    """Where and how the HTTP server listens."""
+    """!
+    @brief Where and how the HTTP server listens.
 
+    YAML section ``server``.
+    """
+
+    ## Bind address.
     host: str = "0.0.0.0"
+    ## TCP port.
     port: int = 8080
+    ## Mount prefix when running behind a reverse proxy, e.g. ``/spills``.
     root_path: str = ""
-    """Mount prefix when running behind a reverse proxy, e.g. ``/spills``."""
 
+    ## Origins allowed to call the API from a browser.
     cors_origins: List[str] = field(default_factory=lambda: ["*"])
-    """Origins allowed to call the API from a browser."""
 
+    ## PEM certificate (with any intermediates) to serve HTTPS directly.
+    # Empty serves plain HTTP, which is right when a TLS-terminating proxy
+    # fronts the server.
     ssl_certfile: str = ""
-    """PEM certificate (with any intermediates) to serve HTTPS directly.
-    Empty serves plain HTTP, which is right when a TLS-terminating proxy
-    fronts the server."""
 
+    ## PEM private key matching ``ssl_certfile``.
     ssl_keyfile: str = ""
-    """PEM private key matching ``ssl_certfile``."""
 
+    ## Directory of static status pages served at ``/status/``.  Empty serves
+    # nothing there; a directory that does not exist at startup is skipped with
+    # a warning rather than created, since another program owns its content.
     status_dir: str = ""
-    """Directory of static status pages served at ``/status/``.  Empty serves
-    nothing there; a directory that does not exist at startup is skipped with
-    a warning rather than created, since another program owns its content."""
 
     @property
     def scheme(self) -> str:
+        """!
+        @brief URL scheme the server will speak.
+        @return ``"https"`` if a certificate is configured, else ``"http"``.
+        """
         return "https" if self.ssl_certfile else "http"
 
 
-#: Polled when neither ``tdu.sources`` nor ``tdu.base_url`` is configured.
+## Polled when neither ``tdu.sources`` nor ``tdu.base_url`` is configured.
 DEFAULT_TDU_URL = "http://tdu-near-master-ppc-01:8080"
 
-#: What a source name may look like. It appears in URLs (``?source=``), in CSV
-#: cells and in the archive, so it is kept to characters none of them escape.
+## What a source name may look like. It appears in URLs (``?source=``), in CSV
+## cells and in the archive, so it is kept to characters none of them escape.
 _SOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 @dataclass
 class Source:
-    """One TDU the server records from.
+    """!
+    @brief One TDU the server records from.
 
     *name* tags every event ingested from it, and is what a query selects
     with ``source=``.  It stays fixed while *base_url* may change: pointing a
     source at a replacement TDU keeps its history under the same name.
     """
 
+    ## Stable tag stored with every event.
     name: str
+    ## Normalised TDU URL (no trailing slash).
     base_url: str
+    ## Whether to poll it; always True from the configuration file, may be
+    # False via a runtime override.
     enabled: bool = True
 
     def as_dict(self) -> Dict[str, Any]:
+        """!
+        @brief JSON-ready rendering.
+        @return ``{"name", "base_url", "enabled"}``.
+        """
         return {"name": self.name, "base_url": self.base_url,
                 "enabled": self.enabled}
 
 
 def check_source_url(url: str, where: str = "source URL") -> str:
-    """Return *url* normalised, or raise :class:`ConfigError`."""
+    """!
+    @brief Return *url* normalised, or raise :class:`ConfigError`.
+
+    Normalisation strips whitespace and trailing slashes, so two spellings of
+    the same TDU compare equal in the duplicate checks.
+
+    @param url candidate URL.
+    @param where description of the setting, for the error message.
+    @return the normalised URL.
+    @throws ConfigError unless it is http(s) with a host.
+    """
     url = str(url).strip().rstrip("/")
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -150,6 +197,12 @@ def check_source_url(url: str, where: str = "source URL") -> str:
 
 
 def check_source_name(name: str) -> str:
+    """!
+    @brief Validate a source name against :data:`_SOURCE_NAME`.
+    @param name candidate name.
+    @return the name, unchanged.
+    @throws ConfigError if it does not match.
+    """
     if not _SOURCE_NAME.match(name):
         raise ConfigError(
             "source name {!r} must be 1-64 letters, digits, '.', '_' or '-', "
@@ -159,10 +212,15 @@ def check_source_name(name: str) -> str:
 
 
 def parse_source(spec: str) -> Source:
-    """Parse one ``tdu.sources`` entry: ``URL`` or ``NAME=URL``.
+    """!
+    @brief Parse one ``tdu.sources`` entry: ``URL`` or ``NAME=URL``.
 
     A bare URL is named after its host, so
     ``http://tdu-near-master-ppc-02:8080`` becomes ``tdu-near-master-ppc-02``.
+
+    @param spec the entry text.
+    @return the Source (always enabled).
+    @throws ConfigError for a bad URL or name.
     """
     spec = str(spec).strip()
     name, sep, url = spec.partition("=")
@@ -177,30 +235,44 @@ def parse_source(spec: str) -> Source:
 
 @dataclass
 class TDUConfig:
-    """How to reach the TDUs' embedded bottle servers."""
+    """!
+    @brief How to reach the TDUs' embedded bottle servers.
 
+    YAML section ``tdu``.
+    """
+
+    ## TDUs to record from, each ``URL`` or ``NAME=URL``.
     sources: List[str] = field(default_factory=list)
-    """TDUs to record from, each ``URL`` or ``NAME=URL``."""
 
+    ## A single TDU, as configured before ``sources`` existed.  Kept so older
+    # configuration files keep working; it cannot be combined with
+    # ``sources``.
     base_url: str = ""
-    """A single TDU, as configured before ``sources`` existed.  Kept so older
-    configuration files keep working; it cannot be combined with
-    ``sources``."""
 
+    ## Per-request timeout for the quick routes, which answer at once.
     timeout: float = 10.0
-    """Per-request timeout for the quick routes, which answer at once."""
 
+    ## Timeout for a bulk history read.  Far longer, because it is different
+    # work: the TDU walks its whole ring, which takes minutes on that hardware.
+    # Judging it against the quick timeout is how a working history route came
+    # to be reported as missing --- the probe timed out and was read as a 404.
     history_timeout: float = 600.0
-    """Timeout for a bulk history read.  Far longer, because it is different
-    work: the TDU walks its whole ring, which takes minutes on that hardware.
-    Judging it against the quick timeout is how a working history route came
-    to be reported as missing --- the probe timed out and was read as a 404."""
 
+    ## Retries per failed TDU request.
     retries: int = 2
+    ## Seconds before the first retry; doubled for each subsequent one.
     retry_backoff: float = 0.5
 
     def resolved_sources(self) -> List[Source]:
-        """The configured sources, in order, as :class:`Source` objects."""
+        """!
+        @brief The configured sources, in order, as :class:`Source` objects.
+
+        Falls back to ``base_url``, then to :data:`DEFAULT_TDU_URL`, so the
+        result is never empty.
+
+        @return list of Source.
+        @throws ConfigError for a malformed entry.
+        """
         if self.sources:
             return [parse_source(spec) for spec in self.sources]
         return [parse_source(self.base_url or DEFAULT_TDU_URL)]
@@ -208,103 +280,140 @@ class TDUConfig:
 
 @dataclass
 class IngestConfig:
-    """The background poller that copies events out of the TDU."""
+    """!
+    @brief The background poller that copies events out of the TDU.
 
+    YAML section ``ingest``.
+    """
+
+    ## Poll at all; ``--no-ingest`` sets it False.
     enabled: bool = True
 
+    ## Seconds between polls.  With the history route this only bounds
+    # latency; without it, it bounds how many events are lost.
     interval: float = 1.0
-    """Seconds between polls.  With the history route this only bounds
-    latency; without it, it bounds how many events are lost."""
 
+    ## Maximum records requested per poll.
     batch_limit: int = 5000
-    """Maximum records requested per poll."""
 
+    ## Seconds of already-ingested time re-read on each poll.  Inserts are
+    # idempotent, so overlap costs nothing but closes the gap that clock skew
+    # or a slow poll would otherwise open.
     overlap: float = 5.0
-    """Seconds of already-ingested time re-read on each poll.  Inserts are
-    idempotent, so overlap costs nothing but closes the gap that clock skew
-    or a slow poll would otherwise open."""
 
+    ## Seconds of history to request on a cold start, when the archive is
+    # empty and there is no watermark to resume from.
     backfill: float = 3600.0
-    """Seconds of history to request on a cold start, when the archive is
-    empty and there is no watermark to resume from."""
 
+    ## Stop the poller after this many consecutive failures; 0 means never
+    # stop, which is what an unattended deployment wants.
     max_consecutive_errors: int = 0
-    """Stop the poller after this many consecutive failures; 0 means never
-    stop, which is what an unattended deployment wants."""
 
+    ## Seconds an event may lie ahead of this host's clock before it is
+    # dropped instead of stored.  A TDU coming up with its clock unset can
+    # report a sentinel time (INT64_MAX ticks, the year 6576); stored, it
+    # would become the source's resume point and stop all further ingest.
+    # 0 disables the check.
     max_future: float = 86400.0
-    """Seconds an event may lie ahead of this host's clock before it is
-    dropped instead of stored.  A TDU coming up with its clock unset can
-    report a sentinel time (INT64_MAX ticks, the year 6576); stored, it
-    would become the source's resume point and stop all further ingest.
-    0 disables the check."""
 
 
 @dataclass
 class StorageConfig:
-    """The local SQLite archive."""
+    """!
+    @brief The local SQLite archive.
 
+    YAML section ``storage``.
+    """
+
+    ## SQLite database file.
     path: str = "./spills.db"
+    ## SQLite busy timeout, seconds.
     timeout: float = 15.0
 
+    ## Delete events older than this many days.  0 keeps everything, which is
+    # the default: an event archive is small and losing it is unrecoverable.
     retention_days: float = 0.0
-    """Delete events older than this many days.  0 keeps everything, which is
-    the default: an event archive is small and losing it is unrecoverable."""
 
+    ## Seconds between retention sweeps.
     prune_interval: float = 3600.0
-    """Seconds between retention sweeps."""
 
+    ## Ingest-log rows to retain.
     ingest_log_keep: int = 1000
-    """Ingest-log rows to retain."""
 
 
 @dataclass
 class QueryConfig:
-    """Defaults applied to client queries."""
+    """!
+    @brief Defaults applied to client queries.
 
+    YAML section ``query``.
+    """
+
+    ## Zone assumed for inputs that carry none, such as ``09:15``.  UTC by
+    # default so an unconfigured server never shifts a result silently; set
+    # ``America/Chicago`` for a deployment whose operators speak local time.
     timezone: str = "UTC"
-    """Zone assumed for inputs that carry none, such as ``09:15``.  UTC by
-    default so an unconfigured server never shifts a result silently; set
-    ``America/Chicago`` for a deployment whose operators speak local time."""
 
+    ## Rows per page when ``limit`` is not given.
     default_limit: int = 10000
+    ## Largest ``limit`` a client may ask for.
     max_limit: int = 1000000
+    ## Ceiling on a streamed CSV or JSON export.
     max_export_rows: int = 5000000
-    """Ceiling on a streamed CSV or JSON export."""
 
 
 @dataclass
 class AuthConfig:
-    """OIDC single sign-on.
+    """!
+    @brief OIDC single sign-on.
+
+    OIDC single sign-on.
 
     Disabled by default, as Design.md requires, but every setting the
     Fermilab SSO integration needs is present so that enabling it is a
     configuration change rather than a code change.  See
     :mod:`darpa_spillserver.auth`.
+
+    YAML section ``auth``.  Secrets (``client_secret``, ``session_secret``)
+    are masked by :meth:`Config.to_dict`.
     """
 
+    ## Require sign-in on query routes.
     enabled: bool = False
+    ## Backend name; ``oidc`` (aliases ``openid``, ``fermilab``, ``fnal``).
     provider: str = "oidc"
+    ## OIDC issuer URL; discovery is read from ``{issuer}/.well-known/openid-configuration``.
     issuer: str = ""
-    """OIDC issuer URL; discovery is read from ``{issuer}/.well-known/openid-configuration``."""
 
+    ## OIDC client id; also the required ``aud`` of bearer tokens.
     client_id: str = ""
+    ## Prefer ``client_secret_file`` or the environment over writing this into YAML.
     client_secret: str = ""
-    """Prefer ``client_secret_file`` or the environment over writing this into YAML."""
 
+    ## File holding the client secret; wins over ``client_secret``.
     client_secret_file: str = ""
+    ## Callback URL registered with the provider; derived from the request if empty.
     redirect_url: str = ""
+    ## OIDC scopes requested at login.
     scopes: List[str] = field(default_factory=lambda: ["openid", "profile", "email"])
+    ## If non-empty, a caller must hold one of these groups.  Empty means any
+    # successfully authenticated caller is allowed.
     allowed_groups: List[str] = field(default_factory=list)
-    """If non-empty, a caller must hold one of these groups.  Empty means any
-    successfully authenticated caller is allowed."""
 
+    ## Key that signs the session cookie and the Starlette session; required
+    # when enabled.  Rotating it signs everyone out.
     session_secret: str = ""
+    ## Name of the session cookie.
     session_cookie: str = "darpa_spill_session"
+    ## Session lifetime, seconds (default 8 h).
     session_max_age: int = 28800
 
     def resolved_client_secret(self) -> str:
-        """The client secret, read from ``client_secret_file`` if set."""
+        """!
+        @brief The client secret, read from ``client_secret_file`` if set.
+        @return the secret, whitespace-stripped when read from a file.
+        @throws OSError if the file cannot be read.
+        """
         if self.client_secret_file:
             return Path(self.client_secret_file).expanduser().read_text().strip()
         return self.client_secret
@@ -312,23 +421,37 @@ class AuthConfig:
 
 @dataclass
 class AdminConfig:
-    """Who may change sources at runtime, from the /config page or the API.
+    """!
+    @brief Who may change sources at runtime, from the /config page or the API.
 
     Nobody, until one of these is set.  The server binds every interface by
     default, and a source URL decides what ends up in the archive, so editing
     is opt-in.
+
+    YAML section ``admin``.  The token is checked in
+    :func:`darpa_spillserver.api.build_router` (``require_admin``).
     """
 
+    ## Shared secret sent as ``X-Admin-Token``.  Prefer ``token_file``.
     token: str = ""
-    """Shared secret sent as ``X-Admin-Token``.  Prefer ``token_file``."""
 
+    ## File holding the token; wins over ``token``.
     token_file: str = ""
 
+    ## With ``auth.enabled``, signed-in members of these groups may edit
+    # without the token.  Empty means the token is the only way in.
     allowed_groups: List[str] = field(default_factory=list)
-    """With ``auth.enabled``, signed-in members of these groups may edit
-    without the token.  Empty means the token is the only way in."""
 
     def resolved_token(self) -> str:
+        """!
+        @brief The admin token, read from ``token_file`` if set.
+
+        Read once at application start (create_app); changing the file needs
+        a restart.  An empty result disables token-based admin.
+
+        @return the token, whitespace-stripped when read from a file.
+        @throws OSError if the file cannot be read.
+        """
         if self.token_file:
             return Path(self.token_file).expanduser().read_text().strip()
         return self.token
@@ -336,14 +459,28 @@ class AdminConfig:
 
 @dataclass
 class LoggingConfig:
+    """!
+    @brief Logging destination and verbosity.
+
+    YAML section ``logging``.
+    """
+
+    ## Root log level name.
     level: str = "INFO"
+    ## Optional log file, in addition to stderr.
     file: str = ""
+    ## ``logging`` format string.
     format: str = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 
 
 @dataclass
 class Config:
-    """The full server configuration."""
+    """!
+    @brief The full server configuration.
+
+    One attribute per YAML section.  Mutable: load_config fills it layer by
+    layer, then validates it.
+    """
 
     server: ServerConfig = field(default_factory=ServerConfig)
     tdu: TDUConfig = field(default_factory=TDUConfig)
@@ -354,11 +491,16 @@ class Config:
     admin: AdminConfig = field(default_factory=AdminConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
-    #: Path the configuration was loaded from, for the /status endpoint.
+    ## Path the configuration was loaded from, for the /status endpoint.
     source: str = ""
 
     def to_dict(self, redact: bool = True) -> Dict[str, Any]:
-        """Render as plain dictionaries, with secrets masked by default."""
+        """!
+        @brief Render as plain dictionaries, with secrets masked by default.
+        @param redact mask ``auth.client_secret``, ``auth.session_secret`` and
+            ``admin.token`` (only when set, so an unset secret shows as empty).
+        @return nested dict.
+        """
         data = asdict(self)
         if redact:
             for key in ("client_secret", "session_secret"):
@@ -369,9 +511,10 @@ class Config:
         return data
 
     def validate(self) -> None:
-        """Check the configuration is internally consistent.
+        """!
+        @brief Check the configuration is internally consistent.
 
-        :raises ConfigError: describing the first problem found.
+        @throws ConfigError describing the first problem found.
         """
         if not 1 <= self.server.port <= 65535:
             raise ConfigError(
@@ -389,6 +532,8 @@ class Config:
             )
         if self.tdu.base_url:
             check_source_url(self.tdu.base_url, "tdu.base_url")
+        # Names tag archived rows and URLs identify hardware: a duplicate of
+        # either would merge or double-ingest two sources.
         sources = self.tdu.resolved_sources()
         for attribute in ("name", "base_url"):
             seen = set()
@@ -446,6 +591,7 @@ class Config:
                 )
 
 
+## YAML section name -> dataclass type; the set of valid top-level keys.
 _SECTIONS = {
     "server": ServerConfig,
     "tdu": TDUConfig,
@@ -459,13 +605,17 @@ _SECTIONS = {
 
 
 def _field_types(section: Any) -> Dict[str, Any]:
-    """Resolve a dataclass's field types to real objects.
+    """!
+    @brief Resolve a dataclass's field types to real objects.
 
     ``dataclasses.fields()`` reports ``.type`` as a *string* under
     ``from __future__ import annotations`` (PEP 563), which this module uses.
     Comparing those strings against ``bool`` or ``int`` silently never
     matches, so every setting would be coerced to ``str`` and a port would
     arrive as ``"9999"``.  ``get_type_hints`` resolves them properly.
+
+    @param section a section dataclass instance or type.
+    @return field name -> resolved type.
     """
     section_type = section if isinstance(section, type) else type(section)
     try:
@@ -476,7 +626,19 @@ def _field_types(section: Any) -> Dict[str, Any]:
 
 
 def _coerce(value: Any, target_type: Any, where: str) -> Any:
-    """Coerce a YAML/env scalar to the type the dataclass field declares."""
+    """!
+    @brief Coerce a YAML/env scalar to the type the dataclass field declares.
+
+    Strings from the environment become lists by comma splitting and booleans
+    from ``1/0, true/false, yes/no, on/off``.  Anything not list/bool/int/float
+    becomes ``str`` (None -> ``""``).
+
+    @param value the raw value.
+    @param target_type resolved field type.
+    @param where ``section.key``, for the error message.
+    @return the coerced value.
+    @throws ConfigError if the value cannot be coerced.
+    """
     origin = get_origin(target_type)
     if origin is list or target_type is list or target_type == List[str]:
         if isinstance(value, str):
@@ -515,8 +677,21 @@ def _coerce(value: Any, target_type: Any, where: str) -> Any:
 
 
 def _apply_mapping(config: Config, data: Mapping[str, Any], origin: str) -> None:
-    """Merge a nested ``{section: {key: value}}`` mapping into *config*."""
+    """!
+    @brief Merge a nested ``{section: {key: value}}`` mapping into *config*.
+
+    Used for every layer (YAML, environment, command line), so all three get
+    the same validation.  Only keys present in *data* are touched.
+
+    @param config the configuration to update in place.
+    @param data nested mapping.
+    @param origin description of the layer, for error messages.
+    @throws ConfigError for an unknown section or key, a non-mapping section,
+        or an uncoercible value.
+    """
     for section_name, section_data in data.items():
+        # ``source`` is the Config attribute recording where the file came
+        # from, not a section; tolerate it in a mapping.
         if section_name in ("source",):
             continue
         if section_name not in _SECTIONS:
@@ -526,6 +701,7 @@ def _apply_mapping(config: Config, data: Mapping[str, Any], origin: str) -> None
                     section_name, origin, ", ".join(sorted(_SECTIONS))
                 )
             )
+        # An empty section in YAML (``auth:`` with nothing under it) loads as None.
         if section_data is None:
             continue
         if not isinstance(section_data, Mapping):
@@ -550,6 +726,17 @@ def _apply_mapping(config: Config, data: Mapping[str, Any], origin: str) -> None
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
+    """!
+    @brief Read and parse a YAML configuration file.
+
+    PyYAML is imported lazily so that a deployment configured purely by
+    environment and command line does not need it.
+
+    @param path the file.
+    @return the top-level mapping (``{}`` for an empty file).
+    @throws ConfigError if PyYAML is missing, the file is unreadable, not
+        YAML, or not a mapping.
+    """
     try:
         import yaml
     except ImportError:  # pragma: no cover - depends on install extras
@@ -564,6 +751,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         raise ConfigError("cannot read config file {}: {}".format(path, exc)) from None
 
     try:
+        # safe_load: no arbitrary Python object construction from the file.
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise ConfigError("{} is not valid YAML: {}".format(path, exc)) from None
@@ -580,7 +768,16 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 
 
 def _env_overrides(environ: Mapping[str, str]) -> Dict[str, Dict[str, Any]]:
-    """Collect ``DARPA_SPILL_<SECTION>_<KEY>`` variables into nested form."""
+    """!
+    @brief Collect ``DARPA_SPILL_<SECTION>_<KEY>`` variables into nested form.
+
+    Matching is case-insensitive on the part after the prefix.  Unlike the
+    YAML layer, a prefixed variable that names no known field is ignored
+    silently (``DARPA_SPILL_CONFIG`` is one such, read by load_config).
+
+    @param environ the environment mapping.
+    @return ``{section: {key: raw string}}``.
+    """
     overrides: Dict[str, Dict[str, Any]] = {}
     # Aliases first, so the canonical name overwrites one when both are set.
     for name, (section_name, key) in ENV_ALIASES.items():
@@ -596,16 +793,26 @@ def _env_overrides(environ: Mapping[str, str]) -> Dict[str, Dict[str, Any]]:
                 key = remainder[len(prefix):]
                 if key in {f.name for f in fields(section_type)}:
                     overrides.setdefault(section_name, {})[key] = value
+                # First matching section wins; no section name is a prefix
+                # of another, so this is unambiguous.
                 break
     return overrides
 
 
 def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
-    """Build the command-line parser.
+    """!
+    @brief Build the command-line parser.
 
     Every option defaults to ``None`` so that "not given" is distinguishable
     from "given the same value as the default" --- otherwise a flag left off
     the command line would override the YAML file.
+
+    Only a subset of settings has a flag; the rest are reachable through
+    YAML or the environment.  Each flag's ``dest`` maps to a setting via
+    :data:`_ARG_MAP`.
+
+    @param prog program name shown in usage.
+    @return the parser.
     """
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -678,6 +885,8 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
                        metavar="N", help="hard ceiling on rows per query")
 
     group = parser.add_argument_group("authentication")
+    # --auth/--no-auth share a dest with default None: absent means "leave
+    # whatever YAML/env said".
     group.add_argument("--auth", dest="auth_enabled", action="store_true",
                        default=None, help="require OIDC single sign-on")
     group.add_argument("--no-auth", dest="auth_enabled", action="store_false",
@@ -707,7 +916,7 @@ def build_parser(prog: str = "darpa-spill-server") -> argparse.ArgumentParser:
     return parser
 
 
-#: Maps a parser destination onto ``(section, key)``.
+## Maps a parser destination onto ``(section, key)``.
 _ARG_MAP = {
     "host": ("server", "host"),
     "port": ("server", "port"),
@@ -747,26 +956,34 @@ def load_config(
     environ: Optional[Mapping[str, str]] = None,
     search_paths: Optional[Sequence[str]] = None,
 ) -> Config:
-    """Build a :class:`Config` from all four layers.
+    """!
+    @brief Build a :class:`Config` from all four layers.
 
-    :param args: already-parsed arguments; if omitted, *argv* is parsed.
-    :param argv: command line to parse when *args* is not given.
-    :param environ: environment to read; defaults to :data:`os.environ`.
-    :param search_paths: candidate config files; defaults to
+    Order of application: defaults, YAML, environment, command line; each
+    later layer overwrites only the keys it sets.
+
+    @param args already-parsed arguments; if omitted, *argv* is parsed.
+    @param argv command line to parse when *args* is not given.
+    @param environ environment to read; defaults to :data:`os.environ`.
+    @param search_paths candidate config files; defaults to
         :data:`DEFAULT_CONFIG_PATHS`.
-    :raises ConfigError: on any malformed or inconsistent setting.
+    @return the merged, validated configuration.
+    @throws ConfigError on any malformed or inconsistent setting.
     """
     if args is None:
         args = build_parser().parse_args(argv)
     environ = os.environ if environ is None else environ
 
+    # -- layer 1: defaults (the dataclass field defaults) -------------------
     config = Config()
 
     # -- layer 2: YAML ----------------------------------------------------
+    # The file's location itself follows CLI > environment > search path.
     config_path: Optional[Path] = None
     explicit = getattr(args, "config", None) or environ.get(ENV_PREFIX + "CONFIG")
     if explicit:
         config_path = Path(explicit).expanduser()
+        # A named file that is missing is an error, never a silent fallback.
         if not config_path.is_file():
             raise ConfigError("config file not found: {}".format(config_path))
     else:
@@ -788,15 +1005,18 @@ def load_config(
         _apply_mapping(config, env_data, "the environment")
 
     # -- layer 4: command line ---------------------------------------------
+    # Only options actually given (not None) take part; see build_parser.
     cli_data: Dict[str, Dict[str, Any]] = {}
     for dest, (section_name, key) in _ARG_MAP.items():
         value = getattr(args, dest, None)
         if value is not None:
             cli_data.setdefault(section_name, {})[key] = value
 
+    # Flags that imply a setting rather than carry a value.
     if getattr(args, "no_ingest", False):
         cli_data.setdefault("ingest", {})["enabled"] = False
     if getattr(args, "verbose", False):
+        # -v wins over an explicit --log-level given alongside it.
         cli_data.setdefault("logging", {})["level"] = "DEBUG"
 
     if cli_data:
@@ -807,12 +1027,15 @@ def load_config(
 
 
 def configure_logging(config: LoggingConfig) -> None:
-    """Install the configured logging handlers on the root logger.
+    """!
+    @brief Install the configured logging handlers on the root logger.
 
     A log file that cannot be opened is reported on stderr and skipped rather
     than raised. Losing the log destination is a real problem, but it is a
     smaller one than refusing to serve accelerator data because a directory
     is missing, and the console handler still captures everything.
+
+    @param config the ``logging`` section.
     """
     handlers: List[logging.Handler] = [logging.StreamHandler()]
     if config.file:
@@ -827,6 +1050,9 @@ def configure_logging(config: LoggingConfig) -> None:
                 file=sys.stderr,
             )
 
+    # force=True replaces handlers installed earlier (e.g. by a library or
+    # a previous call), so reconfiguration is idempotent.  An unknown level
+    # name falls back to INFO.
     logging.basicConfig(
         level=getattr(logging, config.level.upper(), logging.INFO),
         format=config.format,
