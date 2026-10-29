@@ -1,4 +1,9 @@
-"""Cron-driven publication of spill dumps (``darpa-spill-publish``).
+"""!
+@file src/darpa_spillserver/publish.py
+@brief Cron-driven dump -> shift -> upload -> status pipeline
+       (darpa-spill-publish) for the NOvA gateway.
+
+Cron-driven publication of spill dumps (``darpa-spill-publish``).
 
 On the gateway, cron runs this tool to turn the archive behind a running
 ``darpa-spill-server`` into published files, one stage feeding the next:
@@ -59,6 +64,25 @@ group, which is killed whole when it expires.
 **Exit status.**  0 success; 1 failure; 2 usage or configuration error;
 3 partial (some files failed); 75 temporary (ingest not ready, the same
 job is already running, or the dump lock is busy).
+
+@par Timestamp blur (shift stage) in brief
+The transform itself (dts1, keyed HMAC-SHA256 offsets per
+``(source, event_number)``) lives in :mod:`darpa_spillserver.shift` and is
+specified in ``docs/TIMESTAMP_SHIFT.md``.  This module only decides *which
+token* blurs *which file* and keeps the blurred and unblurred copies apart:
+- One token per **data month** (local time, D2), named
+  ``shift.token_name`` in ``shift.token_dir`` (D7, D8); see
+  Publisher.token_path(), Publisher.ensure_token() and Publisher.shift().
+- Every copy of an event (hourly file, daily file, a re-run) is blurred
+  with the same token, hence with the same offset, so comparing or
+  averaging copies reveals nothing (D7).
+- Raw files live under ``raw/`` and go only to ``fdp.raw_dest`` (private);
+  shifted files live under ``shifted/`` with a ``.shifted.`` infix and go
+  only to ``fdp.shifted_dest`` (public); see Publisher.templates() and
+  Publisher.remote_dir().
+- A file is shifted exactly when its row has ``dumped_at`` and no
+  ``shifted_at``; the shift is deterministic, so redoing it after a crash
+  rewrites a byte-identical file.
 """
 
 from __future__ import annotations
@@ -119,96 +143,109 @@ __all__ = [
     "parse_fdp_stat",
 ]
 
+## Module logger; :func:`_setup_logging` gives it its stderr handler.
 log = logging.getLogger("darpa_spillserver.publish")
 
+## Program name: mail subjects, log lines and the HTTP User-Agent.
 PROG = "darpa-spill-publish"
 
-#: Environment variables read by this tool: ``DARPA_SPILL_PUBLISH_*``.  They
-#: sit under the server's prefix but name none of its sections, so the
-#: server's loader ignores them.
+## Environment variables read by this tool: ``DARPA_SPILL_PUBLISH_*``.  They
+## sit under the server's prefix but name none of its sections, so the
+## server's loader ignores them.
 ENV_PUBLISH = ENV_PREFIX + "PUBLISH_"
+## ``DARPA_SPILL_PUBLISH_CONFIG``: the YAML file when ``--config`` is not
+## given.
 ENV_CONFIG = ENV_PUBLISH + "CONFIG"
 
-#: Used when neither ``--config`` nor ``DARPA_SPILL_PUBLISH_CONFIG`` is given
-#: and the file exists.
+## Used when neither ``--config`` nor ``DARPA_SPILL_PUBLISH_CONFIG`` is given
+## and the file exists.
 DEFAULT_CONFIG_FILE = "~/DARPA/publish/publish.yaml"
 
+## Exit status: success.
 EXIT_OK = 0
+## Exit status: failure (errors and nothing done, or a failed check).
 EXIT_FAILURE = 1
+## Exit status: usage or configuration error.
 EXIT_USAGE = 2
+## Exit status: partial; some files failed, the rest went through.
 EXIT_PARTIAL = 3
+## Exit status: temporary (sysexits EX_TEMPFAIL): ingest not ready, the
+## job already running, or the dump lock busy.  The next run retries.
 EXIT_TEMPFAIL = 75
 
-#: One hour of the NOvA clock.  Hours are stepped in real time, as
-#: :func:`split_range` does, so this is exact across a changeover.
+## One hour of the NOvA clock.  Hours are stepped in real time, as
+## :func:`split_range` does, so this is exact across a changeover.
 HOUR = 3600 * TICKS_PER_SECOND
 
-#: The split unit each kind of file is dumped with.
+## The split unit each kind of file is dumped with.
 UNITS = {"hourly": "hour", "daily": "day"}
 
-#: Files per ``fdp-put`` call, which bounds the length of its command line.
+## Files per ``fdp-put`` call, which bounds the length of its command line.
 UPLOAD_BATCH = 200
 
-#: Seconds a job waits for another job's upload stage before leaving its
-#: files to the next ``upload`` run.
+## Seconds a job waits for another job's upload stage before leaving its
+## files to the next ``upload`` run.
 UPLOAD_LOCK_WAIT = 600.0
 
-#: Default seconds hourly, daily and backfill wait for one another's dump
-#: stage (``locks.dump_wait``).  They share the ``dump`` lock because
-#: darpa-spill-dump writes each piece to a fixed ``FILE.part``: two writers of
-#: one label would interleave there.  Make it longer than one backfill day
-#: takes, or cron runs give up while a history backfill is running.
+## Default seconds hourly, daily and backfill wait for one another's dump
+## stage (``locks.dump_wait``).  They share the ``dump`` lock because
+## darpa-spill-dump writes each piece to a fixed ``FILE.part``: two writers of
+## one label would interleave there.  Make it longer than one backfill day
+## takes, or cron runs give up while a history backfill is running.
 DUMP_LOCK_WAIT = 1800.0
 
-#: Seconds between SIGTERM and SIGKILL for a subprocess past its timeout.
+## Seconds between SIGTERM and SIGKILL for a subprocess past its timeout.
 KILL_GRACE = 10.0
 
-#: Exit status of :data:`ENV_WRAPPER` when the environment script is missing
-#: or unreadable.
+## Exit status of :data:`ENV_WRAPPER` when the environment script is missing
+## or unreadable.
 EXIT_ENV_SCRIPT = 125
 
-#: ``fdp-put`` exit codes (Fermi-Data-Platform-Tools), plus the wrapper's.
+## ``fdp-put`` exit codes (Fermi-Data-Platform-Tools), plus the wrapper's.
 FDP_EXIT = {0: "ok", 4: "authentication", 6: "exists", 7: "network/TLS",
             9: "checksum mismatch", 12: "partial",
             EXIT_ENV_SCRIPT: "env script unreadable", 124: "timed out"}
 
-#: ``fdp-stat`` exit status for a path that does not exist.
+## ``fdp-stat`` exit status for a path that does not exist.
 FDP_STAT_NOT_FOUND = 5
 
-#: Bytes per read when checksumming a local file.
+## Bytes per read when checksumming a local file.
 ADLER32_CHUNK = 1 << 20
 
-#: Values in the credentials ``.env`` that mean "not filled in yet".
+## Values in the credentials ``.env`` that mean "not filled in yet".
 PLACEHOLDERS = ("", "CHANGEME")
 
-#: Runs as ``bash -c`` so the FDP tools see the environment their install
-#: needs; ``"$@"`` is the real command, so nothing is re-parsed by a shell.
-#: The script's own exit status is ignored (a last line such as
-#: ``[ -d X ] && ...`` may be false); a script that cannot be read exits
-#: :data:`EXIT_ENV_SCRIPT` with a message.  Its stderr is kept.
+## Runs as ``bash -c`` so the FDP tools see the environment their install
+## needs; ``"$@"`` is the real command, so nothing is re-parsed by a shell.
+## The script's own exit status is ignored (a last line such as
+## ``[ -d X ] && ...`` may be false); a script that cannot be read exits
+## :data:`EXIT_ENV_SCRIPT` with a message.  Its stderr is kept.
 ENV_WRAPPER = ('[ -r "$ENV_SCRIPT" ] || { echo "cannot read env script '
                '$ENV_SCRIPT" >&2; exit 125; }; '
                'source "$ENV_SCRIPT" >/dev/null; exec "$@"')
 
-#: Subcommands that take a job lock (``check`` and ``status`` included).
+## Subcommands that take a job lock (``check`` and ``status`` included).
 JOBS = ("hourly", "daily", "backfill", "upload", "token", "creds", "status",
         "check")
 
-#: How many runs per job the state database keeps.
+## How many runs per job the state database keeps.
 RUNS_KEPT = 500
 
 
 class PublishConfigError(ValueError):
-    """Configuration is missing, malformed, or contradictory."""
+    """!@brief Configuration is missing, malformed, or contradictory.
+
+    Raised by the settings loader; :func:`main` turns it into exit 2.
+    """
 
 
 # ------------------------------------------------------------- configuration
 
 
-#: Every setting and its default.  The YAML file, ``.env``, the environment
-#: and ``--set`` may only name keys that appear here (``streams`` excepted,
-#: whose keys are the stream names), and values are coerced to the type of
-#: the default, as in :mod:`darpa_spillserver.config`.
+## Every setting and its default.  The YAML file, ``.env``, the environment
+## and ``--set`` may only name keys that appear here (``streams`` excepted,
+## whose keys are the stream names), and values are coerced to the type of
+## the default, as in :mod:`darpa_spillserver.config`.
 DEFAULTS: Dict[str, Any] = {
     "server": {
         "url": "https://novadaq-near-gateway-01.fnal.gov:8443",
@@ -282,7 +319,7 @@ DEFAULTS: Dict[str, Any] = {
     "locks": {"dump_wait": DUMP_LOCK_WAIT},
 }
 
-#: Short environment names, besides ``DARPA_SPILL_PUBLISH_<SECTION>_<KEY>``.
+## Short environment names, besides ``DARPA_SPILL_PUBLISH_<SECTION>_<KEY>``.
 ENV_ALIASES = {
     "SERVER": ("server", "url"),
     "CA_BUNDLE": ("server", "ca_bundle"),
@@ -293,12 +330,19 @@ ENV_ALIASES = {
     "DOTENV": ("paths", "dotenv"),
 }
 
-#: What a stream may select by, each passed to darpa-spill-dump repeatedly.
+## What a stream may select by, each passed to darpa-spill-dump repeatedly.
 STREAM_KEYS = {"signals": "--signal", "types": "--type", "sources": "--source"}
 
 
 def _env_names() -> Dict[str, Tuple[str, ...]]:
-    """Map every recognised environment variable onto its setting."""
+    """!@brief Map every recognised environment variable onto its setting.
+
+    Long form ``DARPA_SPILL_PUBLISH_<SECTION>_<KEY>`` for every key of
+    :data:`DEFAULTS` (``streams`` excepted: stream names are free-form), plus
+    the short aliases of :data:`ENV_ALIASES`.
+    @return ``{variable name: (section, key)}`` or ``{name: (key,)}`` for a
+            top-level setting.
+    """
     names: Dict[str, Tuple[str, ...]] = {}
     for key, default in DEFAULTS.items():
         if key == "streams":
@@ -314,7 +358,18 @@ def _env_names() -> Dict[str, Tuple[str, ...]]:
 
 
 def _coerce(value: Any, default: Any, where: str) -> Any:
-    """Coerce a YAML, environment or command-line value to *default*'s type."""
+    """!@brief Coerce a YAML, environment or command-line value to
+           *default*'s type.
+
+    Booleans accept 1/0, true/false, yes/no, on/off; lists accept a YAML flow
+    list (``[a, b]``) or a comma-separated string.
+    @param value   the value as read (string from env/CLI, any YAML type).
+    @param default the default from :data:`DEFAULTS`, which fixes the type.
+    @param where   dotted setting name, for error messages.
+    @return the value converted to the type of *default*.
+    @throws PublishConfigError if the value cannot be converted.
+    """
+    # bool before int: bool is a subclass of int.
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -353,6 +408,12 @@ def _coerce(value: Any, default: Any, where: str) -> Any:
 
 
 def _yaml_value(text: str, where: str) -> Any:
+    """!@brief Parse one YAML value given as text (e.g. a ``--set`` list).
+    @param text  YAML source.
+    @param where where it came from, for error messages.
+    @return the parsed value.
+    @throws PublishConfigError if the text is not valid YAML.
+    """
     import yaml
     try:
         return yaml.safe_load(text)
@@ -362,6 +423,14 @@ def _yaml_value(text: str, where: str) -> Any:
 
 
 def _stream_spec(name: str, spec: Any, origin: str) -> Dict[str, List[str]]:
+    """!@brief Validate and normalise one stream definition.
+    @param name   stream name (becomes part of file names).
+    @param spec   mapping of ``signals``/``types``/``sources`` lists, or None
+                  for an unfiltered stream.
+    @param origin where it came from, for error messages.
+    @return ``{key: [values]}`` with only :data:`STREAM_KEYS` keys.
+    @throws PublishConfigError on a non-mapping or an unknown key.
+    """
     if spec is None:
         return {}
     if not isinstance(spec, Mapping):
@@ -378,7 +447,12 @@ def _stream_spec(name: str, spec: Any, origin: str) -> Dict[str, List[str]]:
 
 
 def _merge(cfg: Dict[str, Any], data: Mapping[str, Any], origin: str) -> None:
-    """Merge a nested mapping into *cfg*, refusing unknown keys."""
+    """!@brief Merge a nested mapping into *cfg*, refusing unknown keys.
+    @param cfg    settings being built (modified in place).
+    @param data   mapping from one source (YAML, ``.env``, environment, CLI).
+    @param origin name of that source, for error messages.
+    @throws PublishConfigError on an unknown section/key or a bad value.
+    """
     for key, value in data.items():
         if key not in DEFAULTS:
             raise PublishConfigError(
@@ -411,6 +485,11 @@ def _merge(cfg: Dict[str, Any], data: Mapping[str, Any], origin: str) -> None:
 
 
 def _nest(path: Sequence[str], value: Any) -> Dict[str, Any]:
+    """!@brief Build ``{a: {b: value}}`` from the path ``(a, b)``.
+    @param path  setting path, outermost first.
+    @param value the leaf value.
+    @return the nested mapping, ready for :func:`_merge`.
+    """
     out: Dict[str, Any] = {path[-1]: value}
     for part in reversed(path[:-1]):
         out = {part: out}
@@ -418,7 +497,11 @@ def _nest(path: Sequence[str], value: Any) -> Dict[str, Any]:
 
 
 def _parse_set(text: str) -> Tuple[Tuple[str, ...], Any]:
-    """Parse one ``--set section.key=value``."""
+    """!@brief Parse one ``--set section.key=value``.
+    @param text the option argument.
+    @return ``(path tuple, value string)``.
+    @throws PublishConfigError if there is no ``=`` or no key.
+    """
     name, sep, value = text.partition("=")
     path = tuple(p for p in name.strip().split(".") if p)
     if not sep or not path:
@@ -429,6 +512,17 @@ def _parse_set(text: str) -> Tuple[Tuple[str, ...], Any]:
 
 def _apply_set(cfg: Dict[str, Any], path: Tuple[str, ...], value: Any,
                origin: str) -> None:
+    """!@brief Apply one parsed ``--set`` to *cfg*.
+
+    ``streams.NAME`` takes a whole stream spec as YAML and
+    ``streams.NAME.KEY`` one selector list; anything else goes through
+    :func:`_merge` like the other sources.
+    @param cfg    settings being built (modified in place).
+    @param path   dotted path from :func:`_parse_set`.
+    @param value  the value text.
+    @param origin name of the source, for error messages.
+    @throws PublishConfigError on an unknown key or a bad value.
+    """
     if path[0] == "streams" and len(path) >= 2:
         # streams.NAME (whole spec, as YAML) or streams.NAME.KEY (a list).
         streams = dict(cfg["streams"])
@@ -446,7 +540,15 @@ def _apply_set(cfg: Dict[str, Any], path: Tuple[str, ...], value: Any,
 
 
 def read_dotenv(path: str) -> Dict[str, str]:
-    """Read ``KEY=VALUE`` lines; ``#`` comments, ``export`` and quotes allowed."""
+    """!@brief Read ``KEY=VALUE`` lines; ``#`` comments, ``export`` and quotes
+           allowed.
+
+    One level of matching single or double quotes is stripped; no variable
+    expansion is done.  Lines without ``=`` are ignored.
+    @param path file name (``~`` expanded).
+    @return ``{key: value}``.
+    @throws OSError if the file cannot be read.
+    """
     values: Dict[str, str] = {}
     with open(os.path.expanduser(path), encoding="utf-8") as handle:
         for line in handle:
@@ -467,11 +569,16 @@ def read_dotenv(path: str) -> Dict[str, str]:
 
 def load_settings(args: argparse.Namespace,
                   environ: Mapping[str, str]) -> Dict[str, Any]:
-    """Merge defaults, YAML, ``.env``, environment and command line.
+    """!@brief Merge defaults, YAML, ``.env``, environment and command line.
 
     Precedence is command line > environment > ``.env`` > YAML > defaults.
     ``paths.dotenv`` itself is resolved from the command line, the
     environment and the YAML file before ``.env`` is read.
+    @param args    parsed command line (``config``, ``set``, ``set_after``).
+    @param environ the process environment.
+    @return the merged, validated settings; ``_source`` names the YAML file
+            used, or ``(defaults)``.
+    @throws PublishConfigError on any unreadable or invalid source.
     """
     cfg = copy.deepcopy(DEFAULTS)
 
@@ -501,6 +608,8 @@ def load_settings(args: argparse.Namespace,
     env = [(names[name], environ[name]) for name in sorted(names)
            if name in environ]
 
+    # paths.dotenv may itself be set in the environment or by --set,
+    # which are merged only after .env; look for it there first.
     dotenv = cfg["paths"]["dotenv"]
     for setting, value in env + cli:
         if setting == ("paths", "dotenv"):
@@ -511,6 +620,8 @@ def load_settings(args: argparse.Namespace,
         except OSError as exc:
             raise PublishConfigError("cannot read paths.dotenv {}: {}".format(
                 dotenv, exc))
+        # Only this tool's own names are taken from .env; the file may
+        # hold others (it can be shared), which are ignored.
         for name in sorted(values):
             if name in names:
                 _merge(cfg, _nest(names[name], values[name]), dotenv)
@@ -526,6 +637,12 @@ def load_settings(args: argparse.Namespace,
 
 
 def _validate(cfg: Dict[str, Any]) -> None:
+    """!@brief Cross-check merged settings and normalise ``formats``.
+    @param cfg merged settings (``formats`` de-duplicated in place).
+    @throws PublishConfigError on an unknown timezone, bad formats, no
+            streams, a name unusable in file names, negative catch-up
+            windows, ``fdp.parallel`` < 1 or a non-http(s) server URL.
+    """
     try:
         get_timezone(cfg["timezone"])
     except NovaTimeError as exc:
@@ -554,10 +671,21 @@ def _validate(cfg: Dict[str, Any]) -> None:
 
 
 def _utc_iso(moment: datetime) -> str:
+    """!@brief An aware datetime as UTC ISO 8601 to the second.
+
+    All stamps in the state database use this form, so they sort and compare
+    correctly as strings.
+    @param moment aware datetime.
+    @return e.g. ``2026-10-22T18:10:00+00:00``.
+    """
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _from_iso(text: Optional[str]) -> Optional[datetime]:
+    """!@brief Parse an ISO 8601 stamp written by :func:`_utc_iso`.
+    @param text the stamp, or None/empty.
+    @return the datetime, or None if absent or unparsable.
+    """
     if not text:
         return None
     try:
@@ -567,12 +695,15 @@ def _from_iso(text: Optional[str]) -> Optional[datetime]:
 
 
 def count_rows(path: str, fmt: str) -> Optional[int]:
-    """Events in a darpa-spill-dump file.
+    """!@brief Events in a darpa-spill-dump file.
 
     CSV: lines that are neither ``#`` comments nor the header.  JSON: the
     ``summary.returned`` count the dump writes last, read from the tail so a
     multi-gigabyte file is not parsed; failing that, ``meta.expected`` or the
     length of ``events``.
+    @param path the dump file.
+    @param fmt  ``csv`` or ``json``.
+    @return the event count, or None if the file cannot be read or parsed.
     """
     try:
         if fmt == "csv":
@@ -581,10 +712,12 @@ def count_rows(path: str, fmt: str) -> Optional[int]:
                 for line in handle:
                     if not line.startswith(b"#") and line.strip():
                         lines += 1
-            return max(0, lines - 1)
+            return max(0, lines - 1)        # less the header line
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
+            # The summary object is the last thing the dump writes;
+            # 64 KiB from the end is ample for it.
             handle.seek(max(0, size - 65536))
             tail = handle.read().decode("utf-8", "replace")
         at = tail.rfind('"summary":')
@@ -608,18 +741,23 @@ def count_rows(path: str, fmt: str) -> Optional[int]:
         return None
 
 
-#: Formats ``klist`` uses for times: MIT in the C locale (2- or 4-digit
-#: year), Heimdal, and ISO.
+## Formats ``klist`` uses for times: MIT in the C locale (2- or 4-digit
+## year), Heimdal, and ISO.
 _KLIST_FORMATS = ("%m/%d/%Y %H:%M:%S", "%m/%d/%y %H:%M:%S",
                   "%b %d %H:%M:%S %Y", "%d %b %Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
                   "%Y-%m-%d %H:%M:%S")
 
 
 def _klist_time(text: str) -> Optional[float]:
-    """A ``klist`` time (host local time) as a UNIX timestamp."""
+    """!@brief A ``klist`` time (host local time) as a UNIX timestamp.
+    @param text the time as klist prints it, in any of :data:`_KLIST_FORMATS`.
+    @return seconds since the epoch, or None if no format matches.
+    """
     text = " ".join(text.split())
     for fmt in _KLIST_FORMATS:
         try:
+            # Naive: astimezone() takes it as host local time, which
+            # is what klist prints.
             return datetime.strptime(text, fmt).astimezone().timestamp()
         except ValueError:
             continue
@@ -627,10 +765,12 @@ def _klist_time(text: str) -> Optional[float]:
 
 
 def parse_klist(text: str) -> Dict[str, Any]:
-    """The principal, TGT expiry and renew-until from ``klist`` output.
+    """!@brief The principal, TGT expiry and renew-until from ``klist`` output.
 
     Times are UNIX seconds, or ``None`` where the line was missing or not
     understood.
+    @param text ``klist`` stdout (run with ``LC_ALL=C``).
+    @return ``{"principal", "expires", "renew_until"}``.
     """
     info: Dict[str, Any] = {"principal": None, "expires": None,
                             "renew_until": None}
@@ -640,6 +780,8 @@ def parse_klist(text: str) -> Dict[str, Any]:
         if stripped.lower().startswith(("default principal:", "principal:")):
             info["principal"] = stripped.split(":", 1)[1].strip()
         if "krbtgt/" in stripped and info["expires"] is None:
+            # Columns are separated by two or more spaces; single spaces
+            # occur inside the times.  The renew line follows the TGT.
             parts = re.split(r"\s{2,}", stripped)
             if len(parts) >= 3:
                 info["expires"] = _klist_time(parts[1])
@@ -653,10 +795,17 @@ def parse_klist(text: str) -> Dict[str, Any]:
 
 
 def jwt_expiry(text: str) -> Optional[int]:
-    """The ``exp`` claim of a JWT, decoded without verifying it."""
+    """!@brief The ``exp`` claim of a JWT, decoded without verifying it.
+
+    Only for reporting how long the FDP bearer token has left; nothing is
+    trusted on the strength of it.
+    @param text the token file's contents.
+    @return ``exp`` in UNIX seconds, or None if it is not a decodable JWT.
+    """
     parts = text.strip().split(".")
     if len(parts) < 2:
         return None
+    # Restore the base64url padding that JWTs strip.
     payload = parts[1] + "=" * (-len(parts[1]) % 4)
     try:
         claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
@@ -665,11 +814,17 @@ def jwt_expiry(text: str) -> Optional[int]:
         return None
 
 
-#: Shapes of secrets that must never reach a log: JWTs and Vault tokens.
+## Shapes of secrets that must never reach a log: JWTs and Vault tokens.
 _SECRET_SHAPES = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]*|hv[sb]\.[\w-]{8,}")
 
 
 def _redact(text: str, secrets: Sequence[str] = ()) -> str:
+    """!@brief Mask secrets in text bound for logs, mail or the status page.
+    @param text    text that may contain secrets.
+    @param secrets literal secrets (e.g. the SSO password) to mask as well as
+                   anything shaped like a JWT or Vault token.
+    @return the text with each secret replaced by ``***``.
+    """
     for secret in secrets:
         if secret:
             text = text.replace(secret, "***")
@@ -677,6 +832,13 @@ def _redact(text: str, secrets: Sequence[str] = ()) -> str:
 
 
 def _signal_group(proc: subprocess.Popen, signum: int) -> None:
+    """!@brief Send *signum* to the process group led by *proc*.
+
+    The child was started with ``start_new_session``, so its PID is its
+    process-group ID.  A group that is already gone is ignored.
+    @param proc   the child process.
+    @param signum signal number.
+    """
     try:
         if hasattr(os, "killpg"):
             os.killpg(proc.pid, signum)
@@ -687,7 +849,13 @@ def _signal_group(proc: subprocess.Popen, signum: int) -> None:
 
 
 def _kill_group(proc: subprocess.Popen) -> Tuple[str, str]:
-    """Stop a timed-out child and its process group; return its output."""
+    """!@brief Stop a timed-out child and its process group; return its output.
+
+    SIGTERM, then SIGKILL after :data:`KILL_GRACE` seconds.
+    @param proc the timed-out child.
+    @return ``(stdout, stderr)`` collected so far (empty if the pipes had
+            to be abandoned).
+    """
     import signal
     _signal_group(proc, signal.SIGTERM)
     try:
@@ -708,13 +876,25 @@ def _kill_group(proc: subprocess.Popen) -> Tuple[str, str]:
 
 
 def _tail(text: str, lines: int = 5) -> str:
+    """!@brief The last non-blank lines of *text*, joined on one line.
+    @param text  subprocess output.
+    @param lines how many lines to keep.
+    @return the lines joined with ``" | "``, for one-line log and DB errors.
+    """
     kept = [l for l in (text or "").strip().splitlines() if l.strip()]
     return " | ".join(kept[-lines:])
 
 
 def http_get_json(url: str, ca_bundle: str, insecure: bool,
                   timeout: float) -> Any:
-    """GET *url* and parse the JSON body.  Tests replace this function."""
+    """!@brief GET *url* and parse the JSON body.  Tests replace this function.
+    @param url       full URL.
+    @param ca_bundle CA file to verify the server with; ignored if missing.
+    @param insecure  skip TLS verification.
+    @param timeout   seconds.
+    @return the decoded JSON body.
+    @throws httpx.HTTPError on a transport error or a non-2xx status.
+    """
     import httpx
     if insecure:
         verify: Any = False
@@ -729,12 +909,20 @@ def http_get_json(url: str, ca_bundle: str, insecure: bool,
         return response.json()
 
 
-#: Replaced by tests so the ingest wait does not sleep.
+## Replaced by tests so the ingest wait does not sleep.
 _sleep = time.sleep
 
 
 def adler32_file(path: str) -> str:
-    """The adler32 of a file as dCache reports it: 8 lowercase hex digits."""
+    """!
+    @brief The adler32 of a file as dCache reports it: 8 lowercase hex digits.
+
+    Read in :data:`ADLER32_CHUNK` pieces, so multi-gigabyte daily files are
+    not loaded whole.
+    @param path local file.
+    @return e.g. ``00620062``.
+    """
+    # adler32 starts from 1; the mask keeps the result unsigned.
     value = 1
     with open(path, "rb") as handle:
         while True:
@@ -746,7 +934,13 @@ def adler32_file(path: str) -> str:
 
 
 def _norm_adler32(value: Any) -> Optional[str]:
-    """A remote adler32 in the form of :func:`adler32_file`, or ``None``."""
+    """!
+    @brief A remote adler32 in the form of :func:`adler32_file`, or ``None``.
+
+    Accepts an optional ``0x`` prefix, upper case and missing leading zeros.
+    @param value checksum as found in ``fdp-stat`` output.
+    @return 8 lowercase hex digits, or None if absent or malformed.
+    """
     if value is None:
         return None
     text = str(value).strip().lower()
@@ -758,9 +952,13 @@ def _norm_adler32(value: Any) -> Optional[str]:
 
 
 def parse_fdp_stat(text: str) -> List[Dict[str, Any]]:
-    """The entries printed by ``fdp-stat --json``; ValueError if not JSON.
+    """!
+    @brief The entries printed by ``fdp-stat --json``; ValueError if not JSON.
 
     The tool prints a list of objects; a single object is accepted too.
+    @param text ``fdp-stat --json`` stdout.
+    @return list of entry dicts (non-dict items dropped).
+    @throws ValueError if the text is not JSON or not a list/object.
     """
     data = json.loads(text or "")
     if isinstance(data, dict):
@@ -771,6 +969,12 @@ def parse_fdp_stat(text: str) -> List[Dict[str, Any]]:
 
 
 def _stat_size(entry: Mapping[str, Any]) -> Optional[int]:
+    """!@brief The size of an ``fdp-stat`` entry.
+
+    ``-1`` is the namespace entry a failed PUT leaves behind (no data).
+    @param entry one entry from :func:`parse_fdp_stat`.
+    @return size in bytes, or None if missing or not an integer.
+    """
     try:
         return int(entry.get("size"))
     except (TypeError, ValueError):
@@ -778,6 +982,13 @@ def _stat_size(entry: Mapping[str, Any]) -> Optional[int]:
 
 
 def _stat_adler32(entry: Mapping[str, Any]) -> Optional[str]:
+    """!@brief The adler32 of an ``fdp-stat`` entry, normalised.
+
+    Accepts both the ``{"adler32": v}`` and the
+    ``[{"type": "adler32", "value": v}]`` shapes of ``checksums``.
+    @param entry one entry from :func:`parse_fdp_stat`.
+    @return 8 lowercase hex digits, or None if the entry has no adler32.
+    """
     sums = entry.get("checksums")
     if isinstance(sums, dict):
         return _norm_adler32(sums.get("adler32") or sums.get("ADLER32"))
@@ -791,7 +1002,14 @@ def _stat_adler32(entry: Mapping[str, Any]) -> Optional[str]:
 
 def _contiguous(pieces: Sequence[Tuple[int, int, str]]
                 ) -> List[List[Tuple[int, int, str]]]:
-    """Split time-ordered pieces into runs that abut."""
+    """!@brief Split time-ordered pieces into runs that abut.
+
+    Each run can be fetched with one darpa-spill-dump call; a gap (a piece
+    already complete) starts a new run.
+    @param pieces ``(start, end, label)`` pieces, ordered by start.
+    @return list of runs, each a list of pieces with
+            ``prev.end == next.start``.
+    """
     runs: List[List[Tuple[int, int, str]]] = []
     for piece in pieces:
         if runs and runs[-1][-1][1] == piece[0]:
@@ -802,6 +1020,10 @@ def _contiguous(pieces: Sequence[Tuple[int, int, str]]
 
 
 def _human_bytes(n: Optional[float]) -> str:
+    """!@brief Format a byte count with a binary-prefixed unit (B, KB, ... TB).
+    @param n bytes, or None.
+    @return e.g. ``4.6 GB``; ``-`` for None.
+    """
     if n is None:
         return "-"
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -813,6 +1035,10 @@ def _human_bytes(n: Optional[float]) -> str:
 
 
 def _human_seconds(s: Optional[float]) -> str:
+    """!@brief Format a duration as s, min, h or d, keeping the sign.
+    @param s seconds, or None.
+    @return e.g. ``12 min``; ``-`` for None.
+    """
     if s is None:
         return "-"
     sign = "-" if s < 0 else ""
@@ -829,6 +1055,14 @@ def _human_seconds(s: Optional[float]) -> str:
 # ------------------------------------------------------------------- state
 
 
+## State database schema.  ``files`` has one row per raw file, keyed
+## by its path, and carries its shifted twin (``shifted_path``): a stage
+## is done when its stamp is set -- ``dumped_at``, ``shifted_at``,
+## ``raw_uploaded_at`` / ``shifted_uploaded_at`` (set only after
+## ``fdp-stat`` verification).  ``raw_adler32`` / ``shifted_adler32``
+## cache local checksums.  ``runs`` is the job history, ``alerts`` the
+## per-condition mail rate limit, ``kv`` small persistent values.
+## Columns added later are migrated in :class:`State`.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     raw_path TEXT PRIMARY KEY,
@@ -872,17 +1106,28 @@ CREATE TABLE IF NOT EXISTS kv (
 
 
 class State:
-    """The publisher's SQLite database.
+    """!@brief The publisher's SQLite database.
 
     In a dry run the database is copied into memory (or created there), so
     every decision is made from the real state but nothing is written.
+
+    Tables (see :data:`SCHEMA`): ``files`` (one row per raw file, carrying
+    its shifted twin), ``runs``, ``alerts`` and ``kv``.  Every write commits
+    at once, so a run killed at any point leaves a consistent state for the
+    next one.
     """
 
     def __init__(self, path: str, dry_run: bool = False):
+        """!@brief Open (or create) the database and migrate older schemas.
+        @param path    database file, ``{state_dir}/publish.db``.
+        @param dry_run work on an in-memory copy; the file is opened read-only.
+        """
         self.path = path
         if dry_run:
             self.db = sqlite3.connect(":memory:")
             if os.path.isfile(path):
+                # Read-only URI: a dry run must not create a journal or
+                # otherwise touch the real database.
                 source = sqlite3.connect("file:{}?mode=ro".format(quote(path)),
                                          uri=True)
                 try:
@@ -908,11 +1153,16 @@ class State:
         self.db.commit()
 
     def close(self) -> None:
+        """!@brief Close the database connection."""
         self.db.close()
 
     # -- files
 
     def get(self, raw_path: str) -> Optional[Dict[str, Any]]:
+        """!@brief The ``files`` row of one raw file.
+        @param raw_path absolute path of the raw file (the primary key).
+        @return the row as a dict, or None.
+        """
         row = self.db.execute("SELECT * FROM files WHERE raw_path = ?",
                               (raw_path,)).fetchone()
         return dict(row) if row else None
@@ -920,6 +1170,23 @@ class State:
     def record_dump(self, raw_path: str, stream: str, kind: str, label: str,
                     fmt: str, rows: Optional[int], size: Optional[int],
                     shifted_path: str, when: str) -> None:
+        """!
+        @brief Record a raw file as dumped (insert, or complete a failed row).
+
+        Also records where its shifted copy goes, clears any error and drops
+        the cached checksums, which belonged to an earlier file of that name.
+        Upload and shift stamps of an existing row are left alone.
+        @param raw_path     raw file path (key).
+        @param stream       stream name.
+        @param kind         ``hourly`` or ``daily``.
+        @param label        piece label (``2026-10-22T13-0500`` or
+                            ``2026-10-22``).
+        @param fmt          ``csv`` or ``json``.
+        @param rows         event count, or None if unknown.
+        @param size         bytes, or None if unknown.
+        @param shifted_path where the shifted copy is (to be) written.
+        @param when         UTC ISO stamp.
+        """
         self.db.execute(
             "INSERT INTO files (raw_path, stream, kind, label, fmt, rows, "
             "bytes, dumped_at, shifted_path, last_error, updated_at) "
@@ -936,7 +1203,19 @@ class State:
     def record_missing(self, raw_path: str, stream: str, kind: str, label: str,
                        fmt: str, shifted_path: str, error: str,
                        when: str) -> None:
-        """Note an error for a file that was never written."""
+        """!@brief Note an error for a file that was never written.
+
+        The row has no ``dumped_at``, so the piece stays incomplete and the
+        next run in the catch-up window dumps it again.
+        @param raw_path     raw file path (key).
+        @param stream       stream name.
+        @param kind         ``hourly`` or ``daily``.
+        @param label        piece label.
+        @param fmt          ``csv`` or ``json``.
+        @param shifted_path where the shifted copy would go.
+        @param error        reason, shown on the status page.
+        @param when         UTC ISO stamp.
+        """
         self.db.execute(
             "INSERT INTO files (raw_path, stream, kind, label, fmt, "
             "shifted_path, last_error, updated_at) VALUES "
@@ -946,6 +1225,12 @@ class State:
         self.db.commit()
 
     def update(self, raw_path: str, when: str, **values: Any) -> None:
+        """!@brief Set columns of one ``files`` row (and ``updated_at``).
+        @param raw_path raw file path (key).
+        @param when     UTC ISO stamp for ``updated_at``.
+        @param values   column=value pairs; column names come from this module
+                        only, never from input.
+        """
         values["updated_at"] = when
         columns = ", ".join("{} = ?".format(k) for k in values)
         self.db.execute("UPDATE files SET {} WHERE raw_path = ?".format(columns),
@@ -954,6 +1239,11 @@ class State:
 
     def for_labels(self, kind: str,
                    labels: Sequence[str]) -> List[Dict[str, Any]]:
+        """!@brief All ``files`` rows of the given kind and labels.
+        @param kind   ``hourly`` or ``daily``.
+        @param labels piece labels.
+        @return list of row dicts (every stream and format).
+        """
         if not labels:
             return []
         marks = ", ".join("?" for _ in labels)
@@ -963,6 +1253,13 @@ class State:
         return [dict(r) for r in rows]
 
     def pending_uploads(self) -> List[Dict[str, Any]]:
+        """!@brief Rows with a raw or shifted copy present locally but not yet
+        uploaded.
+
+        A shifted copy counts only once ``shifted_at`` is set, so an unshifted
+        or half-shifted file is never offered to FDP.
+        @return list of row dicts, ordered by raw path.
+        """
         rows = self.db.execute(
             "SELECT * FROM files WHERE (dumped_at IS NOT NULL AND "
             "raw_uploaded_at IS NULL) OR (shifted_at IS NOT NULL AND "
@@ -970,7 +1267,10 @@ class State:
         return [dict(r) for r in rows]
 
     def uploaded(self, since: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Rows with a copy recorded uploaded (at or after *since*)."""
+        """!@brief Rows with a copy recorded uploaded (at or after *since*).
+        @param since UTC ISO stamp; None or empty for all.
+        @return list of row dicts, ordered by raw path.
+        """
         rows = self.db.execute(
             "SELECT * FROM files WHERE (raw_uploaded_at IS NOT NULL AND "
             "raw_uploaded_at >= ?) OR (shifted_uploaded_at IS NOT NULL AND "
@@ -979,6 +1279,10 @@ class State:
         return [dict(r) for r in rows]
 
     def recent_errors(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """!@brief The newest file errors, for the status page.
+        @param limit maximum number of rows.
+        @return list of dicts, newest first.
+        """
         rows = self.db.execute(
             "SELECT raw_path, stream, kind, label, fmt, last_error, updated_at "
             "FROM files WHERE last_error IS NOT NULL "
@@ -986,6 +1290,11 @@ class State:
         return [dict(r) for r in rows]
 
     def totals(self) -> Dict[str, Any]:
+        """!
+        @brief Counts over all files: dumped, rows, bytes, shifted, uploaded,
+        errors.
+        @return one dict of totals.
+        """
         row = self.db.execute(
             "SELECT COUNT(dumped_at) AS files, COALESCE(SUM(rows), 0) AS rows, "
             "COALESCE(SUM(bytes), 0) AS bytes, COUNT(shifted_at) AS shifted, "
@@ -997,6 +1306,14 @@ class State:
     # -- runs
 
     def run_start(self, job: str, when: str) -> int:
+        """!
+        @brief Record the start of a job run and prune old runs of that job.
+
+        Keeps the newest :data:`RUNS_KEPT` runs per job.
+        @param job  subcommand name.
+        @param when UTC ISO stamp.
+        @return the run id.
+        """
         cursor = self.db.execute(
             "INSERT INTO runs (job, started_at) VALUES (?, ?)", (job, when))
         self.db.execute(
@@ -1007,6 +1324,13 @@ class State:
 
     def run_finish(self, run_id: int, when: str, result: str,
                    detail: Dict[str, Any]) -> None:
+        """!@brief Record the end of a run.
+        @param run_id id from :meth:`run_start`.
+        @param when   UTC ISO stamp.
+        @param result ``ok``, ``partial``, ``failed``, ``busy``,
+                      ``ingest-not-ready`` or ``usage``.
+        @param detail JSON-serialisable summary (errors, warnings, counts).
+        """
         self.db.execute(
             "UPDATE runs SET finished_at = ?, result = ?, detail = ? "
             "WHERE id = ?", (when, result, json.dumps(detail, default=str),
@@ -1014,6 +1338,9 @@ class State:
         self.db.commit()
 
     def last_runs(self) -> Dict[str, Dict[str, Any]]:
+        """!@brief The latest finished run of every job.
+        @return ``{job: row}``, ``detail`` decoded from JSON.
+        """
         rows = self.db.execute(
             "SELECT * FROM runs WHERE id IN (SELECT MAX(id) FROM runs "
             "WHERE finished_at IS NOT NULL GROUP BY job)").fetchall()
@@ -1028,11 +1355,19 @@ class State:
         return out
 
     def first_run_started(self, job: str) -> Optional[str]:
+        """!@brief When *job* first ran (as far as the pruned history goes).
+        @param job subcommand name.
+        @return UTC ISO stamp, or None if it never ran.
+        """
         row = self.db.execute("SELECT MIN(started_at) AS first FROM runs "
                               "WHERE job = ?", (job,)).fetchone()
         return row["first"] if row else None
 
     def failed_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """!@brief The newest finished runs whose result was not ``ok``.
+        @param limit maximum number of rows.
+        @return list of row dicts (``detail`` still JSON text), newest first.
+        """
         rows = self.db.execute(
             "SELECT * FROM runs WHERE result NOT IN ('ok') AND finished_at "
             "IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
@@ -1042,11 +1377,16 @@ class State:
 
     def alert_due(self, key: str, min_interval: float, now: datetime,
                   max_interval: Optional[float] = None) -> bool:
-        """Count an occurrence of *key*; whether it is time to mail it.
+        """!@brief Count an occurrence of *key*; whether it is time to mail it.
 
         The wait doubles with every mail sent for a condition that has not
         cleared (:meth:`alert_clear`): *min_interval*, twice that, four
         times, ... up to *max_interval*.
+        @param key          condition name, e.g. ``upload-exit-4``.
+        @param min_interval seconds before the first repeat.
+        @param now          the current time (aware).
+        @param max_interval cap on the doubled wait, seconds; None for no cap.
+        @return True if a mail should go now.
         """
         row = self.db.execute("SELECT last_sent, sent FROM alerts "
                               "WHERE key = ?", (key,)).fetchone()
@@ -1057,26 +1397,39 @@ class State:
         last = _from_iso(row["last_sent"]) if row else None
         if last is None:
             return True
+        # After n mails: min_interval * 2**(n-1); the exponent is capped so
+        # the float stays finite however long a condition lasts.
         wait = min_interval * 2 ** min(max(0, (row["sent"] or 1) - 1), 30)
         if max_interval:
             wait = min(wait, max(max_interval, min_interval))
         return (now - last).total_seconds() >= wait
 
     def alert_sent(self, key: str, now: datetime) -> None:
+        """!@brief Record that the alert *key* was mailed.
+        @param key condition name.
+        @param now the current time (aware).
+        """
         self.db.execute("UPDATE alerts SET last_sent = ?, sent = sent + 1 "
                         "WHERE key = ?", (_utc_iso(now), key))
         self.db.commit()
 
     def alert_active(self, key: str) -> bool:
-        """Whether *key* has been mailed and its condition not cleared."""
+        """!@brief Whether *key* has been mailed and its condition not cleared.
+        @param key condition name.
+        @return True if mailed and not cleared.
+        """
         row = self.db.execute("SELECT sent FROM alerts WHERE key = ?",
                               (key,)).fetchone()
         return bool(row and row["sent"])
 
     def alert_clear(self, pattern: str) -> List[str]:
-        """Forget conditions matching *pattern* (SQL ``LIKE``) that cleared,
+        """!@brief Forget conditions matching *pattern* (SQL ``LIKE``) that
+        cleared,
         so the next occurrence is mailed at once.  Returns the keys that had
-        been mailed."""
+        been mailed.
+        @param pattern SQL ``LIKE`` pattern, e.g. ``upload-exit-%``.
+        @return keys that had been mailed (for a "cleared" log line).
+        """
         keys = [r["key"] for r in self.db.execute(
             "SELECT key FROM alerts WHERE key LIKE ? AND sent > 0",
             (pattern,))]
@@ -1087,11 +1440,20 @@ class State:
     # -- small persistent values
 
     def kv_get(self, key: str) -> Optional[str]:
+        """!
+        @brief Read a small persistent value (SSO back-off, partial counts).
+        @param key name.
+        @return the value, or None if unset.
+        """
         row = self.db.execute("SELECT value FROM kv WHERE key = ?",
                               (key,)).fetchone()
         return row["value"] if row else None
 
     def kv_set(self, key: str, value: Optional[str]) -> None:
+        """!@brief Write a small persistent value; None deletes it.
+        @param key   name.
+        @param value text, or None to delete.
+        """
         if value is None:
             self.db.execute("DELETE FROM kv WHERE key = ?", (key,))
         else:
@@ -1101,6 +1463,9 @@ class State:
         self.db.commit()
 
     def alerts(self) -> List[Dict[str, Any]]:
+        """!@brief Every alert row, for tests and diagnostics.
+        @return list of row dicts ordered by key.
+        """
         return [dict(r) for r in self.db.execute(
             "SELECT * FROM alerts ORDER BY key").fetchall()]
 
@@ -1108,21 +1473,37 @@ class State:
 # --------------------------------------------------------------- publisher
 
 
+## A split piece ``(start, end, label)``: half-open ``[start, end)`` in
+## NOvA ticks and the label darpa-spill-dump names its file with.
 Piece = Tuple[int, int, str]
 
 
 class Publisher:
-    """One invocation of ``darpa-spill-publish``: configuration, state and
+    """!
+    @brief One invocation of ``darpa-spill-publish``: configuration, state and
     the bookkeeping that decides the exit status.
 
-    :param cfg: merged settings from :func:`load_settings`.
-    :param environ: the environment subprocesses inherit.
-    :param dry_run: print commands instead of running them; write nothing.
-    :param now: the current time (aware); tests pin it.
+    @param cfg merged settings from :func:`load_settings`.
+    @param environ the environment subprocesses inherit.
+    @param dry_run print commands instead of running them; write nothing.
+    @param now the current time (aware); tests pin it.
+
+    Run bookkeeping read by :meth:`execute`: ``errors`` and ``warnings``
+    (messages), ``done`` (steps completed), ``not_ready`` (ingest gate
+    held pieces back), ``busy`` (the dump lock was not obtained) and
+    ``detail`` (JSON stored with the run).
     """
 
     def __init__(self, cfg: Dict[str, Any], environ: Mapping[str, str],
                  dry_run: bool = False, now: Optional[datetime] = None):
+        """!@brief Set up one run; opens the state database.
+        @param cfg     merged settings from :func:`load_settings`.
+        @param environ the environment subprocesses inherit.
+        @param dry_run print commands instead of running them; write nothing.
+        @param now     the current time (aware); tests pin it.
+        @throws OSError if the state directory or database cannot be opened.
+        @throws sqlite3.Error if the database cannot be opened or migrated.
+        """
         self.cfg = cfg
         self.environ = dict(environ)
         self.dry_run = dry_run
@@ -1137,48 +1518,92 @@ class Publisher:
         self.busy = False
         self.detail: Dict[str, Any] = {}
         self.holding_upload_lock = False
+        # Token paths created by this run.  In a dry run the file never
+        # appears, so without this every file of a month would "create"
+        # (print, and announce) its token again.
         self._tokens_made: set = set()
 
     # -- small helpers
 
     def now(self) -> datetime:
+        """!@brief The current time (aware UTC), or the pinned test time.
+        @return aware datetime.
+        """
         return self._now or datetime.now(timezone.utc)
 
     def stamp(self) -> str:
+        """!@brief :meth:`now` as a UTC ISO stamp for the state database.
+        @return e.g. ``2026-10-22T18:10:00+00:00``.
+        """
         return _utc_iso(self.now())
 
     def dir(self, key: str) -> str:
+        """!@brief A ``paths`` setting with ``~`` expanded.
+        @param key ``state_dir``, ``status_dir`` or ``log_dir``.
+        @return the directory path.
+        """
         return os.path.expanduser(self.cfg["paths"][key])
 
     @property
     def data_root(self) -> str:
+        """!@brief ``data_root`` with ``~`` expanded: parent of ``raw/`` and
+        ``shifted/`` (D1, D3).
+        @return the directory path.
+        """
         return os.path.expanduser(self.cfg["data_root"])
 
     def error(self, message: str) -> None:
+        """!@brief Log an error and count it against the run (partial/failed).
+        @param message the error text.
+        """
         log.error("%s", message)
         self.errors.append(message)
 
     def warn(self, message: str) -> None:
+        """!
+        @brief Log a warning and keep it in the run detail (does not fail it).
+        @param message the warning text.
+        """
         log.warning("%s", message)
         self.warnings.append(message)
 
     def local(self, nova: int) -> datetime:
+        """!@brief A NOvA time as an aware datetime in the configured zone.
+        @param nova 64 MHz ticks of the NOvA clock.
+        @return aware local datetime.
+        """
         return nova_to_datetime(nova).astimezone(self.zone)
 
     def iso(self, nova: int) -> str:
-        """Local ISO 8601 with offset, unambiguous on the changeover."""
+        """!@brief Local ISO 8601 with offset, unambiguous on the changeover.
+        @param nova 64 MHz ticks of the NOvA clock.
+        @return e.g. ``2026-11-01T01:00:00-06:00``.
+        """
         return self.local(nova).isoformat()
 
     def floor_hour(self, nova: int) -> int:
+        """!@brief The start of the local hour containing *nova*.
+        @param nova 64 MHz ticks.
+        @return NOvA ticks of the hour's start.
+        """
         return datetime_to_nova(self.local(nova).replace(
             minute=0, second=0, microsecond=0))
 
     def midnight(self, day: date) -> int:
+        """!@brief Local midnight starting *day*, as NOvA ticks.
+        @param day a calendar date in the configured zone.
+        @return NOvA ticks.
+        """
         return datetime_to_nova(datetime.combine(day, dtime(0),
                                                  tzinfo=self.zone))
 
     def tool(self, name: str, key: str) -> str:
-        """A package tool: configured, beside this interpreter, or on PATH."""
+        """!
+        @brief A package tool: configured, beside this interpreter, or on PATH.
+        @param name executable name, e.g. ``darpa-spill-dump``.
+        @param key  ``tools`` setting that overrides it (``dump``, ``shift``).
+        @return the path (or bare name, left to ``Popen`` to fail with 127).
+        """
         configured = self.cfg["tools"].get(key)
         if configured:
             return os.path.expanduser(configured)
@@ -1193,7 +1618,7 @@ class Publisher:
             timeout: Optional[float] = None, input_text: Optional[str] = None,
             mutating: bool = True, secrets: Sequence[str] = ()
             ) -> subprocess.CompletedProcess:
-        """Run *cmd*, capturing its output.
+        """!@brief Run *cmd*, capturing its output.
 
         In a dry run a *mutating* command is printed and not run; read-only
         ones (``klist``, version probes) still run.  A missing program or a
@@ -1203,6 +1628,13 @@ class Publisher:
         whole group (SIGTERM, then SIGKILL after :data:`KILL_GRACE`), so the
         workers of ``fdp-put -j`` or a helper of ``htgettoken`` cannot outlive
         it and race the next run.
+        @param cmd        argv.
+        @param env        variables added to :attr:`environ` for this child.
+        @param timeout    seconds; None for no limit.
+        @param input_text text for stdin; stdin is /dev/null otherwise.
+        @param mutating   whether a dry run must skip it.
+        @param secrets    literal strings to mask in the logged command line.
+        @return the completed process (126 for a permission error).
         """
         shown = _redact(" ".join(shlex.quote(str(c)) for c in cmd), secrets)
         if self.dry_run:
@@ -1213,6 +1645,8 @@ class Publisher:
             log.debug("run: %s", shown)
         child = dict(self.environ)
         child.update(env or {})
+        # start_new_session makes the child a process-group leader
+        # (pgid == pid), so _kill_group can signal it and its children.
         try:
             proc = subprocess.Popen(
                 list(cmd), env=child, stdout=subprocess.PIPE,
@@ -1237,17 +1671,22 @@ class Publisher:
 
     def via_env_script(self, argv: Sequence[str]
                        ) -> Tuple[List[str], Dict[str, str]]:
-        """Wrap *argv* so it runs after sourcing ``fdp.env_script``."""
+        """!@brief Wrap *argv* so it runs after sourcing ``fdp.env_script``.
+        @param argv the real command.
+        @return ``(argv to run, extra environment)``; unwrapped if no script is
+                configured.
+        """
         script = os.path.expanduser(self.cfg["fdp"]["env_script"])
         if not script:
             return list(argv), {}
+        # The "bash" after the script is its $0; argv becomes "$@".
         return ["bash", "-c", ENV_WRAPPER, "bash"] + list(argv), \
             {"ENV_SCRIPT": script}
 
     # -- alerts
 
     def alert(self, key: str, subject: str, body: str) -> None:
-        """Mail an alert about the condition *key*, rate-limited.
+        """!@brief Mail an alert about the condition *key*, rate-limited.
 
         The first occurrence is mailed at once; while the condition lasts the
         wait doubles from ``alerts.min_interval`` up to
@@ -1258,6 +1697,9 @@ class Publisher:
 
         Never raises: a broken mailer is logged, and the alert is not marked
         sent so the next run tries again.
+        @param key     condition name (the rate-limit key).
+        @param subject mail subject, prefixed with ``[darpa-spill-publish]``.
+        @param body    mail text; host, time and config file are appended.
         """
         log.warning("alert: %s", subject)
         settings = self.cfg["alerts"]
@@ -1297,12 +1739,23 @@ class Publisher:
             log.error("cannot send alert %r: %s", key, exc)
 
     def _stamp_path(self, key: str) -> str:
+        """!@brief The fallback rate-limit stamp file for alert *key*.
+        @param key condition name (sanitised into the file name).
+        @return path in the system temporary directory, per user.
+        """
         import tempfile
         uid = os.getuid() if hasattr(os, "getuid") else 0
         return os.path.join(tempfile.gettempdir(), "{}-{}-alert-{}".format(
             PROG, uid, re.sub(r"[^A-Za-z0-9_.-]", "_", key)))
 
     def _stamp_due(self, key: str) -> bool:
+        """!
+        @brief Whether alert *key* may be mailed by the stamp-file fallback.
+
+        A fixed ``alerts.min_interval``; no back-off without the database.
+        @param key condition name.
+        @return True if no stamp exists or it is older than the interval.
+        """
         try:
             age = time.time() - os.path.getmtime(self._stamp_path(key))
         except OSError:
@@ -1310,6 +1763,9 @@ class Publisher:
         return age >= self.cfg["alerts"]["min_interval"]
 
     def _stamp_sent(self, key: str) -> None:
+        """!@brief Touch the fallback stamp of alert *key* (not in a dry run).
+        @param key condition name.
+        """
         if self.dry_run:
             return
         try:
@@ -1320,7 +1776,9 @@ class Publisher:
             log.error("cannot write the alert stamp for %r: %s", key, exc)
 
     def resolve(self, pattern: str) -> None:
-        """A condition matching *pattern* has cleared; never raises."""
+        """!@brief A condition matching *pattern* has cleared; never raises.
+        @param pattern SQL ``LIKE`` pattern of alert keys.
+        """
         try:
             for key in self.state.alert_clear(pattern):
                 log.info("condition %r cleared", key)
@@ -1330,14 +1788,33 @@ class Publisher:
     # -- layout
 
     def file_paths(self, stream: str, label: str) -> Dict[str, Tuple[str, str]]:
-        """``{fmt: (raw, shifted)}`` for one piece of one stream."""
+        """!@brief ``{fmt: (raw, shifted)}`` for one piece of one stream.
+
+        Computed with :func:`segment_path`, exactly as darpa-spill-dump names
+        the file, so the two can never disagree.
+        @param stream stream name.
+        @param label  piece label.
+        @return ``{fmt: (raw path, shifted path)}``.
+        """
         return {fmt: (segment_path(raw, label), segment_path(shifted, label))
                 for fmt, (raw, shifted) in self.templates(stream).items()}
 
     def templates(self, stream: str) -> Dict[str, Tuple[str, str]]:
-        """darpa-spill-dump path templates (D3, D4), ``{fmt: (raw, shifted)}``."""
+        """!@brief darpa-spill-dump path templates (D3, D4),
+               ``{fmt: (raw, shifted)}``.
+        @param stream stream name.
+        @return ``{fmt: (raw template, shifted template)}`` with ``{mon}``,
+                ``{year}``, ``{day}`` and ``{start}`` placeholders.
+        """
         day_dir = os.path.join("{mon}", "{year}-{mon}-{day}")
         name = "{}-{}-{{start}}".format(self.cfg["prefix"], stream)
+        # Raw and shifted copies live in parallel trees, raw/ and
+        # shifted/, with the same day directories, and the shifted name
+        # carries ".shifted." before the extension (darpa-spill-shift's
+        # own default output name).  The tree decides where a copy is
+        # uploaded (remote_dir: raw/ -> fdp.raw_dest, private; shifted/
+        # -> fdp.shifted_dest, public); the infix keeps a blurred file
+        # recognisable by name wherever it is copied.
         return {fmt: (os.path.join(self.data_root, "raw", day_dir,
                                    name + "." + fmt),
                       os.path.join(self.data_root, "shifted", day_dir,
@@ -1345,17 +1822,38 @@ class Publisher:
                 for fmt in self.cfg["formats"]}
 
     def token_path(self, year: str, month: str) -> str:
+        """!@brief Path of the dts1 shift token of one data month (D7, D8).
+
+        ``shift.token_name`` in ``shift.token_dir``; the name may use
+        ``{year}``, ``{month}`` (``01``-``12``) and ``{mon}``
+        (``jan``-``dec``).
+        @param year  four-digit year of the data, as text.
+        @param month two-digit month of the data, as text.
+        @return the token file path (which may not exist yet).
+        """
         name = self.cfg["shift"]["token_name"].format(
             year=year, month=month, mon=MONTH_ABBREVIATIONS[int(month) - 1])
+        # Default name dts1-YYYY-MM.token; {mon} is the same
+        # locale-independent abbreviation darpa-spill-dump uses.
         return os.path.join(os.path.expanduser(self.cfg["shift"]["token_dir"]),
                             name)
 
     def complete(self, kind: str, label: str) -> bool:
-        """Every stream and format of a piece is dumped and shifted."""
+        """!@brief Every stream and format of a piece is dumped and shifted.
+
+        Upload is not part of it: uploads are retried independently of the
+        catch-up window by every ``upload`` run.
+        @param kind  ``hourly`` or ``daily``.
+        @param label piece label.
+        @return True if nothing of the piece is left to dump or shift.
+        """
         rows = {r["raw_path"]: r for r in self.state.for_labels(kind, [label])}
         for stream in self.cfg["streams"]:
             for raw, _ in self.file_paths(stream, label).values():
                 row = rows.get(raw)
+                # shifted_at belongs to completeness: a piece whose shift
+                # failed stays in the catch-up window and is retried,
+                # without its raw file being dumped again (_have_raw).
                 if not row or not row["dumped_at"] or not row["shifted_at"]:
                     return False
         return True
@@ -1363,7 +1861,8 @@ class Publisher:
     # -- ingest gate
 
     def ingest_watermark(self) -> Tuple[Optional[int], str]:
-        """How far every enabled source is ingested, or ``None`` and why.
+        """!
+        @brief How far every enabled source is ingested, or ``None`` and why.
 
         A source counts as read up to the later of its ``watermark_nova``
         (the newest event stored) and its ``polled_through_nova`` (the start
@@ -1371,8 +1870,11 @@ class Publisher:
         the TDU to record late events.  The second is what lets a quiet beam
         -- a shutdown, a maintenance day, a silent TDU -- through the gate:
         its newest event stops moving, but its polls still cover the hour.
+        @return ``(mark, "")`` with *mark* the minimum over enabled sources in
+                NOvA ticks, or ``(None, reason)``.
         """
         server = self.cfg["server"]
+        # Seconds -> 64 MHz NOvA ticks, the unit of every watermark.
         settle = int(self.cfg["ingest_check"]["settle"] * TICKS_PER_SECOND)
         try:
             body = http_get_json(server["url"].rstrip("/") + "/api/sources",
@@ -1400,14 +1902,17 @@ class Publisher:
             marks.append(max(candidates))
         if not marks:
             return None, "the server has no enabled sources"
+        # The slowest enabled source bounds what may be dumped.
         return min(marks), ""
 
     def wait_for_ingest(self, needed: int) -> Tuple[Optional[int], str]:
-        """Wait until every enabled source has ingested up to *needed*.
+        """!@brief Wait until every enabled source has ingested up to *needed*.
 
         Returns ``(None, "")`` when the check is disabled, ``(mark, "")``
         when ready, or ``(mark, reason)`` after ``ingest_check.wait`` seconds,
         where *mark* (possibly 0) is how far ingest has got.
+        @param needed NOvA ticks the data must reach (end of the last piece).
+        @return see above.
         """
         check = self.cfg["ingest_check"]
         if not check["enabled"]:
@@ -1433,7 +1938,15 @@ class Publisher:
     # -- dump and shift
 
     def process(self, kind: str, pieces: Sequence[Piece]) -> None:
-        """Dump whatever of *pieces* is missing, then shift it."""
+        """!@brief Dump whatever of *pieces* is missing, then shift it.
+
+        Two passes: first every stream's missing raw files are dumped (abutting
+        pieces in one call), then every dumped but unshifted file of these
+        pieces is blurred.  Shifting after all dumps keeps a dump failure of
+        one stream from holding back the shift of the others.
+        @param kind   ``hourly`` or ``daily``.
+        @param pieces ``(start, end, label)`` pieces not yet complete.
+        """
         for stream in self.cfg["streams"]:
             # Formats missing the same pieces share a dump call; normally
             # that is both, but a recorded CSV must not be overwritten
@@ -1448,6 +1961,15 @@ class Publisher:
                 wanted = [p for p in pieces if p[2] in labels]
                 for run in _contiguous(wanted):
                     self.dump(stream, kind, run, fmts)
+        # Shift stage.  Whether a file is already shifted is decided by
+        # the state database alone: a row with dumped_at and no
+        # shifted_at is shifted, every other row is left alone.  The
+        # shifted file on disk is not consulted: one left by a run killed
+        # after the rename but before shifted_at was recorded is simply
+        # written again, and since the raw file and the token are the
+        # same and dts1 is deterministic, the result is byte-identical.
+        # A shifted copy is uploaded only after shifted_at is set, so no
+        # published copy can ever disagree with the local one.
         for stream in self.cfg["streams"]:
             for piece in pieces:
                 for fmt, (raw, _) in self.file_paths(stream, piece[2]).items():
@@ -1456,11 +1978,16 @@ class Publisher:
                         self.shift(row)
 
     def _have_raw(self, stream: str, kind: str, label: str, fmt: str) -> bool:
-        """Whether a raw file is recorded; adopt one complete on disk.
+        """!@brief Whether a raw file is recorded; adopt one complete on disk.
 
         darpa-spill-dump renames a file into place only once it is complete,
         so a file on disk but not in the database (a run killed between the
         two) is whole and is recorded rather than dumped again.
+        @param stream stream name.
+        @param kind   ``hourly`` or ``daily``.
+        @param label  piece label.
+        @param fmt    ``csv`` or ``json``.
+        @return True if the raw file exists and is (now) recorded.
         """
         raw, shifted = self.file_paths(stream, label)[fmt]
         row = self.state.get(raw)
@@ -1474,6 +2001,14 @@ class Publisher:
 
     def _record(self, raw: str, stream: str, kind: str, label: str, fmt: str,
                 shifted: str) -> None:
+        """!@brief Record a raw file as dumped, with its row count and size.
+        @param raw     raw path.
+        @param stream  stream name.
+        @param kind    ``hourly`` or ``daily``.
+        @param label   piece label.
+        @param fmt     ``csv`` or ``json``.
+        @param shifted where its shifted copy goes.
+        """
         rows = size = None
         if os.path.isfile(raw):
             rows = count_rows(raw, fmt)
@@ -1483,6 +2018,18 @@ class Publisher:
 
     def dump_command(self, stream: str, kind: str, start: int, end: int,
                      fmts: Sequence[str]) -> List[str]:
+        """!
+        @brief The darpa-spill-dump argv for one stream over ``[start, end)``.
+
+        ``--split`` makes the dump write one file per hour or day piece, named
+        from the raw templates; the stream's selectors are passed repeatedly.
+        @param stream stream name.
+        @param kind   ``hourly`` or ``daily`` (selects ``--split hour|day``).
+        @param start  NOvA ticks, start of the first piece.
+        @param end    NOvA ticks, end of the last piece.
+        @param fmts   formats to write from the one fetch.
+        @return argv.
+        """
         server = self.cfg["server"]
         cmd = [self.tool("darpa-spill-dump", "dump"), "-s", server["url"]]
         if server["insecure"]:
@@ -1504,7 +2051,15 @@ class Publisher:
 
     def dump(self, stream: str, kind: str, run: Sequence[Piece],
              fmts: Sequence[str]) -> None:
-        """One darpa-spill-dump call for abutting pieces of one stream."""
+        """!@brief One darpa-spill-dump call for abutting pieces of one stream.
+
+        Every piece written is recorded; a piece missing afterwards is recorded
+        with an error, which keeps it incomplete for the next run.
+        @param stream stream name.
+        @param kind   ``hourly`` or ``daily``.
+        @param run    abutting pieces (see :func:`_contiguous`).
+        @param fmts   formats missing for all of these pieces.
+        """
         start, end = run[0][0], run[-1][1]
         what = "{} {} {}".format(kind, stream, run[0][2] if len(run) == 1
                                  else "{}..{}".format(run[0][2], run[-1][2]))
@@ -1512,6 +2067,7 @@ class Publisher:
         # tools.dump_timeout is per day of data, so a month-long backfill
         # call gets a month's worth; a hung dump still ends (exit 124).
         days = max(1.0, (end - start) / (86400.0 * TICKS_PER_SECOND))
+        # A dump_timeout of 0 means no limit (0 * days or None).
         timeout = self.cfg["tools"]["dump_timeout"] * days or None
         log.info("dump %s (%s)", what, ", ".join(fmts))
         proc = self.run(cmd, timeout=timeout)
@@ -1552,30 +2108,65 @@ class Publisher:
                                               shifted, reason, self.stamp())
 
     def ensure_token(self, year: str, month: str) -> Tuple[Optional[str], bool]:
-        """The shift token for a data month, created if missing (D7, D8).
+        """!
+        @brief The shift token for a data month, created if missing (D7, D8).
 
         Returns ``(path, created)``; *path* is ``None`` if creation failed.
         An existing token file is never touched.
+
+        @details
+        A token is the only key to undo the blur of a whole month of
+        published data, so it is created once and never replaced:
+        - An existing file is used as is; nothing here ever writes over it.
+        - ``darpa-spill-shift token -o PATH`` writes the token mode 0600 and
+          links it into place atomically, refusing if the name exists, so two
+          creators cannot both "win" (``shift._write_token_file``).
+        - If creation fails but the file now exists, another run created it
+          in between, and that token is used.
+        - A newly created token is mailed about at once so it is backed up
+          before data blurred with it is published (D8): a lost token makes
+          the month irreversible.
+
+        @param year  four-digit year of the data month, as text.
+        @param month two-digit month of the data month, as text.
+        @return ``(path, created)``; ``(None, False)`` after an error, which is
+                recorded and alerted.
         """
         path = self.token_path(year, month)
+        # An existing token is used as is, whatever it holds: replacing
+        # it would blur part of a month with a different key (D7) and
+        # orphan the data already shifted with the old one.
         if os.path.isfile(path) or path in self._tokens_made:
             return path, False
         shift = self.cfg["shift"]
         directory = os.path.dirname(path)
         if not self.dry_run:
+            # 0700 applies only to a directory created here (and through
+            # the umask); an existing one keeps its mode, which "check"
+            # fails if group or other have any access.
             os.makedirs(directory, mode=0o700, exist_ok=True)
         cmd = [self.tool("darpa-spill-shift", "shift"), "token",
                "--dist", shift["dist"]]
         if shift["dist"] == "flat":
+            # A flat token takes its half-width from shift.sigma; there
+            # is no separate width setting.
             cmd += ["--width", shift["sigma"]]
         else:
+            # Gaussian (D7): sigma 50us = 3200 ticks, cut 3sigma = 150 us.
             cmd += ["--sigma", shift["sigma"], "--cut", shift["cut"]]
+        # darpa-spill-shift writes the token mode 0600 under a temporary
+        # name and hard-links it into place: it appears whole or not at
+        # all, and if PATH exists the tool refuses (non-zero exit).  The
+        # parameters live in the token, so later config changes do not
+        # affect months whose token already exists.
         cmd += ["-o", path]
         proc = self.run(cmd, timeout=self.cfg["tools"]["shift_timeout"] or None)
         if proc.returncode != 0 and not self.dry_run and os.path.isfile(path):
             # Another job (hourly, daily and backfill hold different locks)
             # created it between the check above and this call; that token
             # is the one to use, and 'token' refused to overwrite it.
+            # (The "token" job holds only token.lock, so cron's token
+            # --next can race any dumping job here.)
             log.info("shift token %s was created by another run", path)
             return path, False
         if proc.returncode != 0:
@@ -1586,6 +2177,9 @@ class Publisher:
             return None, False
         self._tokens_made.add(path)
         log.info("created shift token %s for %s-%s", path, year, month)
+        # Mailed once per month (the key names it): the only copy is on
+        # the gateway until a person backs it up (D8), and a lost token
+        # makes the month's published data irreversible.
         self.alert(
             "token-created-{}-{}".format(year, month),
             "new shift token created - back it up",
@@ -1598,10 +2192,37 @@ class Publisher:
         return path, True
 
     def shift(self, row: Dict[str, Any]) -> None:
-        """Shift one raw file with the token of its data month."""
+        """!@brief Shift one raw file with the token of its data month.
+
+        @details
+        The token is chosen from the file's *label*, i.e. the local date the
+        data starts on (D2, D7), never from the time the job runs: the 00:10
+        run on the 1st that publishes 23:00-24:00 of the 31st uses the old
+        month's token.  Every event therefore has exactly one token, whichever
+        copy (hourly file, daily file, a re-dump) it is in, and dts1 derives
+        its offset from that token and the event's ``(source, event_number)``
+        alone; so all copies of an event carry the identical offset.  With a
+        different token per copy the offsets would be independent, and
+        averaging k copies of an event would narrow its blur by a factor
+        sqrt(k): the averaging attack D7 rules out.
+
+        The shifted file goes to ``row["shifted_path"]`` under ``shifted/``,
+        never beside the raw file.  ``darpa-spill-shift apply`` writes it as
+        ``OUT.part`` and renames it on success, so a shifted name never holds
+        a partial file.  On success ``shifted_at`` is recorded; on failure the
+        row keeps ``shifted_at`` NULL and an error, and the next run retries.
+
+        @param row the ``files`` row of a dumped, not yet shifted raw file.
+        """
+        # Data month = the local year and month of the label (D2, D7).
+        # An hourly piece lies within one local day and a day within one
+        # month, so an hour and the day containing it always resolve to
+        # the same token, and each event is blurred by one offset only.
         fields = label_fields(row["label"])
         token, _ = self.ensure_token(fields["year"], fields["month"])
         if token is None:
+            # No token, no shift: shifted_at stays NULL, so nothing of
+            # this file reaches the public area, and the next run retries.
             self.state.update(row["raw_path"], self.stamp(),
                               last_error="no shift token for {}-{}".format(
                                   fields["year"], fields["month"]))
@@ -1609,10 +2230,16 @@ class Publisher:
         out = row["shifted_path"]
         if not self.dry_run:
             os.makedirs(os.path.dirname(out), exist_ok=True)
+        # The token goes by file name, never as text on the command line,
+        # so the secret is not visible in ps or in the logged command.
+        # The input is always the raw file, which carries no shift
+        # marker; darpa-spill-shift would refuse an already-shifted input
+        # (double blur) and refuses -o equal to the input.
         cmd = [self.tool("darpa-spill-shift", "shift"), "apply", "-q",
                "--token-file", token, "-o", out, row["raw_path"]]
         proc = self.run(cmd, timeout=self.cfg["tools"]["shift_timeout"] or None)
         if proc.returncode == 0:
+            # A rewritten shifted file invalidates its cached adler32.
             self.state.update(row["raw_path"], self.stamp(),
                               shifted_at=self.stamp(), last_error=None,
                               shifted_adler32=None)
@@ -1630,16 +2257,25 @@ class Publisher:
 
     @contextlib.contextmanager
     def lock(self, name: str, wait: Optional[float] = None) -> Iterator[bool]:
-        """``flock`` ``{state_dir}/NAME.lock``; yields whether it was taken.
+        """!@brief ``flock`` ``{state_dir}/NAME.lock``; yields whether it was
+               taken.
 
         *wait* ``None`` tries once; otherwise retries for that many seconds.
         A dry run takes no lock, since it writes nothing.
+        @param name lock name: a job name, ``dump`` or ``upload``.
+        @param wait seconds to keep retrying; None for a single attempt.
+        @return a context manager yielding True if the lock is held.
         """
         if self.dry_run or fcntl is None:
             yield True
             return
         os.makedirs(self.dir("state_dir"), exist_ok=True)
         path = os.path.join(self.dir("state_dir"), name + ".lock")
+        # flock is advisory and belongs to this open file description:
+        # the kernel drops it when the process dies, however it dies, so
+        # a leftover lock file never blocks a later run.  The file is
+        # never deleted; unlinking it while another process waits would
+        # let two holders lock different inodes.
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
         got = False
         try:
@@ -1669,8 +2305,20 @@ class Publisher:
             os.close(fd)
 
     def remote_dir(self, local: str, area: str) -> Optional[str]:
-        """The FDP directory for a local file: same layout under the dest."""
+        """!
+        @brief The FDP directory for a local file: same layout under the dest.
+        @param local local file path.
+        @param area  ``raw`` or ``shifted``; selects both the local tree
+                     (``data_root/area``) and the destination.
+        @return e.g. ``/amsc/novaend/raw/oct/2026-oct-22``, or None if *local*
+                is not under ``data_root/area``.
+        """
         dest = self.cfg["fdp"]["raw_dest" if area == "raw" else "shifted_dest"]
+        # The area picks both the local tree and the destination, so a
+        # copy can only go where its own tree maps.  A file outside
+        # data_root/area (relpath "..") is refused rather than sent to
+        # the wrong area; in particular nothing outside shifted/ can
+        # reach the public shifted_dest.
         rel = os.path.relpath(os.path.dirname(local),
                               os.path.join(self.data_root, area))
         if rel.startswith(".."):
@@ -1679,11 +2327,17 @@ class Publisher:
             os.sep, "/"))
 
     def upload(self) -> None:
-        """Upload every file not yet recorded as uploaded (D9)."""
+        """!@brief Upload every file not yet recorded as uploaded (D9).
+
+        Takes ``upload.lock`` (waiting up to :data:`UPLOAD_LOCK_WAIT`) unless
+        this is the ``upload`` job, whose job lock already is ``upload.lock``.
+        """
         fdp = self.cfg["fdp"]
         if not fdp["enabled"]:
             log.info("upload skipped: fdp.enabled is false")
             return
+        # The upload job's own job lock is upload.lock; flocking it again
+        # on a new descriptor would conflict with this very process.
         if self.holding_upload_lock:
             self._upload_pending()
             return
@@ -1695,8 +2349,21 @@ class Publisher:
             self._upload_pending()
 
     def _upload_pending(self) -> None:
+        """!
+        @brief Send every pending copy in batches per destination directory.
+
+        Each batch is one ``fdp-put --skip-existing`` followed by an
+        ``fdp-stat`` verification (:meth:`_verify_batch`); only verified copies
+        are marked uploaded.  Stops early on errors that every further call
+        would repeat (credentials, network, timeout, environment script).
+        """
         groups: Dict[str, List[Tuple[str, str, str]]] = {}
         for row in self.state.pending_uploads():
+            # Each copy is tagged with its area: raw from raw_path,
+            # shifted from shifted_path.  The area alone chooses the
+            # destination (remote_dir).  A shifted copy is offered only
+            # once shifted_at is set, i.e. after darpa-spill-shift has
+            # renamed the complete file into place.
             items = []
             if row["dumped_at"] and not row["raw_uploaded_at"]:
                 items.append(("raw", row["raw_path"]))
@@ -1749,7 +2416,10 @@ class Publisher:
     # -- FDP commands
 
     def _fdp_options(self) -> List[str]:
-        """``--token-file`` and ``--ca-path``, shared by every FDP tool."""
+        """!
+        @brief ``--token-file`` and ``--ca-path``, shared by every FDP tool.
+        @return argv fragment.
+        """
         fdp = self.cfg["fdp"]
         argv = ["--token-file", os.path.expanduser(fdp["token_file"])]
         if fdp["ca_path"]:
@@ -1757,13 +2427,17 @@ class Publisher:
         return argv
 
     def _fdp_run(self, argv: Sequence[str]) -> subprocess.CompletedProcess:
-        """Run an FDP tool inside ``fdp.env_script``.
+        """!@brief Run an FDP tool inside ``fdp.env_script``.
 
         Always *mutating* for :meth:`run`: a dry run prints even the
         read-only ``fdp-stat`` and contacts nothing.
+        @param argv the FDP command.
+        @return the completed process (``fdp.timeout`` applies).
         """
         fdp = self.cfg["fdp"]
         cmd, env = self.via_env_script(argv)
+        # libfdp finds the bearer token by directory; FDP_TRANSFER_CA_PATH
+        # supplies the AMSC CA directory (D12).
         env["FDP_TOKEN_DIR"] = os.path.dirname(
             os.path.expanduser(fdp["token_file"]))
         if fdp["ca_path"]:
@@ -1771,15 +2445,25 @@ class Publisher:
         return self.run(cmd, env=env, timeout=fdp["timeout"])
 
     def _fdp_put(self, dest: str, items: Sequence[Tuple[str, str, str]]) -> int:
-        """``fdp-put`` one batch; records failures, marks nothing uploaded
-        (that is :meth:`_verify_batch`'s job)."""
+        """!
+        @brief ``fdp-put`` one batch; records failures, marks nothing uploaded
+        (that is :meth:`_verify_batch`'s job).
+        @param dest  remote directory.
+        @param items ``(raw_path, area, local)`` per file, all for *dest*.
+        @return fdp-put's exit status (see :data:`FDP_EXIT`).
+        """
         fdp = self.cfg["fdp"]
+        # --skip-existing, never --replace (D9): dCache forbids
+        # overwriting, and a published file must not change under its
+        # readers.  A copy already there is judged by the stat instead.
         argv = ["fdp-put", "--skip-existing"] + self._fdp_options()
         argv += ["-j", str(fdp["parallel"])] + list(fdp["extra_args"])
         argv += [local for _, _, local in items] + [dest + "/"]
         proc = self._fdp_run(argv)
         code = proc.returncode
         if code == 0:
+            # A clean batch resets the directory's consecutive-partial
+            # count.
             self.state.kv_set("partial:" + dest, None)
             log.info("%s %d file(s) to %s", "would upload" if self.dry_run
                      else "fdp-put sent", len(items), dest)
@@ -1832,13 +2516,16 @@ class Publisher:
     def remote_stat(self, paths: Sequence[str]
                     ) -> Tuple[Dict[str, Optional[Dict[str, Any]]],
                                Dict[str, str]]:
-        """``fdp-stat --json`` *paths*: ``({path: entry or None}, {path:
+        """!
+        @brief ``fdp-stat --json`` *paths*: ``({path: entry or None}, {path:
         error})``.  ``None`` means not on FDP; a path in the second map
         could not be checked.
 
         One call stats the lot; if it fails (``fdp-stat`` exits 5 when any
         path is missing) each path is asked alone.  A dry run prints the
         command and returns nothing.
+        @param paths remote paths.
+        @return ``(found, errors)`` as above.
         """
         found: Dict[str, Optional[Dict[str, Any]]] = {}
         errors: Dict[str, str] = {}
@@ -1885,7 +2572,14 @@ class Publisher:
     @staticmethod
     def _match_stat(paths: Sequence[str], entries: Sequence[Dict[str, Any]],
                     found: Dict[str, Optional[Dict[str, Any]]]) -> None:
-        """Pair stat entries with the requested paths, by path, else name."""
+        """!
+        @brief Pair stat entries with the requested paths, by path, else name.
+
+        A name match is used only when it is unique among the entries.
+        @param paths   requested remote paths.
+        @param entries entries printed by ``fdp-stat --json``.
+        @param found   ``{path: entry or None}``, filled in place.
+        """
         by_path = {str(e.get("path", "")).rstrip("/"): e for e in entries
                    if e.get("path")}
         names: Dict[str, List[Dict[str, Any]]] = {}
@@ -1901,7 +2595,15 @@ class Publisher:
             found[path] = entry
 
     def local_adler32(self, raw_path: str, area: str, local: str) -> str:
-        """The adler32 of a local copy, cached in the state database."""
+        """!@brief The adler32 of a local copy, cached in the state database.
+
+        The cache (``raw_adler32`` / ``shifted_adler32``) is cleared whenever
+        the file is rewritten (:meth:`State.record_dump`, :meth:`shift`).
+        @param raw_path row key.
+        @param area     ``raw`` or ``shifted``: which copy.
+        @param local    path of that copy.
+        @return 8 lowercase hex digits.
+        """
         column = area + "_adler32"
         cached = (self.state.get(raw_path) or {}).get(column)
         if cached:
@@ -1911,11 +2613,22 @@ class Publisher:
         return value
 
     def remove_remote(self, path: str) -> subprocess.CompletedProcess:
+        """!@brief ``fdp-rm -f`` one remote path.
+
+        Only ever called for an incomplete (``size -1``) entry; see
+        :meth:`_remove_bad_copy`.
+        @param path remote path.
+        @return the completed process.
+        """
         argv = ["fdp-rm", "-f"] + self._fdp_options() + list(
             self.cfg["fdp"]["extra_args"]) + [path]
         return self._fdp_run(argv)
 
     def _mark_uploaded(self, raw_path: str, area: str) -> None:
+        """!@brief Record one copy (raw or shifted) of a row as uploaded.
+        @param raw_path row key.
+        @param area     ``raw`` or ``shifted``.
+        """
         # A row holds both copies: an upload error of the other copy stays
         # until that copy goes too.
         other = "shifted" if area == "raw" else "raw"
@@ -1927,7 +2640,7 @@ class Publisher:
 
     def _verify_batch(self, dest: str, items: Sequence[Tuple[str, str, str]],
                       put_code: int) -> bool:
-        """Stat one fdp-put batch on FDP and settle each copy.
+        """!@brief Stat one fdp-put batch on FDP and settle each copy.
 
         Size and adler32 match: uploaded.  Not there: still pending.  There
         but incomplete (``size -1``, the trace of a failed PUT): removed with
@@ -1935,7 +2648,12 @@ class Publisher:
         already recorded as uploaded, which is only reported.  Complete but
         different: never removed, reported and left pending.
         Returns whether every copy was verified.
+        @param dest     remote directory of the batch.
+        @param items    ``(raw_path, area, local)`` per file.
+        @param put_code fdp-put's exit status for the batch.
+        @return True if every copy was verified.
         """
+        # fdp-put keeps each file's base name in the destination.
         remote = {local: dest + "/" + os.path.basename(local)
                   for _, _, local in items}
         found, errors = self.remote_stat([remote[local]
@@ -1966,6 +2684,9 @@ class Publisher:
             size, adler = _stat_size(entry), _stat_adler32(entry)
             local_size = os.path.getsize(local)
             local_adler = self.local_adler32(raw_path, area, local)
+            # Size and adler32 must both match.  A shifted copy that
+            # differs can only come from a different raw file (a re-dump):
+            # the same raw file and token always shift identically.
             if size == local_size and adler == local_adler:
                 self._mark_uploaded(raw_path, area)
                 verified += 1
@@ -1986,6 +2707,10 @@ class Publisher:
                            "compare the copies and remove the remote one by "
                            "hand if it is wrong: fdp-rm -f " + path)
                 continue
+            # size -1: the empty namespace entry of a failed PUT.  It is
+            # removed only if this copy was never recorded uploaded; a
+            # recorded one (by another run, between the pending query and
+            # this stat) is reported, never removed.
             if (self.state.get(raw_path) or {}).get(area + "_uploaded_at"):
                 message = ("{} upload: {} on FDP ({}) differs from {} (size "
                            "{}, adler32 {}) but is recorded uploaded; not "
@@ -2003,11 +2728,19 @@ class Publisher:
 
     def _remove_bad_copy(self, raw_path: str, area: str, path: str,
                          what: str, repair: bool = False) -> bool:
-        """``fdp-rm -f`` an incomplete remote copy; the row stays pending.
+        """!
+        @brief ``fdp-rm -f`` an incomplete remote copy; the row stays pending.
 
         In an upload that copy is still missing, an error of the run; for
         ``upload --verify`` (*repair*) it is a repair, and the upload that
         follows decides.
+        @param raw_path row key.
+        @param area     ``raw`` or ``shifted``.
+        @param path     remote path.
+        @param what     ``size S, adler32 A`` as found, for messages.
+        @param repair   called from ``upload --verify``: log a warning, not an
+                        error.
+        @return True if the remote copy was removed.
         """
         proc = self.remove_remote(path)
         if proc.returncode == 0:
@@ -2031,17 +2764,20 @@ class Publisher:
         return False
 
     def verify_uploaded(self, since: Optional[str] = None) -> None:
-        """Re-stat every copy recorded uploaded (``upload --verify``).
+        """!@brief Re-stat every copy recorded uploaded (``upload --verify``).
 
         A copy that is gone, or is an incomplete ``size -1`` entry (which is
         removed), goes back to pending for the upload that follows; one
         that differs otherwise cannot be replaced (D9) and is reported.
+        @param since UTC ISO stamp: only copies uploaded at or after it; None
+                     for all.
         """
         groups: Dict[str, List[Tuple[str, str, str]]] = {}
         for row in self.state.uploaded(since):
             for area, local in (("raw", row["raw_path"]),
                                 ("shifted", row["shifted_path"])):
                 stamp = row[area + "_uploaded_at"]
+                # The query matched the row on either copy; filter each.
                 if not stamp or (since and stamp < since) or not local:
                     continue
                 dest = self.remote_dir(local, area)
@@ -2062,6 +2798,12 @@ class Publisher:
 
     def _reverify(self, dest: str, items: Sequence[Tuple[str, str, str]],
                   counts: Dict[str, int]) -> None:
+        """!@brief Re-verify one batch of copies recorded uploaded.
+        @param dest   remote directory.
+        @param items  ``(raw_path, area, local)`` per copy.
+        @param counts ``checked``/``ok``/``reset``/``mismatch``/``unchecked``
+                      tallies, updated in place.
+        """
         remote = {local: dest + "/" + os.path.basename(local)
                   for _, _, local in items}
         found, errors = self.remote_stat([remote[local]
@@ -2090,6 +2832,8 @@ class Publisher:
             what = "size {}, adler32 {}".format(
                 "?" if size is None else size, adler or "none")
             if size == -1:
+                # Back to pending: the upload that job_upload runs next
+                # sends it again once the entry is gone.
                 counts["reset"] += 1
                 self._remove_bad_copy(raw_path, area, path, what, repair=True)
                 self.state.update(raw_path, self.stamp(),
@@ -2119,11 +2863,14 @@ class Publisher:
     # -- jobs
 
     def _run_pieces(self, kind: str, pieces: Sequence[Piece]) -> None:
-        """Gate *pieces* on ingest, then dump and shift those that are ready.
+        """!@brief Gate *pieces* on ingest, then dump and shift those that are
+               ready.
 
         Runs under the ``dump`` lock shared by hourly, daily and backfill, so
         two jobs never dump the same piece at once (see
         ``locks.dump_wait``).
+        @param kind   ``hourly`` or ``daily``.
+        @param pieces ``(start, end, label)`` pieces.
         """
         wait = float(self.cfg["locks"]["dump_wait"])
         with self.lock("dump", wait=wait) as got:
@@ -2135,12 +2882,21 @@ class Publisher:
             self._run_pieces_locked(kind, pieces)
 
     def _run_pieces_locked(self, kind: str, pieces: Sequence[Piece]) -> None:
+        """!@brief :meth:`_run_pieces` with the dump lock held.
+
+        Skips complete pieces, holds back those past the ingest watermark (the
+        run then ends 75) and processes the rest.
+        @param kind   ``hourly`` or ``daily``.
+        @param pieces ``(start, end, label)`` pieces.
+        """
         todo = [p for p in pieces if not self.complete(kind, p[2])]
         self.detail.setdefault("labels", {})[kind] = [p[2] for p in todo]
         if not todo:
             log.info("%s: every piece is already complete", kind)
             return
         ready, reason = self.wait_for_ingest(max(p[1] for p in todo))
+        # Pieces ending past the watermark wait for a later run; the
+        # earlier ones go ahead.  ready None: the gate is disabled.
         late = [] if ready is None or not reason else \
             [p for p in todo if p[1] > ready]
         todo = [p for p in todo if p not in late]
@@ -2160,12 +2916,15 @@ class Publisher:
             self.process(kind, todo)
 
     def check_expired(self, kind: str, piece: Piece) -> None:
-        """Alert if *piece*, just past the catch-up window, never completed.
+        """!@brief Alert if *piece*, just past the catch-up window, never
+               completed.
 
         Only once the publisher has been running for that long (its first
         recorded run of *kind* began before the piece ended), so a fresh
         install does not report the hours before it.  The piece is left to
         a backfill; one alert per piece.
+        @param kind  ``hourly`` or ``daily``.
+        @param piece the piece that has just left the window.
         """
         if self.dry_run or self.complete(kind, piece[2]):
             return
@@ -2186,10 +2945,13 @@ class Publisher:
                        kind, piece[2]), message)
 
     def parse_hour(self, text: str) -> int:
-        """The start of the local hour named by *text*.
+        """!@brief The start of the local hour named by *text*.
 
         Accepts a dump label (``2026-11-01T01-0600``), or any time
         :func:`parse_instant` understands; a naive time is local.
+        @param text the ``--hour`` argument.
+        @return NOvA ticks of the hour's start.
+        @throws NovaTimeError if *text* is not a time.
         """
         match = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2})(?:([+-]\d{2})(\d{2}))?$",
                          text.strip())
@@ -2201,10 +2963,12 @@ class Publisher:
                                              tz=self.zone))
 
     def job_hourly(self, args) -> Optional[int]:
-        """The preceding local hour, plus any recent hour not complete.
+        """!@brief The preceding local hour, plus any recent hour not complete.
 
         ``--hour H`` processes the hour beginning at H as though run in the
         hour after it, catch-up included.
+        @param args parsed command line (``hour``).
+        @return None, or :data:`EXIT_USAGE` for a bad ``--hour``.
         """
         if args.hour:
             try:
@@ -2214,10 +2978,13 @@ class Publisher:
                 return EXIT_USAGE
         else:
             end = self.floor_hour(datetime_to_nova(self.now()))
+        # end is the start of the current local hour; the window is the
+        # catchup_hours hours before it (always the one just finished).
         hours = max(1, self.cfg["hourly"]["catchup_hours"])
         self._run_pieces("hourly", split_range(end - hours * HOUR, end,
                                                "hour", self.zone))
         if not args.hour and not self.busy:
+            # The hour just before the window has now left it for good.
             for piece in split_range(end - (hours + 1) * HOUR,
                                      end - hours * HOUR, "hour", self.zone):
                 self.check_expired("hourly", piece)
@@ -2225,7 +2992,10 @@ class Publisher:
         return None
 
     def job_daily(self, args) -> Optional[int]:
-        """The preceding local day (23, 24 or 25 hours), plus catch-up."""
+        """!@brief The preceding local day (23, 24 or 25 hours), plus catch-up.
+        @param args parsed command line (``date``).
+        @return None, or :data:`EXIT_USAGE` for a bad ``--date``.
+        """
         if args.date:
             try:
                 day = date.fromisoformat(args.date)
@@ -2234,6 +3004,7 @@ class Publisher:
                 return EXIT_USAGE
         else:
             day = self.now().astimezone(self.zone).date() - timedelta(days=1)
+        # Days first..day inclusive; first - 1 has just left the window.
         first = day - timedelta(days=self.cfg["daily"]["catchup_days"])
         self._run_pieces("daily", split_range(
             self.midnight(first), self.midnight(day + timedelta(days=1)),
@@ -2246,11 +3017,18 @@ class Publisher:
         return None
 
     def _full(self, piece: Piece, unit: str) -> bool:
-        """Whether a split piece covers its whole hour or day."""
+        """!@brief Whether a split piece covers its whole hour or day.
+        @param piece ``(start, end, label)`` from :func:`split_range`.
+        @param unit  ``hour`` or ``day``.
+        @return False for the clipped first or last piece of a range.
+        """
         start, end, _ = piece
         local = self.local(start)
         if unit == "hour":
             floor = local.replace(minute=0, second=0, microsecond=0)
+            # One real hour later (UTC arithmetic), right across a
+            # changeover; a day ends at the next local midnight, 23 or 25
+            # hours away on DST days.
             following = (floor.astimezone(timezone.utc)
                          + timedelta(hours=1)).astimezone(self.zone)
         else:
@@ -2261,13 +3039,23 @@ class Publisher:
             datetime_to_nova(following) == end
 
     def job_backfill(self, args) -> Optional[int]:
-        """Whole hours and days of a historical range; partial ones skipped."""
+        """!@brief Whole hours and days of a historical range; partial ones
+               skipped.
+
+        Clipped pieces at the ends of the range are skipped: a partial file
+        under a full piece's name would later block the complete one.
+        @param args parsed command line (``start``, ``end``, ``hourly``,
+                    ``daily``, ``upload``).
+        @return None, or :data:`EXIT_USAGE`.
+        """
         try:
             start, end = parse_range(args.start, args.end, now=self.now(),
                                      tz=self.zone)
         except NovaTimeError as exc:
             log.error("%s", exc)
             return EXIT_USAGE
+        # Never ask for the future; the still-running piece at the end
+        # is then not full and is dropped.
         end = min(end, datetime_to_nova(self.now()))
         kinds = [k for k, on in (("hourly", args.hourly),
                                  ("daily", args.daily)) if on]
@@ -2286,6 +3074,12 @@ class Publisher:
         return None
 
     def job_upload(self, args) -> Optional[int]:
+        """!
+        @brief Retry every pending upload; with ``--verify`` re-check uploaded
+        copies first.
+        @param args parsed command line (``verify``, ``since``).
+        @return None, or :data:`EXIT_USAGE` for a bad ``--since``.
+        """
         since = None
         if getattr(args, "since", None):
             if not getattr(args, "verify", False):
@@ -2307,6 +3101,16 @@ class Publisher:
         return None
 
     def job_token(self, args) -> Optional[int]:
+        """!@brief Create the shift token of a data month if it is missing.
+
+        Cron runs ``token --next`` on the 25th (D8), so next month's token
+        exists, and has been mailed about and backed up, days before the first
+        data of that month is blurred with it; :meth:`shift` would otherwise
+        create it lazily.
+        @param args parsed command line (``month``, ``next``).
+        @return None, or :data:`EXIT_USAGE` for a bad ``--month``.
+        """
+        # Months are local (D2), as is the data month in shift().
         local = self.now().astimezone(self.zone)
         if args.month:
             match = re.match(r"^(\d{4})-(\d{2})$", args.month.strip())
@@ -2331,6 +3135,10 @@ class Publisher:
     # -- credentials
 
     def _klist(self, env: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """!@brief Run ``klist`` on the configured cache, in the C locale.
+        @param env environment with ``KRB5CCNAME``.
+        @return :func:`parse_klist` output, or None (no ticket, or a dry run).
+        """
         proc = self.run(["klist"], env=dict(env, LC_ALL="C", LANG="C"),
                         timeout=30, mutating=False)
         if self.dry_run or proc.returncode != 0:
@@ -2338,6 +3146,10 @@ class Publisher:
         return parse_klist(proc.stdout)
 
     def _sso_credentials(self) -> Optional[Tuple[str, str]]:
+        """!@brief The non-MFA SSO account from ``credentials.env_file`` (D11).
+        @return ``(user, password)``, or None if the file is unreadable or
+                still holds placeholders.
+        """
         path = os.path.expanduser(self.cfg["credentials"]["env_file"])
         try:
             values = read_dotenv(path)
@@ -2350,7 +3162,11 @@ class Publisher:
         return user, password
 
     def job_creds(self, args) -> Optional[int]:
-        """Renew the Kerberos ticket and refresh the FDP bearer token (D11)."""
+        """!@brief Renew the Kerberos ticket and refresh the FDP bearer token
+               (D11).
+        @param args parsed command line (unused).
+        @return None.
+        """
         creds = self.cfg["credentials"]
         if not creds["enabled"]:
             log.info("credentials refresh disabled")
@@ -2363,6 +3179,14 @@ class Publisher:
         return None
 
     def _kerberos(self, env: Dict[str, str]) -> Dict[str, Any]:
+        """!
+        @brief Check the Kerberos TGT; ``kinit -R`` it when it nears expiry.
+
+        Alerts when there is no valid ticket, when renewal fails, and a day
+        before the renewable lifetime ends (a person must run ``kinit -r 7d``).
+        @param env environment with ``KRB5CCNAME``.
+        @return report for the run detail and the status page.
+        """
         creds = self.cfg["credentials"]
         cache = creds["krb5ccname"]
         kinit = "kinit -r 7d -c {} {}".format(cache, creds["principal"])
@@ -2384,6 +3208,8 @@ class Publisher:
         report.update(valid=True, principal=info["principal"])
         self.resolve("kinit-needed")
         expires, renew_until = info["expires"], info["renew_until"]
+        # kinit -R extends the ticket up to renew_until, never past it;
+        # beyond that a person must run kinit -r 7d (D11).
         if expires is not None and expires - now < creds["renew_below_hours"] * 3600:
             if renew_until is not None and renew_until > now:
                 proc = self.run(["kinit", "-R", "-c", cache], env=env,
@@ -2422,6 +3248,15 @@ class Publisher:
         return report
 
     def _htgettoken(self, env: Dict[str, str]) -> Dict[str, Any]:
+        """!@brief Refresh the FDP bearer token with htgettoken (D11).
+
+        Kerberos first; SSO password approval as the fallback only when real
+        credentials are configured and not held off (:meth:`_sso_backoff`).
+        The password is passed in the child's environment only and is masked
+        in every message.
+        @param env environment with ``KRB5CCNAME``.
+        @return report: mode, exit status, and :meth:`bearer_token`.
+        """
         creds = self.cfg["credentials"]
         token_file = os.path.expanduser(self.cfg["fdp"]["token_file"])
         argv = ["htgettoken"] + list(creds["htgettoken_args"]) + [
@@ -2440,6 +3275,8 @@ class Publisher:
             argv += ["--ssoapprove=password", "--ssocookiefile=" +
                      os.path.expanduser(creds["sso_cookie_file"])]
         else:
+            # No browser or device flow from cron: Kerberos (or a still
+            # valid Vault token) only.
             argv.append("--nooidc")
         argv += ["-o", token_file]
         if not self.dry_run:
@@ -2482,6 +3319,9 @@ class Publisher:
         return report
 
     def _env_file_mtime(self) -> Optional[float]:
+        """!@brief Modification time of ``credentials.env_file``.
+        @return seconds since the epoch, or None if missing.
+        """
         try:
             return os.path.getmtime(os.path.expanduser(
                 self.cfg["credentials"]["env_file"]))
@@ -2489,15 +3329,19 @@ class Publisher:
             return None
 
     def _sso_failed(self) -> None:
+        """!
+        @brief Remember an SSO password failure, with the env file's mtime.
+        """
         self.state.kv_set("sso_failed", json.dumps(
             {"at": self.stamp(), "env_mtime": self._env_file_mtime()}))
 
     def _sso_backoff(self) -> str:
-        """Why SSO password mode is held off, or "" if it may be tried.
+        """!@brief Why SSO password mode is held off, or "" if it may be tried.
 
         After a failure in that mode it is not tried again for
         ``credentials.sso_backoff_hours``, unless the env file has changed
         (a new password), so a stale password is not replayed every 30 min.
+        @return the reason, or "".
         """
         try:
             record = json.loads(self.state.kv_get("sso_failed") or "null")
@@ -2518,7 +3362,10 @@ class Publisher:
                     self.cfg["credentials"]["env_file"]))
 
     def bearer_token(self) -> Dict[str, Any]:
-        """Expiry of the FDP bearer token, from its JWT payload."""
+        """!@brief Expiry of the FDP bearer token, from its JWT payload.
+        @return ``{"file", "present"}`` and, if present, ``exp``,
+                ``seconds_left`` and ``age_seconds``.
+        """
         path = os.path.expanduser(self.cfg["fdp"]["token_file"])
         try:
             with open(path, encoding="utf-8") as handle:
@@ -2534,6 +3381,11 @@ class Publisher:
                 "age_seconds": round(self.now().timestamp() - mtime)}
 
     def vault_token(self) -> Dict[str, Any]:
+        """!
+        @brief Presence and age of htgettoken's Vault token ``/tmp/vt_u<uid>``.
+        @return ``{"file", "present"}`` and, if present, ``age_seconds``.
+        """
+        # htgettoken's default Vault token location.
         path = "/tmp/vt_u{}".format(os.getuid() if hasattr(os, "getuid")
                                     else 0)
         try:
@@ -2545,10 +3397,18 @@ class Publisher:
     # -- check
 
     def job_check(self, args) -> Optional[int]:
-        """Preflight: print a table of checks; exit 1 if any fails."""
+        """!@brief Preflight: print a table of checks; exit 1 if any fails.
+        @param args parsed command line (unused).
+        @return None if every check passed, else :data:`EXIT_FAILURE`.
+        """
         results: List[Tuple[str, bool, str]] = []
 
         def add(name: str, ok: bool, detail: str) -> None:
+            """!@brief Append one row to the preflight table.
+            @param name   check name (first column).
+            @param ok     whether it passed.
+            @param detail what was checked.
+            """
             results.append((name, ok, detail))
 
         server = self.cfg["server"]
@@ -2576,6 +3436,8 @@ class Publisher:
                 probe = os.path.dirname(probe)
             add(key.replace("_", " "), bool(probe) and os.access(probe, os.W_OK),
                 path)
+        # Shift tokens are secrets (D8): their directory must give group
+        # and other no access at all.
         tokens = os.path.expanduser(self.cfg["shift"]["token_dir"])
         try:
             mode = os.stat(tokens).st_mode & 0o777
@@ -2626,6 +3488,11 @@ class Publisher:
     # -- status
 
     def disk_usage(self) -> Optional[Dict[str, Any]]:
+        """!
+        @brief Usage of the file system holding ``data_root`` (or its nearest
+        existing parent).
+        @return ``{path, total, used, free, warn_percent, percent}``, or None.
+        """
         path = self.data_root
         while path and not os.path.exists(path):
             path = os.path.dirname(path)
@@ -2640,6 +3507,10 @@ class Publisher:
                 else 0.0}
 
     def _ingest_status(self) -> Dict[str, Any]:
+        """!@brief Per-source ingest watermark and lag for the status page.
+        @return ``{"ok", "sources"}``, or ``{"ok": False, "error"}`` if
+                ``/api/sources`` cannot be read.
+        """
         server = self.cfg["server"]
         try:
             body = http_get_json(server["url"].rstrip("/") + "/api/sources",
@@ -2665,6 +3536,12 @@ class Publisher:
         return {"ok": True, "sources": sources}
 
     def _grid(self, kind: str, pieces: Sequence[Piece]) -> Dict[str, Any]:
+        """!
+        @brief The status grid of one kind: pieces (newest first) by stream.
+        @param kind   ``hourly`` or ``daily``.
+        @param pieces pieces to show.
+        @return ``{"labels", "streams", "grid": {label: {stream: state}}}``.
+        """
         labels = [p[2] for p in reversed(pieces)]
         rows = {r["raw_path"]: r for r in self.state.for_labels(kind, labels)}
         grid: Dict[str, Dict[str, str]] = {}
@@ -2678,6 +3555,12 @@ class Publisher:
                 "grid": grid}
 
     def build_status(self) -> Dict[str, Any]:
+        """!@brief Everything the status page shows, as JSON-serialisable data.
+
+        Last 48 hours and 14 days of the grid, the latest run of every job,
+        credentials, ingest, disk, running jobs, totals and recent errors.
+        @return the dict written to ``status.json``.
+        """
         now = self.now()
         end = self.floor_hour(datetime_to_nova(now))
         today = now.astimezone(self.zone).date()
@@ -2746,7 +3629,11 @@ class Publisher:
         }
 
     def write_status(self) -> None:
-        """Render ``index.html`` and ``status.json`` atomically."""
+        """!@brief Render ``index.html`` and ``status.json`` atomically.
+
+        Also raises or clears the disk alert, first, since a full disk is what
+        makes the writes fail.
+        """
         directory = self.dir("status_dir")
         if self.dry_run:
             print("+ (would write {} and {})".format(
@@ -2769,6 +3656,8 @@ class Publisher:
                                                       default=str) + "\n"),
                            ("index.html", render_html(status))):
             path = os.path.join(directory, name)
+            # Written beside the target and renamed, so the server never
+            # serves a half-written file; 0644 so it can serve it at all.
             tmp = "{}.tmp.{}".format(path, os.getpid())
             try:
                 with open(tmp, "w", encoding="utf-8") as handle:
@@ -2780,6 +3669,9 @@ class Publisher:
                     os.unlink(tmp)
 
     def _disk_line(self) -> str:
+        """!@brief A disk-usage sentence to append to state-unwritable alerts.
+        @return the sentence, or "" if usage is unknown.
+        """
         disk = self.disk_usage()
         if not disk:
             return ""
@@ -2787,11 +3679,13 @@ class Publisher:
             disk["path"], disk["percent"], _human_bytes(disk["free"]))
 
     def lock_holder(self, name: str) -> Optional[Dict[str, Any]]:
-        """The live process that last took ``NAME.lock``, if any.
+        """!@brief The live process that last took ``NAME.lock``, if any.
 
         Read from the PID the lock file holds and its mtime (when it was
         taken), without touching the lock: probing it would make a job that
         starts at that moment find it busy.
+        @param name lock name.
+        @return ``{"pid", "since", "seconds"}``, or None if no live holder.
         """
         path = os.path.join(self.dir("state_dir"), name + ".lock")
         try:
@@ -2812,17 +3706,25 @@ class Publisher:
             since, timezone.utc)), "seconds": round(time.time() - since)}
 
     def running_jobs(self) -> Dict[str, Dict[str, Any]]:
+        """!@brief Jobs whose lock is held by a live process, flagged ``stale``
+        when held past ``alerts.stale_job_hours`` (backfill exempt).
+        @return ``{job: holder}``.
+        """
         out = {}
         for job in JOBS:
             holder = self.lock_holder(job)
             if holder:
+                # A history backfill legitimately runs for days.
                 holder["stale"] = job != "backfill" and holder["seconds"] > \
                     self.cfg["alerts"]["stale_job_hours"] * 3600
                 out[job] = holder
         return out
 
     def check_stale(self, job: str) -> None:
-        """Alert when *job* finds its lock held for too long (a hung run)."""
+        """!
+        @brief Alert when *job* finds its lock held for too long (a hung run).
+        @param job the job that found its lock busy.
+        """
         holder = self.lock_holder(job)
         limit = self.cfg["alerts"]["stale_job_hours"] * 3600
         if job == "backfill" or not holder or holder["seconds"] <= limit:
@@ -2843,7 +3745,15 @@ class Publisher:
     # -- driver
 
     def execute(self, args: argparse.Namespace) -> int:
-        """Run one subcommand under its lock and record the run."""
+        """!@brief Run one subcommand under its lock and record the run.
+
+        The result is ``usage`` for a handler's own exit code, else
+        ``partial``/``failed`` if there were errors (partial when some steps
+        succeeded), else ``ingest-not-ready``, ``busy`` or ``ok``.  The status
+        page is re-rendered after every job.
+        @param args parsed command line.
+        @return the exit status.
+        """
         job = args.command
         handler = getattr(self, "job_" + job, None)
         with self.lock(job) as got:
@@ -2851,6 +3761,7 @@ class Publisher:
                 log.info("%s is already running; nothing to do", job)
                 self.check_stale(job)
                 return EXIT_TEMPFAIL
+            # The upload job's lock is upload.lock itself; see upload().
             self.holding_upload_lock = job == "upload"
             try:
                 run_id = self.state.run_start(job, self.stamp())
@@ -2897,6 +3808,7 @@ class Publisher:
                            "(disk full?)", "cannot record the end of the {} "
                            "run in {}: {}{}".format(job, self.state.path, exc,
                                                     self._disk_line()))
+                # A run that cannot be recorded is not "ok".
                 code = code or EXIT_FAILURE
             try:
                 self.write_status()
@@ -2908,7 +3820,14 @@ class Publisher:
 
 
 def _cell_state(rows: Sequence[Optional[Dict[str, Any]]]) -> str:
-    """One stream of one piece, summarised across its formats."""
+    """!@brief One stream of one piece, summarised across its formats.
+
+    The tests run from worst to best: any error wins, then an incomplete
+    dump; ``public`` needs both copies of every format verified on FDP.
+    @param rows the ``files`` rows of each format (None where absent).
+    @return ``missing``, ``error``, ``partial``, ``public``, ``raw-up``,
+            ``shifted`` or ``dumped`` (also the CSS class of the cell).
+    """
     if not any(rows):
         return "missing"
     if any(r and r["last_error"] for r in rows):
@@ -2927,6 +3846,8 @@ def _cell_state(rows: Sequence[Optional[Dict[str, Any]]]) -> str:
 # -------------------------------------------------------------- status page
 
 
+## Inline stylesheet of the status page: light and dark themes, and one
+## class per grid state of :func:`_cell_state`.
 _CSS = """
 :root { --bg:#fff; --fg:#1d232a; --muted:#5b6672; --line:#d8dee4;
   --card:#f6f8fa; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
@@ -2962,16 +3883,32 @@ code { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; }
 
 
 def _esc(value: Any) -> str:
+    """!@brief HTML-escape a value for the status page; None becomes empty.
+    @param value anything printable.
+    @return escaped text.
+    """
     return html.escape("" if value is None else str(value))
 
 
 def _result_class(result: Optional[str]) -> str:
+    """!@brief CSS class for a run result: ``ok``, ``warn`` or ``bad``.
+    @param result run result string, or None.
+    @return the class name; unknown results are ``bad``.
+    """
     return {"ok": "ok", "ingest-not-ready": "warn", "partial": "warn",
             "busy": "warn"}.get(result or "", "bad")
 
 
 def render_html(status: Dict[str, Any]) -> str:
-    """The self-contained status page; *status* is what status.json holds."""
+    """!
+    @brief The self-contained status page; *status* is what status.json holds.
+
+    No external resources: inline CSS (light and dark), a 60 s meta refresh,
+    and every value from *status* passed through :func:`_esc`, since error
+    texts come from subprocess output.
+    @param status dict from :meth:`Publisher.build_status`.
+    @return the HTML document.
+    """
     out: List[str] = []
     w = out.append
     w("<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">")
@@ -3077,6 +4014,8 @@ def render_html(status: Dict[str, Any]) -> str:
                        "partial", "error"))
     for kind, title in (("hourly", "Hourly files (last 48 h)"),
                         ("daily", "Daily files (last 14 days)")):
+        # Pieces newest first, one column per stream; the cell text is
+        # its state and also its CSS class (_cell_state).
         grid = status[kind]
         w("<h2>{}</h2><div class=\"muted\">{}</div>".format(title, legend))
         w("<table class=\"grid\"><tr><th>label</th>")
@@ -3118,12 +4057,14 @@ def render_html(status: Dict[str, Any]) -> str:
 
 
 def _common_options(sub: bool) -> argparse.ArgumentParser:
-    """The options every subcommand takes.
+    """!@brief The options every subcommand takes.
 
     They are accepted before or after the subcommand.  The copy attached to
     the subcommands defaults to "absent", or its defaults would overwrite
     what was given before the subcommand; ``--set`` collects separately and
     is joined in :func:`load_settings`.
+    @param sub True for the copy attached to the subcommands.
+    @return a parent parser (``add_help=False``).
     """
     quiet = {"default": argparse.SUPPRESS} if sub else {}
     common = argparse.ArgumentParser(add_help=False)
@@ -3147,6 +4088,9 @@ def _common_options(sub: bool) -> argparse.ArgumentParser:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """!@brief The ``darpa-spill-publish`` argument parser and its subcommands.
+    @return the parser.
+    """
     top = _common_options(sub=False)
     common = _common_options(sub=True)
     parser = argparse.ArgumentParser(
@@ -3211,6 +4155,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _setup_logging(verbose: bool, quiet: bool) -> None:
+    """!@brief Log to stderr (cron mails or redirects it) with ISO timestamps.
+    @param verbose DEBUG level.
+    @param quiet   WARNING level (ignored if *verbose*).
+    """
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter(
         "%(asctime)s " + PROG + " %(levelname)s %(message)s",
@@ -3224,6 +4172,12 @@ def _setup_logging(verbose: bool, quiet: bool) -> None:
 def main(argv: Optional[Sequence[str]] = None,
          environ: Optional[Mapping[str, str]] = None,
          now: Optional[datetime] = None) -> int:
+    """!@brief Command-line entry point of ``darpa-spill-publish``.
+    @param argv    arguments (default ``sys.argv[1:]``).
+    @param environ environment (default ``os.environ``); tests pass their own.
+    @param now     pinned current time (aware), for tests.
+    @return the exit status: 0, 1, 2, 3 or 75 (see the module docstring).
+    """
     environ = dict(os.environ if environ is None else environ)
     parser = build_parser()
     args = parser.parse_args(argv)
