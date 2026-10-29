@@ -410,3 +410,18 @@ def test_info(dumps, token_file, capsys):
     other = Path(token_file).parent / "o"
     other.write_text(VECTORS["tokens"]["flat"])
     assert main(["info", shifted, "--token-file", str(other)], environ={}) == 1
+
+
+@pytest.mark.parametrize("sigma,cut", [(1280000, 3840000), (1, 32000000)])
+def test_maximum_gaussian_draw_uses_exact_open_interval(sigma, cut):
+    from decimal import Decimal, localcontext, ROUND_HALF_EVEN
+    from darpa_spillserver.shift import as241_decimal
+
+    k = 2**53 - 1
+    with localcontext() as context:
+        context.prec = 80
+        uniform = (Decimal(k) + Decimal('0.5')) / Decimal(2**53)
+        exact = as241_decimal(uniform) * sigma
+        expected = (None if abs(exact) > cut else
+                    int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)))
+    assert _gauss_draw(k, sigma, cut) == expected

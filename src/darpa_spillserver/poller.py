@@ -179,6 +179,12 @@ class Poller:
     # -- the loop -----------------------------------------------------------
 
     async def _run(self) -> None:
+        try:
+            await self._run_loop()
+        finally:
+            self.status.running = False
+
+    async def _run_loop(self) -> None:
         interval = self.config.ingest.interval
 
         # Probe once up front so the warning appears at startup rather than
@@ -207,7 +213,12 @@ class Poller:
                     )
                     break
 
-            await self._maybe_prune()
+            try:
+                await self._maybe_prune()
+            except Exception:
+                # Maintenance must not stop collection after a transient
+                # SQLite lock or disk error. Retry on the next interval.
+                log.exception("archive maintenance failed for %s", self.source.name)
 
             # Subtract the work already done so the period is the poll
             # interval, not the interval plus however long the poll took.
@@ -371,25 +382,25 @@ class Poller:
     async def _maybe_prune(self) -> None:
         """Apply the retention policy, at most once per prune interval."""
         retention_days = self.config.storage.retention_days
-        if retention_days <= 0:
-            return
-
         now = time.time()
         if now - self._last_prune < self.config.storage.prune_interval:
             return
         self._last_prune = now
 
+        # Diagnostic retention is independent of event retention: keeping
+        # all accelerator history must not keep every poll log forever.
+        await asyncio.to_thread(
+            self.store.trim_ingest_log, self.config.storage.ingest_log_keep
+        )
+        if retention_days <= 0:
+            return
         cutoff = nova_now() - int(retention_days * 86400 * TICKS_PER_SECOND)
         if cutoff <= 0:
             return
 
-        # Each poller prunes only its own source, so a disabled source's
-        # history is kept rather than aged out by its neighbours.
+        # Each poller prunes only its own source.
         removed = await asyncio.to_thread(
             self.store.prune_before, cutoff, self.source.name
-        )
-        await asyncio.to_thread(
-            self.store.trim_ingest_log, self.config.storage.ingest_log_keep
         )
         if removed:
             self.status.pruned_total += removed

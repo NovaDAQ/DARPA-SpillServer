@@ -170,3 +170,23 @@ def test_default_window_is_modest():
     """A wide window makes one request produce more than the TDU's output
     cap allows."""
     assert 60.0 <= DEFAULT_WINDOW <= 900.0
+
+
+@pytest.mark.parametrize("window", [0, -1, float('nan'), float('inf'), 1e-12])
+async def test_invalid_window_is_rejected_before_io(window):
+    with pytest.raises(ValueError, match="window"):
+        await backfill_source(None, None, START, START + 100, window_seconds=window)
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+async def test_invalid_limit_is_rejected_before_io(limit):
+    with pytest.raises(ValueError, match="limit"):
+        await backfill_source(None, None, START, START + 100, batch_limit=limit)
+
+
+def test_cli_rejects_invalid_window_before_opening_archive(tmp_path):
+    from darpa_spillserver.backfill import main
+
+    database = tmp_path / "must-not-exist.db"
+    assert main(["--window", "0", "-d", str(database)]) == 2
+    assert not database.exists()

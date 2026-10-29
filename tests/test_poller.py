@@ -358,3 +358,57 @@ async def test_max_future_zero_disables_the_check(config, store):
 
     assert await poller.poll_once() == 3
     assert poller.status.events_rejected == 0
+
+
+async def test_maintenance_error_does_not_stop_collection(config, store, monkeypatch):
+    import sqlite3
+
+    config.storage.retention_days = 1
+    config.storage.prune_interval = 0
+    poller = Poller(config, store, client=StubClient(events=make_events(2)))
+    original = store.prune_before
+    recovered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    calls = []
+
+    def transient_failure(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        result = original(*args)
+        loop.call_soon_threadsafe(recovered.set)
+        return result
+
+    monkeypatch.setattr(store, "prune_before", transient_failure)
+    await poller.start()
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=3)
+        assert poller.status.running
+        assert poller.status.polls >= 2
+        assert store.count() == 2
+    finally:
+        await poller.stop()
+    assert not poller.status.running
+
+
+async def test_cancelled_loop_clears_running(config, store):
+    poller = Poller(config, store, client=StubClient())
+    await poller.start()
+    await asyncio.sleep(0)
+    poller._task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await poller._task
+    assert not poller.status.running
+    poller._task = None
+    await poller.stop()
+
+
+async def test_log_retention_keeps_event_history(config, store):
+    config.storage.retention_days = 0
+    config.storage.ingest_log_keep = 2
+    store.insert_events(make_events(3))
+    for index in range(5):
+        store.record_ingest(DEFAULT_SOURCE, HISTORY_ROUTE, index, index, 0, 0)
+    await Poller(config, store, client=StubClient())._maybe_prune()
+    assert len(store.recent_ingests(100)) == 2
+    assert store.count() == 3

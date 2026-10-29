@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import sys
 import time
 from typing import List, Optional, Sequence
@@ -47,6 +48,14 @@ log = logging.getLogger(__name__)
 DEFAULT_WINDOW = 300.0
 
 
+def _validate_window(window_seconds: float, batch_limit: int) -> None:
+    if (not math.isfinite(window_seconds)
+            or window_seconds < 1 / TICKS_PER_SECOND):
+        raise ValueError("--window must be finite and at least one NOvA tick")
+    if batch_limit < 1:
+        raise ValueError("--limit must be at least 1")
+
+
 async def backfill_source(
     client: TDUClient,
     store: SpillStore,
@@ -60,6 +69,7 @@ async def backfill_source(
 
     Returns ``(fetched, inserted, windows)``.
     """
+    _validate_window(window_seconds, batch_limit)
     window_ticks = int(window_seconds * TICKS_PER_SECOND)
     fetched = inserted = windows = 0
     cursor = start_nova
@@ -309,6 +319,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.version:
         print("darpa-spill-backfill {}".format(__version__))
         return 0
+
+    try:
+        _validate_window(args.window, args.limit)
+    except ValueError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
 
     try:
         config = load_config(argv=(["-c", args.config] if args.config else []))

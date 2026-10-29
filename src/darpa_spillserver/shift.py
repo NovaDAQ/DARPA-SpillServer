@@ -274,11 +274,14 @@ def _gauss_draw(k: int, sigma: int, cut: int) -> Optional[int]:
     result lies within :data:`_GUARD` ticks of a rounding boundary or of the
     cut, in which case the decision is made in exact decimal arithmetic.
     """
-    u = (k + 0.5) / 9007199254740992.0          # exact: k < 2**53
-    xs = as241_float(u) * sigma
-    frac = abs(xs) % 1.0
-    if abs(frac - 0.5) > _GUARD and abs(abs(xs) - cut) > _GUARD:
-        return round(xs) if abs(xs) <= cut else None
+    u = (k + 0.5) / 9007199254740992.0
+    # The largest half-integer draw rounds to 1.0 in binary64. AS241
+    # requires an open interval; use the exact path for that endpoint.
+    if 0.0 < u < 1.0:
+        xs = as241_float(u) * sigma
+        frac = abs(xs) % 1.0
+        if abs(frac - 0.5) > _GUARD and abs(abs(xs) - cut) > _GUARD:
+            return round(xs) if abs(xs) <= cut else None
     with localcontext() as ctx:
         ctx.prec = 80
         ud = (Decimal(k) + Decimal("0.5")) / Decimal(9007199254740992)
