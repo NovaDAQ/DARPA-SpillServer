@@ -1,4 +1,6 @@
-"""Tests for the TDU HTTP client.
+"""!
+@file tests/test_tdu_client.py
+@brief Tests for the TDU HTTP client.
 
 The sample payloads here are real: ``LIVE_TCR_STATUS`` is the exact body
 returned by ``http://tdu-near-master-ppc-01:8080/tcr_status`` on 2026-09-22,
@@ -61,27 +63,43 @@ Events: [
 
 
 def test_valid_json_is_untouched():
+    """!
+    @brief loads_tolerant parses valid JSON exactly as json.loads would.
+    """
     assert loads_tolerant('{"a": 1}') == {"a": 1}
 
 
 def test_live_single_event_parses_strictly():
+    """!
+    @brief The live /tcr_status body (tab-indented, valid JSON) parses with its
+    fields intact.
+    """
     payload = loads_tolerant(LIVE_TCR_STATUS)
     assert payload["Type"] == 3
     assert payload["Time"] == 33778458638680249
 
 
 def test_unquoted_key_is_repaired():
-    """DumpSpillHistory's bulk output is not valid JSON; parse it anyway."""
+    """!
+    @brief DumpSpillHistory's bulk output is not valid JSON; parse it anyway.
+    """
     payload = loads_tolerant(LEGACY_BULK_JSON)
     assert len(payload["Events"]) == 2
     assert payload["Events"][0]["Type"] == 4
 
 
 def test_trailing_comma_is_repaired():
+    """!
+    @brief A trailing comma before ']' is removed and the body parses.
+    """
     assert loads_tolerant('{"a": [1, 2,]}') == {"a": [1, 2]}
 
 
 def test_unrepairable_body_raises_with_an_excerpt():
+    """!
+    @brief A non-JSON body (here the TDU's shared-memory error text) raises
+    TDUResponseError quoting the body.
+    """
     with pytest.raises(TDUResponseError) as excinfo:
         loads_tolerant("Failed to attach to shared memory segment")
     assert "Failed to attach" in str(excinfo.value)
@@ -91,7 +109,9 @@ def test_unrepairable_body_raises_with_an_excerpt():
 
 
 def test_event_from_legacy_record_has_no_signal():
-    """The legacy routes report a decoded type only, never the raw word."""
+    """!
+    @brief The legacy routes report a decoded type only, never the raw word.
+    """
     record = loads_tolerant(LIVE_TCR_STATUS)
     event = event_from_record(record, route="tcr_status")
 
@@ -103,8 +123,11 @@ def test_event_from_legacy_record_has_no_signal():
 
 
 def test_raw_event_word_is_authoritative_over_the_reported_type():
-    """When both are present the word wins: it recovers the exact signal."""
+    """!
+    @brief When both are present the word wins: it recovers the exact signal.
+    """
     event = event_from_record(
+        # Type 99 is not a SpillType; 0x018F = TCLK carrier | $8F.
         {"Time": 1, "Type": 99, "Event": 0x018F}, route="spill_history"
     )
     assert event.spill_type is SpillType.ACCEL_ONE_HZ_TCLK
@@ -112,6 +135,9 @@ def test_raw_event_word_is_authoritative_over_the_reported_type():
 
 
 def test_lowercase_keys_are_accepted():
+    """!
+    @brief Record keys are matched case-insensitively (time/type/number).
+    """
     event = event_from_record(
         {"time": 42, "type": 4, "number": 7}, route="spill_history"
     )
@@ -120,14 +146,26 @@ def test_lowercase_keys_are_accepted():
 
 
 def test_record_without_a_timestamp_is_dropped_not_fatal():
+    """!
+    @brief A record with no Time maps to None instead of raising.
+    """
     assert event_from_record({"Type": 4}, route="x") is None
 
 
 def test_record_with_unknown_type_is_dropped():
+    """!
+    @brief A record whose Type is not a SpillType (and has no event word) maps
+    to None.
+    """
     assert event_from_record({"Time": 1, "Type": 99}, route="x") is None
 
 
 def test_unknown_signal_code_falls_back_to_sentinel():
+    """!
+    @brief An event word with an unregistered code keeps UNKNOWN_SIGNAL and
+    decodes to FAKE.
+    """
+    # 0x0199 = TCLK carrier | $99, a code with no registry entry.
     event = event_from_record({"Time": 1, "Event": 0x0199}, route="x")
     assert event.signal_code == UNKNOWN_SIGNAL
     assert event.spill_type is SpillType.FAKE
@@ -138,6 +176,9 @@ def test_unknown_signal_code_falls_back_to_sentinel():
 
 @respx.mock
 async def test_fetch_latest():
+    """!
+    @brief fetch_latest reads /tcr_status and returns its event.
+    """
     respx.get(BASE_URL + "/tcr_status").mock(
         return_value=httpx.Response(200, text=LIVE_TCR_STATUS)
     )
@@ -148,6 +189,10 @@ async def test_fetch_latest():
 
 @respx.mock
 async def test_history_route_is_used_when_present():
+    """!
+    @brief With history support advertised, fetch_history uses HISTORY_ROUTE
+    and decodes raw event words.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(200, json={"spill_history": True}))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
@@ -171,7 +216,9 @@ async def test_history_route_is_used_when_present():
 
 @respx.mock
 async def test_falls_back_to_the_legacy_route_on_404():
-    """An un-upgraded TDU must still work, degraded rather than broken."""
+    """!
+    @brief An un-upgraded TDU must still work, degraded rather than broken.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(404))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(return_value=httpx.Response(404))
@@ -188,6 +235,10 @@ async def test_falls_back_to_the_legacy_route_on_404():
 
 @respx.mock
 async def test_history_support_is_probed_only_once():
+    """!
+    @brief A negative capability probe (info 404, history 404) is cached across
+    fetches.
+    """
     info = respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(404))
     route = respx.get(BASE_URL + HISTORY_ROUTE).mock(
@@ -207,6 +258,10 @@ async def test_history_support_is_probed_only_once():
 
 @respx.mock
 async def test_legacy_bulk_json_is_parsed():
+    """!
+    @brief The history route's DumpSpillHistory-style malformed JSON is
+    repaired and parsed.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(200, json={"spill_history": True}))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
@@ -219,6 +274,10 @@ async def test_legacy_bulk_json_is_parsed():
 
 @respx.mock
 async def test_transient_failures_are_retried():
+    """!
+    @brief A connection error followed by success is retried within the budget
+    (2 calls).
+    """
     route = respx.get(BASE_URL + "/tcr_status")
     route.side_effect = [
         httpx.ConnectError("refused"),
@@ -232,6 +291,10 @@ async def test_transient_failures_are_retried():
 
 @respx.mock
 async def test_persistent_failure_raises_after_the_retry_budget():
+    """!
+    @brief Connection errors on every attempt raise TDUUnavailable after the
+    retries.
+    """
     respx.get(BASE_URL + "/tcr_status").mock(
         side_effect=httpx.ConnectError("refused")
     )
@@ -242,6 +305,10 @@ async def test_persistent_failure_raises_after_the_retry_budget():
 
 @respx.mock
 async def test_ping_reports_false_when_unreachable():
+    """!
+    @brief ping() returns False, not an exception, when /tcr_running is
+    unreachable.
+    """
     respx.get(BASE_URL + "/tcr_running").mock(
         side_effect=httpx.ConnectError("refused")
     )
@@ -251,6 +318,10 @@ async def test_ping_reports_false_when_unreachable():
 
 @respx.mock
 async def test_bare_list_response_is_accepted():
+    """!
+    @brief A history response that is a bare JSON list (no envelope) is
+    accepted.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(200, json={"spill_history": True}))
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
@@ -262,6 +333,10 @@ async def test_bare_list_response_is_accepted():
 
 
 def test_client_rejects_use_before_open():
+    """!
+    @brief Accessing the underlying httpx client before open() raises
+    RuntimeError.
+    """
     client = TDUClient(BASE_URL)
     with pytest.raises(RuntimeError):
         _ = client.client
@@ -272,8 +347,10 @@ def test_client_rejects_use_before_open():
 
 @respx.mock
 async def test_empty_body_is_retried_not_fatal():
-    """The TDU answers 200 with nothing in the body from time to time. It
-    clears on a retry, so it must not cost a whole poll."""
+    """!
+    @brief The TDU answers 200 with nothing in the body from time to time. It
+    clears on a retry, so it must not cost a whole poll.
+    """
     route = respx.get(BASE_URL + "/tcr_status")
     route.side_effect = [
         httpx.Response(200, text=""),
@@ -289,6 +366,10 @@ async def test_empty_body_is_retried_not_fatal():
 
 @respx.mock
 async def test_whitespace_only_body_is_also_retried():
+    """!
+    @brief A 200 whose body is only whitespace is treated like an empty body
+    and retried.
+    """
     route = respx.get(BASE_URL + "/tcr_status")
     route.side_effect = [
         httpx.Response(200, text="   \n\t "),
@@ -301,8 +382,10 @@ async def test_whitespace_only_body_is_also_retried():
 
 @respx.mock
 async def test_persistently_empty_body_raises_a_clear_error():
-    """If it never clears, say what actually happened rather than blaming
-    the JSON parser."""
+    """!
+    @brief If it never clears, say what actually happened rather than blaming
+    the JSON parser.
+    """
     respx.get(BASE_URL + "/tcr_status").mock(
         return_value=httpx.Response(200, text="")
     )
@@ -314,6 +397,9 @@ async def test_persistently_empty_body_raises_a_clear_error():
 
 @respx.mock
 async def test_a_good_response_is_not_retried():
+    """!
+    @brief A valid first response is used without retrying.
+    """
     route = respx.get(BASE_URL + "/tcr_status").mock(
         return_value=httpx.Response(200, text=LIVE_TCR_STATUS)
     )
@@ -324,6 +410,9 @@ async def test_a_good_response_is_not_retried():
 
 @respx.mock
 async def test_empty_history_response_is_retried():
+    """!
+    @brief The empty-body retry also applies to the history route.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(200, json={"spill_history": True}))
     route = respx.get(BASE_URL + HISTORY_ROUTE)
@@ -342,7 +431,9 @@ async def test_empty_history_response_is_retried():
 
 @respx.mock
 async def test_probe_uses_the_cheap_info_route():
-    """The obvious probe walks the whole ring. The info route does not."""
+    """!
+    @brief The obvious probe walks the whole ring. The info route does not.
+    """
     info = respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(200, json={"spill_history": True})
     )
@@ -358,8 +449,10 @@ async def test_probe_uses_the_cheap_info_route():
 
 @respx.mock
 async def test_a_slow_history_route_is_not_mistaken_for_a_missing_one():
-    """This is the bug that reported a working TDU as having no history
-    route: the probe timed out and the timeout was read as a 404."""
+    """!
+    @brief This is the bug that reported a working TDU as having no history
+    route: the probe timed out and the timeout was read as a 404.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         side_effect=httpx.ReadTimeout("too slow")
     )
@@ -374,6 +467,10 @@ async def test_a_slow_history_route_is_not_mistaken_for_a_missing_one():
 
 @respx.mock
 async def test_an_inconclusive_probe_is_retried_later():
+    """!
+    @brief After an inconclusive (timed-out) probe, a later supports_history()
+    call probes again and can succeed.
+    """
     info = respx.get(BASE_URL + "/spill_history_info")
     info.side_effect = [
         httpx.ReadTimeout("too slow"),
@@ -390,7 +487,9 @@ async def test_an_inconclusive_probe_is_retried_later():
 
 @respx.mock
 async def test_a_real_404_is_remembered():
-    """A definite answer is definite: do not keep re-probing it."""
+    """!
+    @brief A definite answer is definite: do not keep re-probing it.
+    """
     info = respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(404)
     )
@@ -407,6 +506,10 @@ async def test_a_real_404_is_remembered():
 
 @respx.mock
 async def test_older_server_without_the_info_route_still_detected():
+    """!
+    @brief When /spill_history_info is 404 but the history route answers,
+    history support is still detected.
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(404)
     )
@@ -419,9 +522,17 @@ async def test_older_server_without_the_info_route_still_detected():
 
 @respx.mock
 async def test_history_fetch_gets_the_long_budget():
+    """!
+    @brief History fetches use history_timeout as the read timeout, not the
+    short default.
+    """
     captured = {}
 
     def record(request):
+        """!
+        @brief Capture the per-request timeout extension httpx attaches to the
+        request.
+        """
         captured["timeout"] = request.extensions.get("timeout", {})
         return httpx.Response(200, json={"events": [], "count": 0})
 

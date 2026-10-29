@@ -1,4 +1,8 @@
-"""Background ingest: copy events from the TDUs into the local archive.
+"""!
+@file src/darpa_spillserver/poller.py
+@brief Background ingest: one asyncio polling task per TDU source, plus the manager that owns them.
+
+Background ingest: copy events from the TDUs into the local archive.
 
 A TDU holds only a small ring buffer, so these loops are what turn live
 instruments into a queryable history.  Each source gets its own
@@ -22,6 +26,18 @@ arrive at roughly 6--15 Hz, so a 1 Hz poll then captures well under a tenth of
 them.  The loop detects this, warns once at startup, and records
 ``degraded: true`` in its status so the API can tell clients their history has
 holes rather than letting them assume it is complete.
+
+**Concurrency model.**  Pollers are *asyncio tasks* on the server's single
+event loop, not OS threads.  Network I/O is awaited on the loop (the TDU
+client is async); every blocking SQLite call (watermark read, insert, prune,
+ingest log) is pushed to the default executor with ``asyncio.to_thread`` so
+it never stalls the loop or the API handlers sharing it.  Because all state
+mutation happens on the loop thread, :class:`IngestStatus` needs no lock;
+the only lock is :attr:`IngestManager._lock`, an ``asyncio.Lock`` that
+serialises start/stop and runtime source changes so two PATCH requests (or a
+PATCH racing shutdown) cannot interleave poller teardown and creation.
+Thread safety of the archive itself is :class:`~darpa_spillserver.storage.SpillStore`'s
+responsibility.
 """
 
 from __future__ import annotations
@@ -39,40 +55,67 @@ from .tdu_client import HISTORY_ROUTE, TDUClient, TDUError
 
 __all__ = ["IngestStatus", "Poller", "IngestManager", "SourceError"]
 
+## Module logger.
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class IngestStatus:
-    """A snapshot of the poller's health, surfaced by ``/api/status``."""
+    """!
+    @brief Per-source ingest health counters.
 
+    A snapshot of the poller's health, surfaced by ``/api/status``.
+
+    Mutated only from the event-loop thread (by its Poller), read by API
+    handlers on the same loop, so no locking is needed.  Times ending in
+    ``_at`` are UNIX seconds (float); ``*_nova`` fields are NOvA 64 MHz ticks.
+    """
+
+    ## Source name this status belongs to.
     source: str = ""
+    ## TDU base URL being polled.
     base_url: str = ""
+    ## True while the polling task is alive.
     running: bool = False
+    ## True when the TDU lacks the history route, so events are being missed.
     degraded: bool = False
-    """True when the TDU lacks the history route, so events are being missed."""
 
+    ## Route used by the last successful poll (``/spill_history`` or ``/tcr_status``).
     route: str = ""
+    ## Successful polls completed.
     polls: int = 0
+    ## Events returned by the TDU, overlap re-reads included.
     events_fetched: int = 0
+    ## Events actually new to the archive.
     events_inserted: int = 0
+    ## Failures since the last success; reset to 0 on success.
     consecutive_errors: int = 0
+    ## UNIX time of the last poll attempt, successful or not.
     last_poll_at: Optional[float] = None
+    ## UNIX time of the last successful poll.
     last_success_at: Optional[float] = None
+    ## ``"<ExceptionType>: <message>"`` of the last failure.
     last_error: str = ""
+    ## UNIX time of the last failure.
     last_error_at: Optional[float] = None
+    ## Events dropped for lying more than ``ingest.max_future`` ahead.
     events_rejected: int = 0
-    """Events dropped for lying more than ``ingest.max_future`` ahead."""
+    ## Newest event time fetched in the last non-empty poll (NOvA ticks).
     watermark_nova: Optional[int] = None
+    ## NOvA time up to which the TDU has been read completely: the start of
+    # the last successful poll that was not cut short by the batch limit.
+    # Unlike :attr:`watermark_nova` it advances while no events arrive, so a
+    # quiet beam (shutdown, a silent TDU) still counts as caught up.
     polled_through_nova: Optional[int] = None
-    """NOvA time up to which the TDU has been read completely: the start of
-    the last successful poll that was not cut short by the batch limit.
-    Unlike :attr:`watermark_nova` it advances while no events arrive, so a
-    quiet beam (shutdown, a silent TDU) still counts as caught up."""
 
+    ## Events removed by retention sweeps since start.
     pruned_total: int = 0
 
     def as_dict(self) -> dict:
+        """!
+        @brief Render as a JSON-ready dict for ``/api/status`` and ``/api/sources``.
+        @return the fields, plus ``degraded_reason`` when degraded.
+        """
         data = {
             "source": self.source,
             "base_url": self.base_url,
@@ -103,12 +146,21 @@ class IngestStatus:
 
 
 class Poller:
-    """Polls one TDU and writes what it finds into the archive.
+    """!
+    @brief Polls one TDU and writes what it finds into the archive.
 
-    :param config: the merged server configuration.
-    :param store: archive to write into.
-    :param source: the TDU to poll; the first configured source if omitted.
-    :param client: TDU client; one is created for *source* if omitted.
+    Polls one TDU and writes what it finds into the archive.
+
+    Lifecycle: ``start()`` opens the client and spawns ``_run()`` as an
+    asyncio task; ``stop()`` sets ``_stopping`` (an ``asyncio.Event``) and
+    waits up to 30 s for the task before cancelling it.  The event doubles as
+    an interruptible sleep between polls and as the abort signal for an
+    in-flight fetch.
+
+    @param config the merged server configuration.
+    @param store archive to write into.
+    @param source the TDU to poll; the first configured source if omitted.
+    @param client TDU client; one is created for *source* if omitted.
     """
 
     def __init__(
@@ -118,12 +170,21 @@ class Poller:
         source: Optional[Source] = None,
         client: Optional[TDUClient] = None,
     ) -> None:
+        """!
+        @brief Bind to a source and build (or adopt) its TDU client.
+        @param config the merged server configuration.
+        @param store archive to write into.
+        @param source the TDU to poll; the first configured source if omitted.
+        @param client TDU client; one is created for *source* if omitted.
+        """
         self.config = config
         self.store = store
         self.source = source or config.tdu.resolved_sources()[0]
         self.status = IngestStatus(
             source=self.source.name, base_url=self.source.base_url
         )
+        # Only close a client we created; an injected one (tests) belongs to
+        # the caller.
         self._owns_client = client is None
         self._client = client or TDUClient(
             base_url=self.source.base_url,
@@ -135,12 +196,17 @@ class Poller:
         )
         self._task: Optional[asyncio.Task] = None
         self._stopping = asyncio.Event()
+        # UNIX time of the last retention sweep; 0 forces one on the first pass.
         self._last_prune = 0.0
 
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
-        """Open the client and launch the polling task."""
+        """!
+        @brief Open the client and launch the polling task.
+
+        Idempotent: a second call while the task exists does nothing.
+        """
         if self._task is not None:
             return
         await self._client.open()
@@ -155,7 +221,13 @@ class Poller:
         )
 
     async def stop(self) -> None:
-        """Ask the loop to finish the current pass, then wait for it."""
+        """!
+        @brief Ask the loop to finish the current pass, then wait for it.
+
+        Waits at most 30 s, then cancels the task.  poll_once abandons an
+        in-flight fetch as soon as the stop event is set, so the wait is
+        normally bounded by an insert, not by a slow TDU.
+        """
         self._stopping.set()
         if self._task is not None:
             try:
@@ -179,6 +251,13 @@ class Poller:
     # -- the loop -----------------------------------------------------------
 
     async def _run(self) -> None:
+        """!
+        @brief The polling loop: probe once, then poll/prune/sleep until stopped.
+
+        Any exception from a single pass is recorded and swallowed so the
+        task survives; only ``ingest.max_consecutive_errors`` (if non-zero)
+        or a stop request ends it.
+        """
         interval = self.config.ingest.interval
 
         # Probe once up front so the warning appears at startup rather than
@@ -188,6 +267,8 @@ class Poller:
             self.status.degraded = not supported
             self.status.route = HISTORY_ROUTE if supported else "/tcr_status"
         except TDUError as exc:
+            # Unreachable at startup is not fatal: the first poll will retry
+            # and set route/degraded from its result.
             log.warning("could not probe %s for a history route: %s",
                         self.source.name, exc)
 
@@ -211,6 +292,8 @@ class Poller:
 
             # Subtract the work already done so the period is the poll
             # interval, not the interval plus however long the poll took.
+            # Waiting on the stop event (rather than asyncio.sleep) makes the
+            # sleep end immediately when stop() is called.
             elapsed = time.time() - started
             try:
                 await asyncio.wait_for(
@@ -222,7 +305,19 @@ class Poller:
         self.status.running = False
 
     async def poll_once(self) -> int:
-        """Run one ingest pass; returns the number of rows inserted."""
+        """!
+        @brief Run one ingest pass; returns the number of rows inserted.
+
+        Steps: read the watermark, fetch from the TDU (abortable by stop),
+        tag events with this source, drop future-dated events, insert,
+        update counters, append to the ingest log.
+
+        @return rows newly inserted (0 if the fetch was abandoned for a stop).
+        @throws TDUError (or any other exception) from the fetch or the
+            store; _run records it.
+        """
+        # Wall-clock start (UNIX s) for the ingest log; NOvA start for the
+        # future-time ceiling and polled_through_nova.
         started_at = int(time.time())
         started_nova = nova_now()
         since = await asyncio.to_thread(self._watermark)
@@ -238,6 +333,7 @@ class Poller:
         ))
         stopping = asyncio.ensure_future(self._stopping.wait())
         try:
+            # Race the fetch against the stop event.
             await asyncio.wait({fetch, stopping},
                                return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
@@ -246,6 +342,7 @@ class Poller:
         finally:
             stopping.cancel()
         if not fetch.done():
+            # Stop won the race.
             fetch.cancel()
             try:
                 await fetch
@@ -254,6 +351,7 @@ class Poller:
             log.debug("ingest from %s: stop requested; abandoned a fetch",
                       self.source.name)
             return 0
+        # Re-raises the fetch's exception, if any, into _run.
         result = fetch.result()
 
         # The tag is applied here rather than trusted from the client: which
@@ -274,6 +372,7 @@ class Poller:
                     dropped[0].nova_time,
                 )
                 result = replace(result, events=kept)
+        # Idempotent insert: overlap re-reads return 0 new rows for them.
         inserted = await asyncio.to_thread(self.store.insert_events, result.events)
 
         self.status.polls += 1
@@ -283,6 +382,8 @@ class Poller:
         self.status.last_poll_at = time.time()
         self.status.last_success_at = self.status.last_poll_at
         self.status.route = result.route
+        # Re-derived every poll: the client falls back per request, so a TDU
+        # can move in or out of degraded mode without a restart.
         self.status.degraded = result.route != HISTORY_ROUTE
         if result.events:
             self.status.watermark_nova = max(e.nova_time for e in result.events)
@@ -294,6 +395,7 @@ class Poller:
         else:
             through = started_nova
         if through is not None:
+            # Monotone: never move polled_through backwards.
             self.status.polled_through_nova = max(
                 through, self.status.polled_through_nova or 0)
 
@@ -322,17 +424,28 @@ class Poller:
     # -- helpers ------------------------------------------------------------
 
     def _future_ceiling(self, now_nova: int) -> Optional[int]:
-        """Events at or after this tick are treated as bad clocks; None when
-        ``ingest.max_future`` is 0."""
+        """!
+        @brief Events at or after this tick are treated as bad clocks; None when
+        ``ingest.max_future`` is 0.
+
+        @param now_nova the current NOvA time in ticks.
+        @return ``now_nova + max_future`` in ticks, or None if disabled.
+        """
         if self.config.ingest.max_future <= 0:
             return None
         return now_nova + int(self.config.ingest.max_future * TICKS_PER_SECOND)
 
     def _watermark(self) -> int:
-        """The NOvA tick to resume from, allowing for the configured overlap.
+        """!
+        @brief The NOvA tick to resume from, allowing for the configured overlap.
 
         Events beyond ``ingest.max_future`` (stored before that check
         existed) are ignored, so one bad clock cannot stall the source.
+
+        Blocking (SQLite); called via ``asyncio.to_thread``.
+
+        @return ``latest - overlap`` in ticks, or ``now - backfill`` on a cold
+            start; never negative.
         """
         latest = self.store.latest(sources=[self.source.name],
                                    before=self._future_ceiling(nova_now()))
@@ -350,6 +463,10 @@ class Poller:
         return max(0, latest.nova_time - overlap_ticks)
 
     def _record_error(self, exc: Exception) -> None:
+        """!
+        @brief Update the status counters for a failed pass and log it, rate-limited.
+        @param exc the exception the pass raised.
+        """
         self.status.consecutive_errors += 1
         self.status.last_error = "{}: {}".format(type(exc).__name__, exc)
         self.status.last_error_at = time.time()
@@ -357,6 +474,7 @@ class Poller:
 
         # Log the first failure loudly, then back off to debug so that a TDU
         # that is down overnight does not fill the disk with identical lines.
+        # Every 60th consecutive failure is re-logged at ERROR as a heartbeat.
         name = self.source.name
         if self.status.consecutive_errors == 1:
             log.error("ingest poll of %s failed: %s", name, self.status.last_error)
@@ -369,7 +487,12 @@ class Poller:
             log.debug("ingest poll of %s failed: %s", name, self.status.last_error)
 
     async def _maybe_prune(self) -> None:
-        """Apply the retention policy, at most once per prune interval."""
+        """!
+        @brief Apply the retention policy, at most once per prune interval.
+
+        No-op when ``storage.retention_days`` is 0.  Also trims the ingest log
+        to ``storage.ingest_log_keep`` rows.
+        """
         retention_days = self.config.storage.retention_days
         if retention_days <= 0:
             return
@@ -379,6 +502,7 @@ class Poller:
             return
         self._last_prune = now
 
+        # days -> seconds -> 64 MHz ticks.
         cutoff = nova_now() - int(retention_days * 86400 * TICKS_PER_SECOND)
         if cutoff <= 0:
             return
@@ -400,11 +524,18 @@ class Poller:
 
 
 class SourceError(ValueError):
-    """A runtime change to a source was refused."""
+    """!
+    @brief A runtime change to a source was refused.
+
+    The API maps it to 404 (unknown source) or 400 (bad value).
+    """
 
 
 class IngestManager:
-    """Runs one :class:`Poller` per enabled source, and applies changes.
+    """!
+    @brief Runs one :class:`Poller` per enabled source, and applies changes.
+
+    Runs one :class:`Poller` per enabled source, and applies changes.
 
     The effective sources are the configuration file's, with any runtime
     overrides from the archive's ``source_overrides`` table applied on top.
@@ -412,9 +543,14 @@ class IngestManager:
     written only when that state differs from the file, and is dropped by
     :meth:`reset_source` or by a change that makes the two agree again.
 
-    :param config: the merged server configuration.
-    :param store: the archive, which also holds the overrides.
-    :param client_factory: builds the TDU client for a source; tests pass a
+    Locking: ``_lock`` (``asyncio.Lock``) is held across start, stop and
+    update_source, each of which may await poller start/stop.  Readers
+    (names, describe, summary, degraded_sources) are synchronous and run on
+    the loop thread, so they see a consistent view without the lock.
+
+    @param config the merged server configuration.
+    @param store the archive, which also holds the overrides.
+    @param client_factory builds the TDU client for a source; tests pass a
         stub.  The default makes a real :class:`TDUClient`.
     """
 
@@ -424,15 +560,27 @@ class IngestManager:
         store: SpillStore,
         client_factory: Optional[Callable[[Source], Any]] = None,
     ) -> None:
+        """!
+        @brief Load configured sources and apply saved runtime overrides.
+
+        Does not start polling; see start().
+
+        @param config the merged server configuration.
+        @param store the archive, which also holds the overrides.
+        @param client_factory optional ``Source -> client`` builder.
+        """
         self.config = config
         self.store = store
         self._client_factory = client_factory
+        # As the configuration file says; never modified at runtime.
         self.configured: Dict[str, Source] = {
             source.name: source for source in config.tdu.resolved_sources()
         }
+        # Effective state: configured + overrides.
         self.sources: Dict[str, Source] = {}
         self.overrides: Dict[str, Dict[str, Any]] = {}
         self.pollers: Dict[str, Poller] = {}
+        # Kept after a poller stops, so the last health stays reportable.
         self.statuses: Dict[str, IngestStatus] = {}
         self.running = False
         self._lock = asyncio.Lock()
@@ -441,6 +589,12 @@ class IngestManager:
     # -- effective configuration ----------------------------------------------
 
     def _load_overrides(self) -> None:
+        """!
+        @brief Read ``source_overrides`` from the archive and build ``self.sources``.
+
+        Overrides for names no longer in the configuration file are ignored
+        (with a warning) but left in the table.
+        """
         rows = self.store.source_overrides()
         for name, row in rows.items():
             if name not in self.configured:
@@ -458,6 +612,7 @@ class IngestManager:
         for name, configured in self.configured.items():
             override = self.overrides.get(name)
             if override is None:
+                # Copy, so runtime edits never alias the configured object.
                 self.sources[name] = replace(configured)
                 continue
             self.sources[name] = Source(
@@ -475,18 +630,30 @@ class IngestManager:
             )
 
     def names(self) -> List[str]:
+        """!
+        @brief Names of every configured source, in configuration order.
+        @return list of source names.
+        """
         return list(self.sources)
 
     def _make_poller(self, source: Source) -> Poller:
+        """!
+        @brief Build a Poller for *source* and register its status object.
+        @param source the effective source.
+        @return the new (not yet started) poller.
+        """
         client = self._client_factory(source) if self._client_factory else None
         poller = Poller(self.config, self.store, source=source, client=client)
+        # A replacement poller replaces the status too, so counters restart.
         self.statuses[source.name] = poller.status
         return poller
 
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start a poller for every enabled source."""
+        """!
+        @brief Start a poller for every enabled source.
+        """
         async with self._lock:
             self.running = True
             for source in self.sources.values():
@@ -496,18 +663,30 @@ class IngestManager:
                     log.info("source %s is disabled; not polling it", source.name)
 
     async def stop(self) -> None:
+        """!
+        @brief Stop every poller concurrently and mark ingest as not running.
+        """
         async with self._lock:
             self.running = False
+            # list(): _stop_poller pops from self.pollers while we iterate.
             await asyncio.gather(
                 *(self._stop_poller(name) for name in list(self.pollers))
             )
 
     async def _start_poller(self, source: Source) -> None:
+        """!
+        @brief Create, register and start a poller.  Caller holds ``_lock``.
+        @param source the effective source.
+        """
         poller = self._make_poller(source)
         self.pollers[source.name] = poller
         await poller.start()
 
     async def _stop_poller(self, name: str) -> None:
+        """!
+        @brief Unregister and stop a poller, if one is running.  Caller holds ``_lock``.
+        @param name source name.
+        """
         poller = self.pollers.pop(name, None)
         if poller is not None:
             await poller.stop()
@@ -521,9 +700,17 @@ class IngestManager:
         enabled: Optional[bool] = None,
         updated_by: str = "",
     ) -> Source:
-        """Change a source's URL or enabled flag, and apply it immediately.
+        """!
+        @brief Change a source's URL or enabled flag, and apply it immediately.
 
-        :raises SourceError: for an unknown source, a malformed URL, or a URL
+        Change a source's URL or enabled flag, and apply it immediately.
+
+        @param name source name.
+        @param base_url new URL, or None to keep the current one.
+        @param enabled new enabled flag, or None to keep the current one.
+        @param updated_by who made the change, stored with the override.
+        @return the new effective Source.
+        @throws SourceError for an unknown source, a malformed URL, or a URL
             another source already uses.
         """
         async with self._lock:
@@ -539,6 +726,7 @@ class IngestManager:
                     new.base_url = check_source_url(base_url, "base_url")
                 except ConfigError as exc:
                     raise SourceError(str(exc)) from None
+                # Two sources on one TDU would double-ingest under two names.
                 for other in self.sources.values():
                     if other.name != name and other.base_url == new.base_url:
                         raise SourceError(
@@ -548,6 +736,9 @@ class IngestManager:
             if enabled is not None:
                 new.enabled = bool(enabled)
 
+            # The configuration file cannot express a disabled source, so
+            # "agrees with the file" means same URL and enabled.  In that case
+            # the override row is deleted rather than stored redundantly.
             configured = self.configured[name]
             if (new.base_url, new.enabled) == (configured.base_url, True):
                 await asyncio.to_thread(self.store.clear_source_override, name)
@@ -572,7 +763,18 @@ class IngestManager:
             return new
 
     async def reset_source(self, name: str, updated_by: str = "") -> Source:
-        """Return a source to what the configuration file says."""
+        """!
+        @brief Return a source to what the configuration file says.
+
+        Implemented as an update to the configured URL with enabled=True,
+        which update_source recognises as "matches the file" and so deletes
+        the override.
+
+        @param name source name.
+        @param updated_by who asked, for the log.
+        @return the restored Source.
+        @throws SourceError for an unknown source.
+        """
         configured = self.configured.get(name)
         if configured is None:
             raise SourceError("no source named {!r}".format(name))
@@ -582,6 +784,11 @@ class IngestManager:
         )
 
     async def _apply(self, old: Source, new: Source) -> None:
+        """!
+        @brief Make the running pollers match a changed source.  Caller holds ``_lock``.
+        @param old the effective source before the change.
+        @param new the effective source after it.
+        """
         self.sources[new.name] = new
         if not self.running:
             # Ingest is off for the whole server; the change is saved and
@@ -598,7 +805,11 @@ class IngestManager:
     # -- reporting ---------------------------------------------------------------
 
     def degraded_sources(self, names: Optional[List[str]] = None) -> List[Source]:
-        """Enabled sources, among *names* if given, that ingest degraded."""
+        """!
+        @brief Enabled sources, among *names* if given, that ingest degraded.
+        @param names restrict to these source names; None or empty means all.
+        @return the matching Source objects.
+        """
         result = []
         for name, source in self.sources.items():
             if names and name not in names:
@@ -609,7 +820,10 @@ class IngestManager:
         return result
 
     def describe(self) -> List[Dict[str, Any]]:
-        """Every source, its configured and effective state, and its health."""
+        """!
+        @brief Every source, its configured and effective state, and its health.
+        @return one dict per source, in configuration order.
+        """
         described = []
         for name, source in self.sources.items():
             configured = self.configured[name]
@@ -619,6 +833,7 @@ class IngestManager:
                 "name": name,
                 "base_url": source.base_url,
                 "enabled": source.enabled,
+                # Configured sources are always enabled (see update_source).
                 "configured": {"base_url": configured.base_url,
                                "enabled": True},
                 "overridden": override is not None,
@@ -629,11 +844,14 @@ class IngestManager:
         return described
 
     def summary(self) -> Dict[str, Any]:
-        """Health across every enabled source, for ``/api/status``.
+        """!
+        @brief Health across every enabled source, for ``/api/status``.
 
         ``running`` means every enabled source is being polled; ``degraded``
         that at least one is sampling rather than recording a full history;
         ``consecutive_errors`` is the worst of them.
+
+        @return the ``ingest`` block of ``/api/status``.
         """
         enabled = [s for s in self.sources.values() if s.enabled]
         statuses = [self.statuses.get(s.name) for s in enabled]
@@ -648,6 +866,8 @@ class IngestManager:
                 [status.consecutive_errors for status in statuses if status]
                 or [0]
             ),
+            # Over all statuses, disabled sources included; counts restart
+            # when a poller is replaced.
             "events_inserted": sum(
                 status.events_inserted for status in self.statuses.values()
             ),

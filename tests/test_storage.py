@@ -1,21 +1,38 @@
-"""Tests for the SQLite event archive."""
+"""!
+@file tests/test_storage.py
+@brief Tests for the SQLite event archive.
+"""
 
 import pytest
 
 from darpa_spillserver.signals import SpillType
 from darpa_spillserver.storage import UNKNOWN_SIGNAL, SpillEvent, SpillStore
 
+# 2026-09-22 15:53:33 UTC in NOvA ticks (live TDU reading).
 BASE = 33778458638680249
 
 
 @pytest.fixture
 def store(tmp_path):
+    """!
+    @brief Empty SpillStore in a per-test temporary file; closed on teardown.
+    @param tmp_path pytest per-test temporary directory.
+    @return the open SpillStore.
+    """
     archive = SpillStore(str(tmp_path / "spills.db"))
     yield archive
     archive.close()
 
 
 def make_event(offset=0, spill_type=SpillType.BNB_TCLK, signal_code=0x1F, **kwargs):
+    """!
+    @brief Build a SpillEvent at BASE + offset from source "test".
+    @param offset ticks after BASE; also added to the event number.
+    @param spill_type decoded SpillType (default BNB_TCLK).
+    @param signal_code raw signal code (default $1F), or UNKNOWN_SIGNAL.
+    @param kwargs further SpillEvent fields.
+    @return the SpillEvent.
+    """
     return SpillEvent(
         nova_time=BASE + offset,
         spill_type=spill_type,
@@ -27,16 +44,27 @@ def make_event(offset=0, spill_type=SpillType.BNB_TCLK, signal_code=0x1F, **kwar
 
 
 def test_insert_and_count(store):
+    """!
+    @brief insert_events returns the number of rows added and count() reflects
+    them.
+    """
+    # 64000000 ticks = 1 s apart.
     assert store.insert_events([make_event(0), make_event(64000000)]) == 2
     assert store.count() == 2
 
 
 def test_inserting_nothing_is_harmless(store):
+    """!
+    @brief An empty batch inserts zero rows without error.
+    """
     assert store.insert_events([]) == 0
 
 
 def test_reinserting_the_same_event_is_idempotent(store):
-    """Ingest re-reads overlapping windows by design; that must not duplicate."""
+    """!
+    @brief Ingest re-reads overlapping windows by design; that must not
+    duplicate.
+    """
     event = make_event(0)
     assert store.insert_events([event]) == 1
     assert store.insert_events([event]) == 0
@@ -44,7 +72,12 @@ def test_reinserting_the_same_event_is_idempotent(store):
 
 
 def test_overlapping_batches_insert_only_the_new_rows(store):
+    """!
+    @brief A batch overlapping stored rows inserts only the rows not already
+    present.
+    """
     first = [make_event(i * 1000) for i in range(10)]
+    # Indices 5..9 duplicate `first`; 10..14 are new.
     overlapping = [make_event(i * 1000) for i in range(5, 15)]
 
     assert store.insert_events(first) == 10
@@ -53,14 +86,20 @@ def test_overlapping_batches_insert_only_the_new_rows(store):
 
 
 def test_unknown_signal_sentinel_still_deduplicates(store):
-    """A NULL here would defeat the primary key, since SQLite treats NULLs
-    as distinct in a unique index."""
+    """!
+    @brief A NULL here would defeat the primary key, since SQLite treats NULLs
+    as distinct in a unique index.
+    """
     event = make_event(0, signal_code=UNKNOWN_SIGNAL)
     assert store.insert_events([event]) == 1
     assert store.insert_events([event]) == 0
 
 
 def test_same_time_different_signal_are_distinct_rows(store):
+    """!
+    @brief Two signals at the same instant are separate rows (signal_code is
+    part of the key).
+    """
     store.insert_events([
         make_event(0, signal_code=0x1D),
         make_event(0, signal_code=0x1F),
@@ -69,6 +108,9 @@ def test_same_time_different_signal_are_distinct_rows(store):
 
 
 def test_query_range_is_half_open(store):
+    """!
+    @brief query(start, end) selects start <= t < end.
+    """
     store.insert_events([make_event(i) for i in range(10)])
 
     page = store.query(start_nova=BASE + 2, end_nova=BASE + 5)
@@ -77,6 +119,9 @@ def test_query_range_is_half_open(store):
 
 
 def test_adjacent_ranges_tile_without_overlap(store):
+    """!
+    @brief [a, b) and [b, c) together return every event exactly once.
+    """
     store.insert_events([make_event(i) for i in range(10)])
 
     first = store.query(start_nova=BASE, end_nova=BASE + 5)
@@ -88,6 +133,9 @@ def test_adjacent_ranges_tile_without_overlap(store):
 
 
 def test_query_filters_by_type(store):
+    """!
+    @brief spill_types= restricts the result to the listed types.
+    """
     store.insert_events([
         make_event(0, spill_type=SpillType.NUMI, signal_code=0x74),
         make_event(1, spill_type=SpillType.ACCEL_ONE_HZ_TCLK, signal_code=0x8F),
@@ -98,6 +146,9 @@ def test_query_filters_by_type(store):
 
 
 def test_query_filters_by_signal_code(store):
+    """!
+    @brief signal_codes= restricts the result to the listed raw codes.
+    """
     store.insert_events([
         make_event(0, signal_code=0x1D),
         make_event(1, signal_code=0x1F),
@@ -108,6 +159,10 @@ def test_query_filters_by_signal_code(store):
 
 
 def test_query_paging_reports_the_full_total(store):
+    """!
+    @brief A limited page reports the full match count and truncated=True; the
+    last page reports truncated=False.
+    """
     store.insert_events([make_event(i) for i in range(50)])
 
     page = store.query(limit=10)
@@ -120,6 +175,9 @@ def test_query_paging_reports_the_full_total(store):
 
 
 def test_query_descending_order(store):
+    """!
+    @brief descending=True returns newest first.
+    """
     store.insert_events([make_event(i) for i in range(5)])
     page = store.query(descending=True)
     times = [event.nova_time for event in page.events]
@@ -127,6 +185,10 @@ def test_query_descending_order(store):
 
 
 def test_iter_query_streams_everything(store):
+    """!
+    @brief iter_query yields every row across chunk boundaries, in ascending
+    time order.
+    """
     store.insert_events([make_event(i) for i in range(2500)])
     streamed = list(store.iter_query(chunk=100))
     assert len(streamed) == 2500
@@ -134,18 +196,29 @@ def test_iter_query_streams_everything(store):
 
 
 def test_latest_and_earliest(store):
+    """!
+    @brief latest()/earliest() return the newest and oldest stored events.
+    """
     store.insert_events([make_event(i) for i in range(10)])
     assert store.latest().nova_time == BASE + 9
     assert store.earliest().nova_time == BASE
 
 
 def test_latest_before_a_ceiling(store):
+    """!
+    @brief latest(before=t) is strict: it returns the newest event earlier than
+    t, or None.
+    """
     store.insert_events([make_event(i) for i in range(10)])
     assert store.latest(before=BASE + 5).nova_time == BASE + 4
     assert store.latest(before=BASE) is None
 
 
 def test_latest_by_type(store):
+    """!
+    @brief latest(type) returns the newest event of that type, not the newest
+    overall.
+    """
     store.insert_events([
         make_event(0, spill_type=SpillType.NUMI, signal_code=0x74),
         make_event(5, spill_type=SpillType.ACCEL_ONE_HZ_TCLK, signal_code=0x8F),
@@ -154,11 +227,17 @@ def test_latest_by_type(store):
 
 
 def test_latest_on_an_empty_archive_is_none(store):
+    """!
+    @brief latest()/earliest() return None on an empty archive.
+    """
     assert store.latest() is None
     assert store.earliest() is None
 
 
 def test_counts_by_type(store):
+    """!
+    @brief counts_by_type tallies rows per SpillType.
+    """
     store.insert_events([
         make_event(0, spill_type=SpillType.NUMI, signal_code=0x74),
         make_event(1, spill_type=SpillType.NUMI, signal_code=0x74),
@@ -170,6 +249,9 @@ def test_counts_by_type(store):
 
 
 def test_prune_removes_only_older_events(store):
+    """!
+    @brief prune_before(t) deletes rows with time < t and keeps t itself.
+    """
     store.insert_events([make_event(i) for i in range(10)])
     removed = store.prune_before(BASE + 5)
     assert removed == 5
@@ -178,6 +260,10 @@ def test_prune_removes_only_older_events(store):
 
 
 def test_meta_round_trip(store):
+    """!
+    @brief get_meta returns None or the given default for a missing key;
+    set_meta stores and overwrites.
+    """
     assert store.get_meta("missing") is None
     assert store.get_meta("missing", "fallback") == "fallback"
     store.set_meta("watermark", "123")
@@ -187,6 +273,11 @@ def test_meta_round_trip(store):
 
 
 def test_ingest_log(store):
+    """!
+    @brief record_ingest rows are returned by recent_ingests, newest first,
+    with the error text.
+    """
+    # Positional: source, route, started, finished, fetched, inserted, error.
     store.record_ingest("ppc-01", "/spill_history", 100, 101, 50, 10, None)
     store.record_ingest("ppc-01", "/spill_history", 102, 103, 50, 0, "boom")
     rows = store.recent_ingests()
@@ -195,6 +286,9 @@ def test_ingest_log(store):
 
 
 def test_trim_ingest_log(store):
+    """!
+    @brief trim_ingest_log(keep=n) leaves exactly the n newest entries.
+    """
     for index in range(20):
         store.record_ingest("ppc-01", "/spill_history", index, index + 1, 1, 1,
                             None)
@@ -203,6 +297,10 @@ def test_trim_ingest_log(store):
 
 
 def test_signal_helpers_on_event():
+    """!
+    @brief SpillEvent.signal_hex/signal_name render a known code and are None
+    for UNKNOWN_SIGNAL.
+    """
     event = make_event(0, signal_code=0x8F)
     assert event.signal_hex == "$8F"
     assert event.signal_name == "one-hertz"
@@ -213,7 +311,9 @@ def test_signal_helpers_on_event():
 
 
 def test_in_memory_store_shares_one_connection():
-    """A per-thread connection to ':memory:' would be a different database."""
+    """!
+    @brief A per-thread connection to ':memory:' would be a different database.
+    """
     memory = SpillStore(":memory:")
     try:
         memory.insert_events([make_event(0)])
@@ -223,6 +323,10 @@ def test_in_memory_store_shares_one_connection():
 
 
 def test_store_creates_parent_directories(tmp_path):
+    """!
+    @brief Opening a store under a missing directory creates the directory
+    tree.
+    """
     nested = tmp_path / "a" / "b" / "spills.db"
     archive = SpillStore(str(nested))
     try:

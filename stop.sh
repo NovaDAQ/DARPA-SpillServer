@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+## @file stop.sh
+## @brief Stop a darpa-spill-server started by start.sh: SIGTERM, then
+##        SIGKILL after a grace period.
+## @details
+##   Usage:   ./stop.sh
+##   Env:     SPILL_PIDFILE  PID file written by start.sh
+##            SPILL_GRACE    seconds between SIGTERM and SIGKILL (default 15)
+##   Exit:    0 stopped, or was not running (stale PID file removed);
+##            1 the process survived SIGKILL.
+##   Linux-oriented: liveness is read from /proc; on a host without /proc
+##   every PID looks dead and the PID file is just removed.
 #
 # stop.sh -- stop a DARPA Spill Information Server started by ./start.sh.
 #
@@ -22,6 +33,11 @@ PIDFILE="${SPILL_PIDFILE:-$SCRIPT_DIR/run/spillserver.pid}"
 GRACE="${SPILL_GRACE:-15}"
 
 # Same check as start.sh: never signal a process that merely inherited the PID.
+## @fn is_server()
+## @brief Whether a PID is a live darpa-spill-server process.
+## @param $1 PID to test.
+## @return 0 if /proc/$1/cmdline mentions darpa-spill-server, non-zero
+##         otherwise.
 is_server() {
     [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' <"/proc/$1/cmdline" | grep -q darpa-spill-server
 }

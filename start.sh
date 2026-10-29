@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+## @file start.sh
+## @brief Start darpa-spill-server detached and wait for /api/health.
+## @details
+##   Launches venv/bin/darpa-spill-server under setsid with output appended
+##   to $SPILL_LOGFILE and its PID in $SPILL_PIDFILE, then polls the health
+##   URL (derived from the merged config via --print-config) for up to
+##   $SPILL_WAIT seconds.  Idempotent: exits 0 if a live server already owns
+##   the PID file.  Linux-oriented: liveness is read from /proc.
+##   Usage:   ./start.sh [-c CONFIG] [darpa-spill-server options...]
+##            ./start.sh -c config/spillserver-near.yaml --port 8081
+##   Env:     SPILL_CONFIG, SPILL_PIDFILE, SPILL_LOGFILE, SPILL_WAIT
+##   Exit:    0 running (started, or already running); 1 venv/config file
+##            missing, server died during startup, or health check timed
+##            out (server left running); 2 configuration rejected.
 #
 # start.sh -- start the DARPA Spill Information Server in the background.
 #
@@ -64,6 +78,11 @@ fi
 # True if $1 is a live darpa-spill-server process. Checking the command line,
 # not just that the PID exists, keeps a stale PID file from matching whatever
 # unrelated process has since been given the same PID.
+## @fn is_server()
+## @brief Whether a PID is a live darpa-spill-server process.
+## @param $1 PID to test.
+## @return 0 if /proc/$1/cmdline mentions darpa-spill-server, non-zero
+##         otherwise (including on hosts without /proc).
 is_server() {
     [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' <"/proc/$1/cmdline" | grep -q darpa-spill-server
 }
@@ -81,10 +100,14 @@ fi
 # Ask the server itself where it will listen, so the health check follows the
 # config file, the environment and any --host/--port given here. This contacts
 # nothing, and fails fast on a config error.
+# ${ARGS[@]+"${ARGS[@]}"} expands to nothing for an empty array; a plain
+# "${ARGS[@]}" is an unbound-variable error under set -u on bash < 4.4.
 if ! merged="$("$SERVER" -c "$CONFIG" ${ARGS[@]+"${ARGS[@]}"} --print-config)"; then
     echo "error: configuration rejected; nothing started" >&2
     exit 2
 fi
+# Parse the merged config JSON with the venv's Python (jq is not assumed on
+# the gateway) into scheme, a host reachable from here, and port.
 read -r SCHEME HOST PORT < <("$VPY" -c '
 import json, sys
 s = json.load(sys.stdin)["server"]
@@ -109,6 +132,9 @@ LOGSTART=$(( $(wc -l <"$LOGFILE" 2>/dev/null || echo 0) + 1 ))
 # does not reach it.
 setsid "$SERVER" -c "$CONFIG" ${ARGS[@]+"${ARGS[@]}"} \
     </dev/null >>"$LOGFILE" 2>&1 &
+# $! is the PID setsid ends up as: setsid only forks when it is a process
+# group leader, which a background job of a non-interactive shell is not,
+# so it execs the server in place and the PID is the server's.
 pid=$!
 echo "$pid" >"$PIDFILE"
 

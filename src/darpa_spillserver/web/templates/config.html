@@ -83,10 +83,23 @@
 </footer>
 
 <script>
+/**
+ * @file src/darpa_spillserver/web/templates/config.html
+ * @brief Source administration page client: lists sources from
+ *        /api/sources every 5 s and, once unlocked, enables/disables them,
+ *        changes their URL, or resets them via the admin-guarded API.
+ *
+ * Authorisation is entirely server-side (require_admin in api.py); this
+ * script only decides which controls to enable.  The admin token is sent
+ * in the X-Admin-Token header (name taken from /api/sources), never as a
+ * cookie, so other sites cannot make the browser send it.
+ */
 (function () {
   "use strict";
 
+  // Mount prefix (server.root_path) for API URLs behind a reverse proxy.
   var ROOT = {{ root_path | tojson }};
+  // sessionStorage key holding the admin token for this tab.
   var TOKEN_KEY = "darpa-spill-admin-token";
   var tbody = document.querySelector("#sources tbody");
   var summary = document.getElementById("summary");
@@ -95,14 +108,24 @@
   var tokenRow = document.getElementById("token-row");
   var tokenInput = document.getElementById("token");
 
+  // enabled: server accepts changes at all; unlocked: /api/admin/check
+  // accepted our credentials; header: name of the token header.
   var admin = {enabled: false, header: "X-Admin-Token", unlocked: false};
   var rows = {};   // source name -> {tr, url input, ...}
 
   // The token is kept for this tab only. Storage can be unavailable (private
   // windows, blocked site data), so every access is guarded.
+  /**
+   * @brief Read the saved admin token for this tab.
+   * @return the token, or "" if none or storage is unavailable.
+   */
   function loadToken() {
     try { return window.sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
   }
+  /**
+   * @brief Save (or, for an empty value, remove) the admin token for this tab.
+   * @param value the token, or "" to forget it.
+   */
   function saveToken(value) {
     try {
       if (value) { window.sessionStorage.setItem(TOKEN_KEY, value); }
@@ -111,6 +134,11 @@
   }
   var token = loadToken();
 
+  /**
+   * @brief Request headers, including the admin token when one is held.
+   * @param extra optional object of additional headers.
+   * @return a headers object for fetch().
+   */
   function headers(extra) {
     var h = {"Accept": "application/json"};
     if (token) { h[admin.header] = token; }
@@ -118,6 +146,16 @@
     return h;
   }
 
+  /**
+   * @brief Extract a readable message from an API error reply.
+   *
+   * Handles {detail: {error, hint}} from api._error, a plain string detail
+   * (e.g. 401 from the authenticator), and an unparseable body.
+   *
+   * @param body parsed JSON body, possibly {}.
+   * @param response the fetch Response.
+   * @return the message, with any hint appended.
+   */
   function errorText(body, response) {
     var detail = (body && body.detail) || body || {};
     var text = detail.error || (typeof detail === "string" ? detail : response.statusText);
@@ -125,11 +163,20 @@
     return text;
   }
 
+  /**
+   * @brief Call an API route with the admin headers.
+   * @param method HTTP method.
+   * @param path path below ROOT, e.g. "/api/sources/x".
+   * @param payload optional object sent as a JSON body.
+   * @return a Promise of the parsed JSON body; rejects with an Error
+   *         carrying errorText() on a non-2xx status.
+   */
   function call(method, path, payload) {
     var options = {method: method, headers: headers(
       payload ? {"Content-Type": "application/json"} : null)};
     if (payload) { options.body = JSON.stringify(payload); }
     return fetch(ROOT + path, options).then(function (response) {
+      // A non-JSON body (e.g. a proxy error page) is treated as {}.
       return response.json().catch(function () { return {}; }).then(function (body) {
         if (!response.ok) { throw new Error(errorText(body, response)); }
         return body;
@@ -137,17 +184,33 @@
     });
   }
 
+  /**
+   * @brief Show (or, with an empty message, hide) the status banner.
+   * @param message text to show.
+   * @param isError style as an error rather than information.
+   */
   function say(message, isError) {
     banner.textContent = message;
     banner.hidden = !message;
     banner.dataset.kind = isError ? "error" : "info";
   }
 
+  /**
+   * @brief Format a UNIX time as "YYYY-MM-DD hh:mm:ss UTC".
+   * @param seconds UNIX seconds, or null/0.
+   * @return the formatted string, or "" for no time.
+   */
   function when(seconds) {
     if (!seconds) { return ""; }
     return new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
   }
 
+  /**
+   * @brief One-line ingest health for a source row.
+   * @param entry one element of /api/sources "sources".
+   * @param ingestEnabled whether ingest runs on this server at all.
+   * @return the description.
+   */
   function ingestText(entry, ingestEnabled) {
     if (!entry.enabled) { return "disabled"; }
     if (!ingestEnabled) { return "ingest off for this server"; }
@@ -165,6 +228,9 @@
     return parts.join(" · ");
   }
 
+  /**
+   * @brief Enable or disable every row's controls according to admin.unlocked.
+   */
   function setEditable() {
     Object.keys(rows).forEach(function (name) {
       var row = rows[name];
@@ -174,6 +240,15 @@
     });
   }
 
+  /**
+   * @brief Create the table row for a source and wire its controls.
+   *
+   * Built once per source and then updated in place by update(), so the
+   * 5 s refresh does not destroy a URL the user is typing.
+   *
+   * @param entry one element of /api/sources "sources".
+   * @return the row record {tr, toggle, url, save, reset, ...}.
+   */
   function buildRow(entry) {
     var tr = document.createElement("tr");
     function td() { var c = document.createElement("td"); tr.appendChild(c); return c; }
@@ -221,11 +296,14 @@
                configured: configured, ingest: ingestCell, events: eventsCell,
                save: save, reset: reset, dirty: false};
 
+    // dirty: the user has edited the URL field since the last save/reset,
+    // so refreshes must not overwrite it.
     url.addEventListener("input", function () { row.dirty = true; });
     url.addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); save.click(); }
     });
 
+    // Enable/disable: PATCH {enabled}; on failure revert the checkbox.
     toggle.addEventListener("change", function () {
       var wanted = toggle.checked;
       toggle.disabled = true;
@@ -241,6 +319,8 @@
         .then(function () { toggle.disabled = !admin.unlocked; });
     });
 
+    // Change URL: confirm first, because history keeps the source name even
+    // though the hardware changes.  The server validates the URL.
     save.addEventListener("click", function () {
       var value = url.value.trim();
       if (!window.confirm("Point " + entry.name + " at " + value + "?\n\n" +
@@ -256,6 +336,7 @@
         .catch(function (error) { say(entry.name + ": " + error.message, true); });
     });
 
+    // Reset: drop the runtime override, reverting to the configuration file.
     reset.addEventListener("click", function () {
       call("POST", "/api/sources/" + encodeURIComponent(entry.name) + "/reset")
         .then(function () {
@@ -271,6 +352,12 @@
     return row;
   }
 
+  /**
+   * @brief Refresh a row's displayed state from a fresh /api/sources entry.
+   * @param row the row record from buildRow().
+   * @param entry one element of /api/sources "sources".
+   * @param ingestEnabled whether ingest runs on this server at all.
+   */
   function update(row, entry, ingestEnabled) {
     row.toggle.checked = entry.enabled;
     row.toggleText.textContent = entry.enabled ? "on" : "off";
@@ -291,6 +378,14 @@
     row.events.textContent = entry.events.toLocaleString();
   }
 
+  /**
+   * @brief Reload /api/sources and update the table and summary.
+   *
+   * Rows for sources that disappear from the reply are not removed (the
+   * source set only changes with a server restart).
+   *
+   * @return a Promise that settles when the table is updated.
+   */
   function refresh() {
     return fetch(ROOT + "/api/sources", {headers: {"Accept": "application/json"}})
       .then(function (response) { return response.json(); })
@@ -312,6 +407,9 @@
       .catch(function (error) { summary.textContent = "Error: " + error.message; });
   }
 
+  /**
+   * @brief Show whether this server accepts changes and whether we are unlocked.
+   */
   function describeAdmin() {
     if (!admin.enabled) {
       adminState.textContent = "This server does not accept changes from this page. " +
@@ -325,6 +423,11 @@
       : "Viewing only. Enter the admin token to make changes.";
   }
 
+  /**
+   * @brief Ask /api/admin/check whether the current credentials (token
+   *        header, or SSO session in an admin group) may make changes.
+   * @return a Promise that settles after the UI reflects the answer.
+   */
   function unlock() {
     return call("GET", "/api/admin/check")
       .then(function (body) {
@@ -334,11 +437,13 @@
       })
       .catch(function (error) {
         admin.unlocked = false;
+        // Silent when no token was offered: the SSO probe failing is normal.
         if (token) { say(error.message, true); }
       })
       .then(function () { describeAdmin(); setEditable(); });
   }
 
+  // Token form: store the token for this tab, clear the field, re-check.
   document.getElementById("admin").addEventListener("submit", function (event) {
     event.preventDefault();
     token = tokenInput.value.trim();
@@ -346,6 +451,8 @@
     tokenInput.value = "";
     unlock();
   });
+  // Forget: drop the token locally.  An SSO admin stays authorised server-side
+  // but the controls are locked until the page is reloaded.
   document.getElementById("forget").addEventListener("click", function () {
     token = "";
     saveToken("");
@@ -359,6 +466,7 @@
     // Signed-in SSO users in an admin group are allowed without a token.
     if (admin.enabled) { unlock(); }
   });
+  // Poll every 5 s so ingest health and other admins' changes show up.
   setInterval(refresh, 5000);
 })();
 </script>

@@ -1,4 +1,8 @@
-"""Application factory and lifecycle.
+"""!
+@file src/darpa_spillserver/app.py
+@brief FastAPI application factory and lifespan: wires archive, ingest, auth, API router and web UI.
+
+Application factory and lifecycle.
 
 :func:`create_app` wires the pieces together --- archive, TDU poller,
 authenticator, API router and web UI --- and returns a FastAPI application.
@@ -9,6 +13,11 @@ simply pass a config pointing at a temporary database and a stubbed TDU.
 The ingest task is owned by the application's lifespan rather than started at
 import time, so that an application created for a test, or for
 ``--print-config``, never reaches out to the network.
+
+Runtime model: one process, one asyncio event loop (uvicorn's).  Request
+handlers and the per-source ingest pollers are coroutines on that loop;
+blocking SQLite work is off-loaded with ``asyncio.to_thread``.  Shared state
+lives on ``app.state.spill`` (a SimpleNamespace) rather than in globals.
 """
 
 from __future__ import annotations
@@ -36,10 +45,13 @@ from .storage import SpillStore
 
 __all__ = ["create_app"]
 
+## Module logger.
 log = logging.getLogger(__name__)
 
+## Package directory holding ``templates/`` and ``static/``.
 _WEB_DIR = Path(__file__).parent / "web"
 
+## OpenAPI description shown at the top of ``/docs`` (Markdown).
 DESCRIPTION = """
 Serves the accelerator event timestamps recorded by NOvA TDUs.
 
@@ -70,16 +82,22 @@ def create_app(
     ingest: Optional[IngestManager] = None,
     start_ingest: Optional[bool] = None,
 ) -> FastAPI:
-    """Build the FastAPI application.
+    """!
+    @brief Build the FastAPI application.
 
-    :param config: merged configuration.
-    :param store: archive to use; one is opened from *config* if omitted.
-    :param ingest: the ingest manager; one is built from *config* if omitted.
-    :param start_ingest: override ``config.ingest.enabled``.  Tests pass
+    @param config merged configuration.
+    @param store archive to use; one is opened from *config* if omitted.
+    @param ingest the ingest manager; one is built from *config* if omitted.
+    @param start_ingest override ``config.ingest.enabled``.  Tests pass
         ``False`` so that creating an app never contacts a TDU.
+    @return the configured application (ingest not yet started; that
+        happens in the lifespan).
 
-    :raises ConfigError: if the admin token file cannot be read.
+    @throws ConfigError if the admin token file cannot be read.
+    @throws AuthError if auth is enabled but itsdangerous is missing.
     """
+    # legacy_source names the rows of a pre-multi-source (version 1)
+    # archive: they are attributed to the first configured TDU.
     store = store or SpillStore(
         config.storage.path,
         timeout=config.storage.timeout,
@@ -87,6 +105,7 @@ def create_app(
     )
     authenticator = build_authenticator(config.auth)
 
+    # The admin token is read once, here; rotating the file needs a restart.
     try:
         admin_token = config.admin.resolved_token()
     except OSError as exc:
@@ -100,6 +119,7 @@ def create_app(
     # sources; nothing is polled until start() is called.
     ingest = ingest or IngestManager(config, store)
 
+    # Shared with build_router and the page handlers by reference.
     state = SimpleNamespace(
         config=config,
         store=store,
@@ -112,6 +132,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """!
+        @brief Startup/shutdown: OIDC setup, start pollers; on exit stop
+        pollers, release auth, close the archive (in that order, so no
+        poller writes to a closed store).
+        @param app the application.
+        @throws AuthError if authentication setup fails (server refuses to start).
+        """
         try:
             await authenticator.startup()
         except AuthError as exc:
@@ -153,6 +180,8 @@ def create_app(
                 "auth.enabled is true but itsdangerous is missing; "
                 "install it with: pip install -e '.[oidc]'"
             ) from None
+        # Signed with the same auth.session_secret as the auth cookie (the
+        # auth module adds its own salt).
         app.add_middleware(
             SessionMiddleware,
             secret_key=config.auth.session_secret,
@@ -179,18 +208,19 @@ def create_app(
     return app
 
 
-#: Form fields the report link fills in, keyed by the ``id`` of the matching
-#: field in .github/ISSUE_TEMPLATE/bug_report.yml. GitHub addresses issue-form
-#: fields by that id, so renaming one there without renaming it here silently
-#: drops the prefill rather than failing.
+## Form fields the report link fills in, keyed by the ``id`` of the matching
+## field in .github/ISSUE_TEMPLATE/bug_report.yml. GitHub addresses issue-form
+## fields by that id, so renaming one there without renaming it here silently
+## drops the prefill rather than failing.
 BUG_REPORT_TEMPLATE = "bug_report.yml"
 
-#: Value of the form's "Where" dropdown; it has to match the option text.
+## Value of the form's "Where" dropdown; it has to match the option text.
 BUG_REPORT_SURFACE = "browser query page"
 
 
 def _bug_report_url(config: Config) -> str:
-    """The "report a bug" target, with the deployment's own details filled in.
+    """!
+    @brief The "report a bug" target, with the deployment's own details filled in.
 
     GitHub prefills an issue form from the query string, so the report arrives
     already carrying the server version and the TDU it was talking to --- the
@@ -203,6 +233,9 @@ def _bug_report_url(config: Config) -> str:
     repository ``labels=bug`` would turn the link into a dead end for anyone
     outside the organisation. A label the form declares is applied whoever
     files.
+
+    @param config server configuration (for the source URLs).
+    @return the GitHub new-issue URL with prefilled query string.
     """
     query = urlencode(
         {
@@ -216,7 +249,8 @@ def _bug_report_url(config: Config) -> str:
 
 
 def _mount_status(app: FastAPI, config: Config) -> None:
-    """Serve ``server.status_dir`` at ``/status/``, if it is set and exists.
+    """!
+    @brief Serve ``server.status_dir`` at ``/status/``, if it is set and exists.
 
     The pages are written by another program (the publisher), so the
     directory is never created here: a missing one is most likely a typo or
@@ -224,6 +258,12 @@ def _mount_status(app: FastAPI, config: Config) -> None:
     page.  ``html=True`` serves ``index.html`` for ``/status/``; StaticFiles
     never lists a directory.  A bare ``/status`` matches no route and the
     router's slash redirect sends it to ``/status/``.
+
+    Checked once at startup: a directory that appears later is not picked up
+    without a restart.
+
+    @param app the application.
+    @param config server configuration.
     """
     setting = config.server.status_dir
     if not setting:
@@ -244,8 +284,20 @@ def _mount_status(app: FastAPI, config: Config) -> None:
 
 
 def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
-    """Attach the browser-facing pages."""
+    """!
+    @brief Attach the browser-facing pages.
+
+    Adds ``/`` (query page), ``/config`` (source administration),
+    ``/static``, optional ``/status/``, and the 404 handler.  The pages are
+    excluded from the OpenAPI schema.
+
+    @param app the application.
+    @param config server configuration.
+    @param store the archive (unused here; kept for symmetry).
+    @param state shared application state.
+    """
     templates = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+    # Computed once: it depends only on the configuration.
     bug_report_url = _bug_report_url(config)
     static_dir = _WEB_DIR / "static"
     if static_dir.is_dir():
@@ -254,7 +306,11 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
 
     @app.get("/",response_class=HTMLResponse, include_in_schema=False)
     async def index(request: Request):
-        """The query form and results table."""
+        """!
+        @brief The query form and results table.
+        @param request the incoming request.
+        @return the rendered ``index.html``.
+        """
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -274,6 +330,7 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
                 "sources": state.ingest.names(),
                 "default_timezone": config.query.timezone,
                 "auth_enabled": config.auth.enabled,
+                # The page's JavaScript prefixes API calls with this.
                 "root_path": config.server.root_path,
                 "project_url": PROJECT_URL,
                 "bug_report_url": bug_report_url,
@@ -282,7 +339,15 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
 
     @app.get("/config", response_class=HTMLResponse, include_in_schema=False)
     async def config_page(request: Request):
-        """View the sources, and change them with the admin token."""
+        """!
+        @brief View the sources, and change them with the admin token.
+
+        The page itself is public; every change it makes goes through the
+        admin-guarded API routes.
+
+        @param request the incoming request.
+        @return the rendered ``config.html``.
+        """
         return templates.TemplateResponse(
             request,
             "config.html",
@@ -298,17 +363,25 @@ def _mount_web(app: FastAPI, config: Config, store: SpillStore, state) -> None:
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
-        """Explain an unrouted path, without touching a route's own 404.
+        """!
+        @brief Explain an unrouted path, without touching a route's own 404.
 
         This handler sees both kinds of 404: one raised by a route that looked
         for something and did not find it, and one produced by the router when
         no route matched at all. Only the second is ours to rewrite --- the
         first already carries a detail explaining what was missing, and
         replacing it would throw that away.
+
+        @param request the incoming request.
+        @param exc the HTTPException carrying status 404.
+        @return a JSON 404 response.
         """
+        # Structured detail from _error() (a dict): pass through unchanged.
         detail = getattr(exc, "detail", None)
         if detail is not None and not isinstance(detail, str):
             return JSONResponse(status_code=404, content={"detail": detail})
+        # A route's own string detail: pass through.  "Not Found" is
+        # Starlette's default, i.e. the router found no route.
         if isinstance(detail, str) and detail != "Not Found":
             return JSONResponse(status_code=404, content={"detail": detail})
 

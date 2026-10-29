@@ -1,4 +1,6 @@
-"""Tests for recording from several TDUs, and changing them at runtime.
+"""!
+@file tests/test_sources.py
+@brief Tests for recording from several TDUs, and changing them at runtime.
 
 Covers the four layers that carry a source: its configuration, the archive
 (including migrating an archive written before sources existed), the ingest
@@ -32,28 +34,45 @@ TOKEN = "0123456789abcdef0123456789abcdef"
 
 
 def test_a_bare_url_is_named_after_its_host():
+    """!
+    @brief A source given as a bare URL takes its host name as the source name;
+    a trailing slash is dropped.
+    """
     source = parse_source("http://tdu-near-master-ppc-02:8080/")
     assert source.name == "tdu-near-master-ppc-02"
     assert source.base_url == URL_B, "the trailing slash is normalised away"
 
 
 def test_a_source_can_be_given_an_explicit_name():
+    """!
+    @brief 'name=URL' sets the source name explicitly.
+    """
     source = parse_source("near-02=" + URL_B)
     assert (source.name, source.base_url) == ("near-02", URL_B)
 
 
 def test_an_equals_sign_in_a_query_string_is_not_a_name():
+    """!
+    @brief An '=' inside the URL itself is not parsed as a name separator.
+    """
     source = parse_source("http://tdu:8080/?a=b")
     assert source.name == "tdu"
 
 
 @pytest.mark.parametrize("spec", ["ftp://tdu", "not a url", "bad name!=" + URL_A])
 def test_malformed_sources_are_refused(spec):
+    """!
+    @brief Non-HTTP schemes, non-URLs and invalid names raise ConfigError.
+    @param spec malformed source specification.
+    """
     with pytest.raises(ConfigError):
         parse_source(spec)
 
 
 def test_sources_come_from_repeated_options():
+    """!
+    @brief Repeated --tdu-source options build the source list in order.
+    """
     config = load_config(
         argv=["--tdu-source", URL_A, "--tdu-source", "b=" + URL_B],
         environ={}, search_paths=[],
@@ -62,6 +81,9 @@ def test_sources_come_from_repeated_options():
 
 
 def test_sources_come_from_a_comma_separated_environment_variable():
+    """!
+    @brief DARPA_SPILL_TDU_SOURCES accepts a comma-separated list.
+    """
     config = load_config(
         argv=[], environ={"DARPA_SPILL_TDU_SOURCES": URL_A + "," + URL_B},
         search_paths=[],
@@ -70,11 +92,17 @@ def test_sources_come_from_a_comma_separated_environment_variable():
 
 
 def test_the_single_base_url_form_still_works():
+    """!
+    @brief The legacy single --tdu-url form still yields one named source.
+    """
     config = load_config(argv=["--tdu-url", URL_C], environ={}, search_paths=[])
     assert [s.name for s in config.tdu.resolved_sources()] == ["tdu-near-master-ppc-03"]
 
 
 def test_base_url_and_sources_together_are_refused():
+    """!
+    @brief Setting both tdu.base_url and tdu.sources raises ConfigError.
+    """
     with pytest.raises(ConfigError, match="both set"):
         load_config(argv=["--tdu-url", URL_A, "--tdu-source", URL_B],
                     environ={}, search_paths=[])
@@ -85,12 +113,20 @@ def test_base_url_and_sources_together_are_refused():
     ([URL_A, "other=" + URL_A], "the URL"),
 ])
 def test_duplicate_sources_are_refused(specs, fragment):
+    """!
+    @brief A repeated source name or a repeated URL raises ConfigError.
+    @param specs --tdu-source values to pass.
+    @param fragment text expected in the error.
+    """
     argv = [arg for spec in specs for arg in ("--tdu-source", spec)]
     with pytest.raises(ConfigError, match=fragment):
         load_config(argv=argv, environ={}, search_paths=[])
 
 
 def test_the_admin_token_is_redacted():
+    """!
+    @brief to_dict() redacts admin.token.
+    """
     config = Config()
     config.admin.token = TOKEN
     assert config.to_dict()["admin"]["token"] == "***redacted***"
@@ -100,17 +136,33 @@ def test_the_admin_token_is_redacted():
 
 
 def event(nova_time, source, spill_type=SpillType.ACCEL_ONE_HZ_TCLK, code=0x8F):
+    """!
+    @brief Build a SpillEvent for the source tests.
+    @param nova_time tick of the event.
+    @param source source name to tag it with.
+    @param spill_type decoded type (default 1 Hz TCLK).
+    @param code raw signal code (default $8F).
+    @return the SpillEvent.
+    """
     return SpillEvent(nova_time=nova_time, spill_type=spill_type,
                       signal_code=code, source=source, route="spill_history")
 
 
 def test_the_same_event_from_two_sources_is_kept_twice(store):
+    """!
+    @brief The primary key includes the source: the same instant from two TDUs
+    is two rows, re-inserting one is still a no-op.
+    """
     assert store.insert_events([event(BASE, SOURCE_A), event(BASE, SOURCE_B)]) == 2
     assert store.insert_events([event(BASE, SOURCE_A)]) == 0, "still idempotent"
     assert store.counts_by_source() == {SOURCE_A: 1, SOURCE_B: 1}
 
 
 def test_queries_filter_by_source(populated):
+    """!
+    @brief query(sources=) and latest(sources=) restrict results to the listed
+    sources; no filter means all.
+    """
     assert populated.query(sources=[SOURCE_A]).total == 60
     assert populated.query(sources=[SOURCE_B]).total == 5
     assert populated.query(sources=[SOURCE_A, SOURCE_B]).total == 65
@@ -119,16 +171,26 @@ def test_queries_filter_by_source(populated):
 
 
 def test_source_names_lists_what_the_archive_holds(populated):
+    """!
+    @brief source_names() lists the distinct sources present, sorted.
+    """
     assert populated.source_names() == [SOURCE_A, SOURCE_B]
 
 
 def test_pruning_one_source_leaves_the_others(store):
+    """!
+    @brief prune_before(source=) only deletes that source's rows.
+    """
     store.insert_events([event(BASE, SOURCE_A), event(BASE, SOURCE_B)])
     assert store.prune_before(BASE + 1, source=SOURCE_A) == 1
     assert store.source_names() == [SOURCE_B]
 
 
 def test_overrides_are_saved_and_cleared(store):
+    """!
+    @brief Runtime source overrides are persisted with author and can be
+    cleared.
+    """
     store.set_source_override(SOURCE_A, URL_C, False, "tester")
     row = store.source_overrides()[SOURCE_A]
     assert (row["base_url"], row["enabled"], row["updated_by"]) == (URL_C, 0, "tester")
@@ -137,7 +199,9 @@ def test_overrides_are_saved_and_cleared(store):
 
 
 def make_v1_archive(path):
-    """Write an archive exactly as schema version 1 laid it out."""
+    """!
+    @brief Write an archive exactly as schema version 1 laid it out.
+    """
     connection = sqlite3.connect(str(path))
     connection.executescript("""
         CREATE TABLE events (
@@ -160,6 +224,8 @@ def make_v1_archive(path):
         INSERT INTO ingest_log (started_at, source) VALUES (1, '/tcr_status');
     """)
     connection.executemany(
+        # v1 rows: type 3 (BNB_TCLK), no signal, and the route stored in the
+        # old `source` column.
         "INSERT INTO events VALUES (?, 3, -1, NULL, ?, NULL, NULL, 'tcr_status', 0)",
         [(BASE + index * SECOND, index) for index in range(10)],
     )
@@ -168,6 +234,11 @@ def make_v1_archive(path):
 
 
 def test_a_version_1_archive_is_migrated_in_place(tmp_path):
+    """!
+    @brief Opening a schema-1 archive migrates it to schema 2: existing rows
+    get legacy_source, the old source column becomes route, and the key becomes
+    per-source.
+    """
     path = tmp_path / "old.db"
     make_v1_archive(path)
 
@@ -179,6 +250,7 @@ def test_a_version_1_archive_is_migrated_in_place(tmp_path):
     assert store.recent_ingests()[0]["route"] == "/tcr_status"
 
     # Now keyed per source: the same instant from another TDU is a new row.
+    # Same (time, type, signal) as migrated row 0, different source.
     assert store.insert_events([event(BASE, SOURCE_B, SpillType(3), -1)]) == 1
     store.close()
 
@@ -188,6 +260,10 @@ def test_a_version_1_archive_is_migrated_in_place(tmp_path):
 
 
 def test_an_archive_from_a_newer_version_is_refused(tmp_path):
+    """!
+    @brief An archive whose schema_version is newer than the code raises
+    StoreError.
+    """
     path = tmp_path / "future.db"
     SpillStore(str(path)).set_meta("schema_version", "99")
     with pytest.raises(StoreError, match="newer"):
@@ -198,30 +274,60 @@ def test_an_archive_from_a_newer_version_is_refused(tmp_path):
 
 
 class StubClient:
-    """Serves one event per poll, stamped with the URL it was built for."""
+    """!
+    @brief Serves one event per poll, stamped with the URL it was built for.
+    """
 
     def __init__(self, source, route=HISTORY_ROUTE):
+        """!
+        @brief Remember the URL the stub was built for.
+        @param source SourceConfig the factory was called with.
+        @param route route reported in each FetchResult.
+        """
         self.base_url = source.base_url
         self.route = route
         self.polls = 0
 
     async def open(self):
+        """!
+        @brief No-op.
+        """
         pass
 
     async def close(self):
+        """!
+        @brief No-op.
+        """
         pass
 
     async def supports_history(self):
+        """!
+        @brief Report history-route support.
+        @return True iff route is HISTORY_ROUTE.
+        """
         return self.route == HISTORY_ROUTE
 
     async def fetch_history(self, since_nova=None, limit=None, **kwargs):
+        """!
+        @brief Serve one new event per call, tagged "stub" so the test can tell
+        whether the poller retags it.
+        @return FetchResult with a single event a minute in the past.
+        """
         self.polls += 1
+        # +polls ticks keeps each event distinct, inside the cold-start
+        # backfill.
         stamp = nova_now() - 60 * TICKS_PER_SECOND + self.polls
         return FetchResult(events=[event(stamp, "stub")], route=self.route)
 
 
 @pytest.fixture
 def ingest_config(tmp_path):
+    """!
+    @brief Config with two TDU sources, a per-test archive and a 10 ms poll
+    interval.
+    @param tmp_path pytest per-test temporary directory.
+    @return the Config.
+    """
     cfg = Config()
     cfg.storage.path = str(tmp_path / "spills.db")
     cfg.tdu.sources = [URL_A, URL_B]
@@ -231,15 +337,31 @@ def ingest_config(tmp_path):
 
 @pytest.fixture
 def ingest_store(ingest_config):
+    """!
+    @brief Empty SpillStore for ingest_config; closed on teardown.
+    @param ingest_config the ingest_config fixture.
+    @return the open SpillStore.
+    """
     archive = SpillStore(ingest_config.storage.path)
     yield archive
     archive.close()
 
 
 def make_manager(config, store, route=HISTORY_ROUTE):
+    """!
+    @brief Build an IngestManager whose client factory creates StubClients.
+    @param config the Config.
+    @param store the SpillStore.
+    @param route route the stubs report.
+    @return (manager, clients) where clients maps source name to its latest
+    StubClient.
+    """
     clients = {}
 
     def factory(source):
+        """!
+        @brief Create and remember a StubClient for *source*.
+        """
         clients[source.name] = StubClient(source, route=route)
         return clients[source.name]
 
@@ -248,6 +370,10 @@ def make_manager(config, store, route=HISTORY_ROUTE):
 
 
 async def test_every_source_is_polled_and_tagged(ingest_config, ingest_store):
+    """!
+    @brief Every configured source is polled and its events are stored under
+    the poller's source name, not the client's tag.
+    """
     manager, _ = make_manager(ingest_config, ingest_store)
     await manager.start()
     await asyncio.sleep(0.08)
@@ -259,6 +385,10 @@ async def test_every_source_is_polled_and_tagged(ingest_config, ingest_store):
 
 
 async def test_disabling_a_source_stops_its_poller(ingest_config, ingest_store):
+    """!
+    @brief Disabling a source removes its poller while the others keep running;
+    re-enabling restarts it.
+    """
     manager, _ = make_manager(ingest_config, ingest_store)
     await manager.start()
     await manager.update_source(SOURCE_B, enabled=False, updated_by="tester")
@@ -274,6 +404,10 @@ async def test_disabling_a_source_stops_its_poller(ingest_config, ingest_store):
 
 
 async def test_changing_a_url_restarts_that_source_only(ingest_config, ingest_store):
+    """!
+    @brief Changing one source's URL rebuilds that source's client (normalised
+    URL) and leaves the other poller untouched.
+    """
     manager, clients = make_manager(ingest_config, ingest_store)
     await manager.start()
     untouched = manager.pollers[SOURCE_A]
@@ -286,6 +420,10 @@ async def test_changing_a_url_restarts_that_source_only(ingest_config, ingest_st
 
 
 async def test_changes_survive_a_restart_and_reset_clears_them(ingest_config, ingest_store):
+    """!
+    @brief Overrides are reloaded by a new manager; reset_source() removes them
+    and restores the configured URL.
+    """
     manager, _ = make_manager(ingest_config, ingest_store)
     await manager.update_source(SOURCE_B, base_url=URL_C, enabled=False)
 
@@ -300,6 +438,10 @@ async def test_changes_survive_a_restart_and_reset_clears_them(ingest_config, in
 
 
 async def test_a_change_back_to_the_file_drops_the_override(ingest_config, ingest_store):
+    """!
+    @brief A change that returns a source to its configured values deletes the
+    override row.
+    """
     manager, _ = make_manager(ingest_config, ingest_store)
     await manager.update_source(SOURCE_A, enabled=False)
     await manager.update_source(SOURCE_A, enabled=True)
@@ -307,6 +449,10 @@ async def test_a_change_back_to_the_file_drops_the_override(ingest_config, inges
 
 
 async def test_bad_changes_are_refused(ingest_config, ingest_store):
+    """!
+    @brief Unknown source, non-HTTP URL and a URL already used by another
+    source raise SourceError.
+    """
     manager, _ = make_manager(ingest_config, ingest_store)
     with pytest.raises(SourceError, match="no source"):
         await manager.update_source("nope", enabled=False)
@@ -317,6 +463,10 @@ async def test_bad_changes_are_refused(ingest_config, ingest_store):
 
 
 async def test_degradation_is_reported_per_source(ingest_config, ingest_store):
+    """!
+    @brief With every source on the legacy route, the summary flags degraded
+    and lists each degraded source.
+    """
     manager, _ = make_manager(ingest_config, ingest_store, route="/tcr_status")
     await manager.start()
     await asyncio.sleep(0.05)
@@ -332,6 +482,10 @@ async def test_degradation_is_reported_per_source(ingest_config, ingest_store):
 
 
 def test_events_filter_by_source(populated_client):
+    """!
+    @brief /api/events?source= returns only that source's rows, with their
+    route.
+    """
     rows = populated_client.get(
         "/api/events", params={"source": SOURCE_B}).json()["events"]
     assert len(rows) == 5
@@ -340,6 +494,10 @@ def test_events_filter_by_source(populated_client):
 
 
 def test_sources_combine_as_a_union(populated_client):
+    """!
+    @brief A comma-separated source list selects the union and is echoed in
+    meta.sources.
+    """
     body = populated_client.get(
         "/api/events", params={"source": SOURCE_A + "," + SOURCE_B}).json()
     assert body["meta"]["total"] == 65
@@ -347,18 +505,29 @@ def test_sources_combine_as_a_union(populated_client):
 
 
 def test_no_source_means_every_source(populated_client):
+    """!
+    @brief With no source filter all rows are returned and meta says '(all
+    sources)'.
+    """
     meta = populated_client.get("/api/events").json()["meta"]
     assert meta["total"] == 65
     assert meta["sources"] == ["(all sources)"]
 
 
 def test_an_unknown_source_is_refused_with_the_known_ones(populated_client):
+    """!
+    @brief An unknown source gives 400 with a hint listing the known sources.
+    """
     response = populated_client.get("/api/events", params={"source": "ppc-09"})
     assert response.status_code == 400
     assert SOURCE_A in response.json()["detail"]["hint"]
 
 
 def test_latest_and_export_take_a_source(populated_client):
+    """!
+    @brief /api/latest and /api/export honour source=; the export records it in
+    its comments.
+    """
     latest = populated_client.get("/api/latest", params={"source": SOURCE_B})
     assert latest.json()["event"]["source"] == SOURCE_B
     csv = populated_client.get("/api/export", params={"source": SOURCE_B}).text
@@ -367,12 +536,20 @@ def test_latest_and_export_take_a_source(populated_client):
 
 
 def test_status_counts_events_per_source(populated_client):
+    """!
+    @brief /api/status reports event counts per source and lists the sources in
+    order.
+    """
     status = populated_client.get("/api/status").json()
     assert status["archive"]["by_source"] == {SOURCE_A: 60, SOURCE_B: 5}
     assert [s["name"] for s in status["sources"]] == [SOURCE_A, SOURCE_B]
 
 
 def test_sources_endpoint_describes_each_source(populated_client):
+    """!
+    @brief /api/sources describes each source (name, URL, enabled, events,
+    overridden) and the admin state.
+    """
     body = populated_client.get("/api/sources").json()
     first = body["sources"][0]
     assert (first["name"], first["base_url"], first["enabled"]) == (SOURCE_A, URL_A, True)
@@ -382,6 +559,10 @@ def test_sources_endpoint_describes_each_source(populated_client):
 
 
 def test_changes_are_refused_when_no_admin_token_is_configured(populated_client):
+    """!
+    @brief With no admin token configured, PATCH is 403 with a hint pointing at
+    admin.token_file.
+    """
     response = populated_client.patch(
         "/api/sources/" + SOURCE_A, json={"enabled": False},
         headers={"X-Admin-Token": "anything"})
@@ -391,6 +572,12 @@ def test_changes_are_refused_when_no_admin_token_is_configured(populated_client)
 
 @pytest.fixture
 def admin_client(config, populated):
+    """!
+    @brief TestClient over the populated store with admin.token set to TOKEN.
+    @param config the shared config fixture.
+    @param populated the populated store fixture.
+    @return the TestClient.
+    """
     config.admin.token = TOKEN
     app = create_app(config, store=populated, start_ingest=False)
     with TestClient(app) as test_client:
@@ -398,6 +585,10 @@ def admin_client(config, populated):
 
 
 def test_changes_need_the_token(admin_client):
+    """!
+    @brief PATCH without a token is 401, with a wrong token 403, and neither
+    changes the source.
+    """
     path = "/api/sources/" + SOURCE_A
     assert admin_client.patch(path, json={"enabled": False}).status_code == 401
     wrong = admin_client.patch(path, json={"enabled": False},
@@ -407,6 +598,10 @@ def test_changes_need_the_token(admin_client):
 
 
 def test_the_token_allows_a_change_and_a_reset(admin_client, populated):
+    """!
+    @brief With the token, PATCH applies and records the override (author
+    'admin token ...'); POST reset restores the configured values.
+    """
     headers = {"X-Admin-Token": TOKEN}
     assert admin_client.get("/api/admin/check", headers=headers).json()["ok"] is True
 
@@ -424,6 +619,9 @@ def test_the_token_allows_a_change_and_a_reset(admin_client, populated):
 
 
 def test_bad_changes_are_explained(admin_client):
+    """!
+    @brief Unknown source is 404; an empty body or a malformed URL is 400.
+    """
     headers = {"X-Admin-Token": TOKEN}
     unknown = admin_client.patch("/api/sources/nope", headers=headers,
                                  json={"enabled": False})
@@ -436,7 +634,9 @@ def test_bad_changes_are_explained(admin_client):
 
 
 def test_the_admin_token_is_not_reachable_cross_origin(admin_client):
-    """CORS must not let another site's page send a write."""
+    """!
+    @brief CORS must not let another site's page send a write.
+    """
     preflight = admin_client.options(
         "/api/sources/" + SOURCE_A,
         headers={"Origin": "https://evil.example",
@@ -446,6 +646,10 @@ def test_the_admin_token_is_not_reachable_cross_origin(admin_client):
 
 
 def test_query_and_config_pages_list_the_sources(client):
+    """!
+    @brief The query page offers a source selector and the /config page
+    references /api/sources.
+    """
     index = client.get("/").text
     assert 'name="source" value="{}"'.format(SOURCE_B) in index
     page = client.get("/config")
@@ -454,19 +658,31 @@ def test_query_and_config_pages_list_the_sources(client):
 
 
 def test_an_unreadable_admin_token_file_stops_startup(config, store, tmp_path):
+    """!
+    @brief A missing admin.token_file makes create_app raise ConfigError.
+    """
     config.admin.token_file = str(tmp_path / "missing")
     with pytest.raises(ConfigError, match="admin.token_file"):
         create_app(config, store=store, start_ingest=False)
 
 
 class HangingClient(StubClient):
-    """A TDU that accepts the connection and then never answers."""
+    """!
+    @brief A TDU that accepts the connection and then never answers.
+    """
 
     def __init__(self, source):
+        """!
+        @brief Initialise the hang-forever stub.
+        @param source SourceConfig the factory was called with.
+        """
         super().__init__(source)
         self.cancelled = False
 
     async def fetch_history(self, since_nova=None, limit=None, **kwargs):
+        """!
+        @brief Sleep for an hour; record cancellation and re-raise it.
+        """
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -475,9 +691,16 @@ class HangingClient(StubClient):
 
 
 async def test_disabling_a_source_does_not_wait_for_a_hung_tdu(ingest_config, ingest_store):
+    """!
+    @brief Disabling a source whose fetch is hung cancels the fetch instead of
+    waiting out the poller's stop grace period.
+    """
     clients = {}
 
     def factory(source):
+        """!
+        @brief Create and remember a HangingClient for *source*.
+        """
         clients[source.name] = HangingClient(source)
         return clients[source.name]
 
