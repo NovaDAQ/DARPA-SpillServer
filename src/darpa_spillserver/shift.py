@@ -116,7 +116,8 @@ _MAX_BLOCKS = 64
 ## Distance from a rounding or cut boundary, in ticks, inside which the float
 ## evaluation is not trusted.  Its error is below 1e-6 ticks for any allowed
 ## sigma; the margin is ten times that.
-## (See also the NOTE in _gauss_draw on the float form of u for k >= 2**52.)
+## (The bound assumes the float path is handed the exact u; _gauss_draw
+## ensures that by evaluating u > 1/2 through the symmetry x(u) = -x(1-u).)
 _GUARD = 1e-5
 
 ## Environment variable holding a token directly (outranks ENV_TOKEN_FILE;
@@ -500,20 +501,27 @@ def _gauss_draw(k: int, sigma: int, cut: int) -> Optional[int]:
     the reference evaluates the same exact rationals at 60 digits.  Offsets
     are therefore bit-identical across platforms and Python builds, which
     inversion requires: a one-tick disagreement would restore a wrong time.
+
+    Exact float input: u is an odd multiple of 2^-54, representable as a
+    double only for u < 1/2.  AS241 is exactly odd about 1/2 (the central
+    rational is odd in q = u - 1/2 and the tails use min(u, 1-u) with the
+    sign of q), so for k >= 2^52 the float path evaluates -x(1 - u), where
+    1 - u = (2^53 - 1 - k + 1/2) / 2^53 is exact.  Versions up to 1.5.2
+    formed u directly in float, which gave u = 1.0 for k = 2^53 - 1
+    (log(0)) and errors of thousands of ticks in the far tail for wide cuts.
     @param k Top 53 bits of a 64-bit HMAC word, 0 <= k < 2**53.
     @param sigma Gaussian standard deviation in ticks.
     @param cut Truncation bound in ticks.
     @return The offset in ticks, or None if the draw is rejected by the cut.
     """
-    # NOTE: k + 0.5 is exact in a double only for k < 2**52; for k >= 2**52
-    # (u > 1/2) it rounds half-to-even to a multiple of 1/2**53, i.e. the
-    # float u differs from the exact u by 2**-54.  That error is amplified by
-    # 1/phi(x) in the upper tail, and for wide cuts with large sigma (about
-    # |x| > 4) the resulting error in xs can exceed _GUARD.  For
-    # k = 2**53 - 1 the float u is exactly 1.0 and math.log(0) raises.  The
-    # decimal path below is not affected.
-    u = (k + 0.5) / 9007199254740992.0          # exact: k < 2**53
-    xs = as241_float(u) * sigma
+    # u is an odd multiple of 2**-54, which a double holds exactly only for
+    # u < 1/2.  AS241 is odd about 1/2, so the upper half is evaluated as
+    # -x(1 - u) with 1 - u = (2**53 - 1 - k + 1/2) / 2**53, again exact.
+    if k < 4503599627370496:                    # 2**52
+        xs = as241_float((k + 0.5) / 9007199254740992.0) * sigma
+    else:
+        xs = -as241_float((9007199254740991 - k + 0.5)
+                          / 9007199254740992.0) * sigma
     # Distance of |xs| from the nearest half-integer rounding boundary.
     frac = abs(xs) % 1.0
     if abs(frac - 0.5) > _GUARD and abs(abs(xs) - cut) > _GUARD:
