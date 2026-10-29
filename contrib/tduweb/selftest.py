@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Self-test for tdu_webserver.py, runnable on the TDU itself.
+"""!
+@file contrib/tduweb/selftest.py
+@brief Self-test for tdu_webserver.py, runnable on the TDU itself.
+
+Self-test for tdu_webserver.py, runnable on the TDU itself.
 
     python2.5 ./selftest.py
 
@@ -13,20 +17,36 @@ round-tripping through a JSON parser, because Python 2.5 has no json module
 
 Written to the same Python 2.5 floor as tdu_webserver.py: no "except X as e",
 no str.format, no json, no comprehension syntax beyond list comprehensions.
+
+Exit status: 0 if every check passed, 1 otherwise.  Off the TDU it needs
+bottle importable (tdu_webserver imports it at module level) and, for the
+closest approximation of 2.5, can be run under run_as_python25.py:
+
+    python2 run_as_python25.py selftest.py
 """
 
 import os
 import sys
 
+# Must be set before the import: tdu_webserver starts serving at import time
+# unless this is set (it preserves the stock server's import-to-run habit).
 os.environ['TDU_WEB_NO_SERVE'] = '1'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tdu_webserver as tw
 
+## Labels of failed checks; non-empty means exit status 1.
 FAILURES = []
 
 
 def check(label, got, expected):
+    """!@brief Compare *got* with *expected*, print ok/FAIL, record failures.
+
+    @param label     short description printed with the result.
+    @param got       value produced by the code under test.
+    @param expected  value it must equal (==).
+    @return None; appends *label* to FAILURES on mismatch.
+    """
     if got == expected:
         print "  ok    %s" % label
     else:
@@ -37,6 +57,13 @@ def check(label, got, expected):
 
 
 def check_json(label, value, expected):
+    """!@brief Check tdu_webserver._json_encode(*value*) against literal JSON.
+
+    @param label     short description printed with the result.
+    @param value     Python object to encode.
+    @param expected  exact JSON text expected.
+    @return None.
+    """
     check(label, tw._json_encode(value), expected)
 
 

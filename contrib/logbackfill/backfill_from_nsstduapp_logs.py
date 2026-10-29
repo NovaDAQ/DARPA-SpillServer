@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Backfill the archive from NssTDUApp log files.
+"""!
+@file contrib/logbackfill/backfill_from_nsstduapp_logs.py
+@brief Backfill the archive from NssTDUApp log files.
+
+Backfill the archive from NssTDUApp log files.
 
 Copyright 2010-2026 Andrew Norman for Fermi Forward Discovery Group LLC.
 All rights reserved.
@@ -65,6 +69,10 @@ Usage (from the repository root, in the venv)::
         /daqlogs/NovaSpillServer/NssTDUApp/NssTDUApp_Temporary_202610*.log
     python contrib/logbackfill/backfill_from_nsstduapp_logs.py \\
         /daqlogs/NovaSpillServer/NssTDUApp/NssTDUApp_Temporary_202610*.log
+
+Exit status: 0 on completion (including files with nothing in range); 2 for
+an unparsable --start/--end.  Needs ``darpa_spillserver`` importable (run in
+the project venv, or with PYTHONPATH=src).
 """
 
 from __future__ import annotations
@@ -83,36 +91,53 @@ from darpa_spillserver.novatime import (
 from darpa_spillserver.signals import SpillType
 from darpa_spillserver.storage import UNKNOWN_SIGNAL, SpillEvent, SpillStore
 
+## Value of the ``route`` column on every row this script writes; the tag
+## that distinguishes log-derived rows from TDU-ingested ones.
 ROUTE = "nsstduapp_log"
+## TDU the logs are assumed to come from unless --source says otherwise.
 DEFAULT_SOURCE = "tdu-near-master-ppc-01"
+## Spill types inserted by default: those the live ingest records.
 DEFAULT_TYPES = (SpillType.NUMI, SpillType.BNB, SpillType.BNB_TCLK,
                  SpillType.ACCEL_ONE_HZ_TCLK)
+## Rows per insert/renumber transaction.
 BATCH = 50000
 
-#: Events either side searched for a free number; see :func:`number`.
+## Events either side searched for a free number; see :func:`number`.
 WINDOW = 4
 
-#: How far out of time order the ring may hold two events: 1 ms.
+## How far out of time order the ring may hold two events: 1 ms.
 SWAP_TICKS = TICKS_PER_SECOND // 1000
 
-#: NssTDUApp logs 0x7fff... for an unsynchronised TDU; nothing real is near it.
+## NssTDUApp logs 0x7fff... for an unsynchronised TDU; nothing real is near it.
 _LATEST = 1 << 62
 
+## One ``Spilltype:`` line: group 1 is the decoded type number in
+## parentheses, group 2 the decimal novaTime.  The evt word and hex time are
+## matched but not captured (see the module docstring for why the event word
+## is not stored).
 _LINE = re.compile(
     r"^Spilltype: \w+\((\d+)\) \(evt 0x[0-9a-fA-F]+\) "
     r"novaTime 0x[0-9a-fA-F]+ (\d+)\s*$"
 )
 
-#: (nova_time, spill_type) pairs, sorted by time.
+## (nova_time, spill_type) pairs, sorted by time.
 Logged = List[Tuple[int, int]]
 
 
 def read_log(path: str) -> Logged:
-    """Every real event in *path*, sorted by time and de-duplicated.
+    """!@brief Every real event in *path*, sorted by time and de-duplicated.
 
     The log is not in time order --- NssTDUApp forwards each type from its
     own position in the ring --- and the whole file is kept, not just the
     range being backfilled, because an event's place in it is its number.
+
+    De-duplication is on (nova_time, spill_type), so an event logged more
+    than once occupies one position.  Sorting the tuples orders by time,
+    then type for simultaneous events.
+
+    @param path  NssTDUApp log file; undecodable bytes are replaced.
+    @return Logged list, possibly empty.
+    @throws OSError  *path* cannot be opened.
     """
     found = set()
     with open(path, "r", errors="replace") as handle:
@@ -131,7 +156,20 @@ def read_log(path: str) -> Logged:
 
 def number(db: sqlite3.Connection, source: str, logged: Logged,
            tally: Counter) -> List[Optional[int]]:
-    """The TDU event number of each logged event, or None where unknown."""
+    """!@brief The TDU event number of each logged event, or None where unknown.
+
+    Implements the anchor scheme of the module docstring in three passes:
+    forward and backward sweeps carry the (event_number - position) offset
+    of the nearest anchor on each side; an event is numbered only when both
+    sides agree and the number is unused; a final pass resolves single
+    neighbour swaps.
+
+    @param db      archive connection (read only here).
+    @param source  TDU name whose archived rows serve as anchors.
+    @param logged  non-empty Logged list from read_log.
+    @param tally   Counter updated with per-outcome counts.
+    @return list parallel to *logged* of event numbers or None.
+    """
     anchors: Dict[Tuple[int, int], int] = {}
     used = set()
     for nova_time, spill_type, event_number in db.execute(
@@ -142,6 +180,8 @@ def number(db: sqlite3.Connection, source: str, logged: Logged,
         anchors[(nova_time, spill_type)] = event_number
         used.add(event_number)
 
+    # before[i]/after[i]: offset (event_number - position) implied by the
+    # nearest anchor at or before / at or after position i, None if none.
     count = len(logged)
     before: List[Optional[int]] = [None] * count
     after: List[Optional[int]] = [None] * count
@@ -164,6 +204,9 @@ def number(db: sqlite3.Connection, source: str, logged: Logged,
         if anchor is not None:
             numbers.append(anchor)
             tally["anchored"] += 1
+        # Anchors on the two sides disagree (an event missing from, or
+        # extra in, the log between them) or one side has none: the
+        # position no longer determines the number.
         elif before[i] is None or before[i] != after[i]:
             numbers.append(None)
             tally["no number"] += 1
@@ -203,6 +246,8 @@ def number(db: sqlite3.Connection, source: str, logged: Logged,
             continue
         numbers[i] = candidate
         used.add(candidate)
+        # Note: this assumes the event was counted as "no number" above; one
+        # that was counted as "number taken" makes this tally off by one.
         tally["no number"] -= 1
         tally["numbered from neighbours"] += 1
     return numbers
@@ -210,10 +255,19 @@ def number(db: sqlite3.Connection, source: str, logged: Logged,
 
 def to_events(logged: Logged, numbers: Sequence[Optional[int]], source: str,
               types: Sequence[int], start: int, end: int) -> List[SpillEvent]:
-    """Rows for the wanted *types* in ``[start, end)``.
+    """!@brief Rows for the wanted *types* in ``[start, end)``.
 
     ``delta`` is taken over every logged event, wanted or not, in or out of
     range, since it is the gap to the previous hardware event.
+
+    @param logged   Logged list from read_log.
+    @param numbers  event numbers parallel to *logged* (from number()).
+    @param source   TDU name written to the ``source`` column.
+    @param types    spill-type integers to keep.
+    @param start    range start, NOvA ticks, inclusive.
+    @param end      range end, NOvA ticks, exclusive.
+    @return SpillEvent list in time order, all with route ROUTE.
+    @throws ValueError  a type number is not a valid SpillType.
     """
     now = int(time.time())
     events = []
@@ -239,7 +293,17 @@ def to_events(logged: Logged, numbers: Sequence[Optional[int]], source: str,
 
 
 def renumber(db: sqlite3.Connection, events: List[SpillEvent]) -> int:
-    """Bring rows an earlier run inserted up to date; returns rows changed."""
+    """!@brief Bring rows an earlier run inserted up to date.
+
+    Only rows with route ROUTE are touched, and only when event_number or
+    delta actually differ (``IS NOT`` is NULL-safe), so TDU rows are never
+    modified and the change count is meaningful.
+
+    @param db      writable archive connection.
+    @param events  rows as to_events produced them.
+    @return number of rows changed.
+    @throws sqlite3.Error  on a database error (the batch is rolled back).
+    """
     with db:
         before = db.total_changes
         db.executemany(
@@ -254,10 +318,15 @@ def renumber(db: sqlite3.Connection, events: List[SpillEvent]) -> int:
 
 
 def verify(db: sqlite3.Connection, events: List[SpillEvent], tally: Counter) -> None:
-    """Compare *events* with the rows the archive already holds for them.
+    """!@brief Compare *events* with the rows the archive already holds for them.
 
     One range scan per file rather than a lookup per event: the archive is
     on NFS, where millions of point queries take hours.
+
+    @param db      archive connection (read only).
+    @param events  time-ordered rows from to_events; all share one source.
+    @param tally   Counter updated with missing / present / agreement counts.
+    @return None.
     """
     if not events:
         return
@@ -288,6 +357,13 @@ def verify(db: sqlite3.Connection, events: List[SpillEvent], tally: Counter) -> 
 
 
 def main(argv: Sequence[str] = None) -> int:
+    """!@brief Parse the given logs and insert (or, with --verify, compare).
+
+    @param argv  command-line arguments (default: sys.argv[1:]).
+    @return process exit status: 0 done, 2 bad time range.
+    @throws sqlite3.Error  the archive cannot be opened or written.
+    @throws OSError        a log file cannot be read.
+    """
     parser = argparse.ArgumentParser(
         description="Backfill the archive from NssTDUApp log files.")
     parser.add_argument("logs", nargs="+", metavar="LOG",
@@ -316,6 +392,9 @@ def main(argv: Sequence[str] = None) -> int:
     print("range {} .. {}, source {}, types {}".format(
         convert(start).utc[:19], convert(end).utc[:19], args.source, types))
 
+    # --verify opens the archive read-only by URI, so it cannot write even
+    # by accident; otherwise SpillStore applies the schema and its insert
+    # logic (ON CONFLICT DO NOTHING) is reused.
     if args.verify:
         db = sqlite3.connect("file:{}?mode=ro".format(args.database), uri=True)
         store = None
@@ -346,6 +425,9 @@ def main(argv: Sequence[str] = None) -> int:
                 print(line)
             else:
                 inserted = updated = 0
+                # Insert then renumber per batch: the insert skips rows that
+                # already exist, the renumber refreshes those an earlier run
+                # inserted.
                 for i in range(0, len(events), BATCH):
                     inserted += store.insert_events(events[i:i + BATCH])
                     updated += renumber(db, events[i:i + BATCH])

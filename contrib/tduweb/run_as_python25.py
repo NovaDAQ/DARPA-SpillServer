@@ -1,4 +1,8 @@
-"""Run a script under Python 2.7 with the 2.6+/2.7+ builtins removed.
+"""!
+@file contrib/tduweb/run_as_python25.py
+@brief Run a script under Python 2.7 with the 2.6+/2.7+ builtins removed.
+
+Run a script under Python 2.7 with the 2.6+/2.7+ builtins removed.
 
 Approximates Python 2.5 closely enough to catch the class of bug a source scan
 misses: using a name that simply does not exist there. `bytes` is the case that
@@ -12,9 +16,17 @@ bytearray for every character class -- so everything the code under test will
 reach is imported and exercised first, while the names are still present.
 
     python2 as25.py <script> [args...]
+
+(The file is named run_as_python25.py; "as25" in the usage line and in the
+stderr banner is its short name.)  The exit status is the script's: it runs
+in this process via execfile, so its sys.exit propagates unchanged.
+Arguments: argv[1] is the script, the rest become its sys.argv[1:].  Syntax
+that 2.7 accepts and 2.5 does not is NOT caught here; use check_python25.py.
 """
 import sys, os
 
+## Builtin names that do not exist on Python 2.5 and are removed before the
+## script under test runs.
 ABSENT_IN_25 = [
     'bytes',        # 2.6, alias for str
     'bytearray',    # 2.6
@@ -24,6 +36,8 @@ ABSENT_IN_25 = [
     'memoryview',   # 2.7
 ]
 
+# Present the script with the argv it would see if run directly, and make
+# its directory importable (so tdu_webserver is found beside selftest).
 script = sys.argv[1]
 sys.argv = sys.argv[1:]
 directory = os.path.dirname(os.path.abspath(script))
@@ -78,5 +92,7 @@ for name in originals:
     hidden.append(name)
 sys.stderr.write("as25: simulating Python 2.5 by hiding: %s\n" % ", ".join(sorted(hidden)))
 
+# A fresh __main__ namespace, so the script's `if __name__ == '__main__'`
+# guard fires as it would when run directly.
 namespace = {'__name__': '__main__', '__file__': script}
 execfile(script, namespace)
