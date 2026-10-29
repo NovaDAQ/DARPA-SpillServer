@@ -189,14 +189,21 @@ def test_remote_matches_local(populated, populated_client, tmp_path):
     start, end = BASE, BASE + 61 * SECOND
 
     remote_csv, local_csv = str(tmp_path / "r.csv"), str(tmp_path / "l.csv")
-    dump_range(remote, [CsvSink(remote_csv, COLUMNS)], start, end,
-               window_seconds=5, page_size=3)
-    dump_range(local, [CsvSink(local_csv, COLUMNS)], start, end,
-               window_seconds=5, page_size=3)
-    # Sinks commit on close; do it by hand as main() would.
-    assert len(read_csv(remote_csv + ".part")) == 65
-    with open(remote_csv + ".part") as a, open(local_csv + ".part") as b:
-        assert a.read() == b.read()
+    remote_sink, local_sink = CsvSink(remote_csv, COLUMNS), CsvSink(local_csv, COLUMNS)
+    try:
+        dump_range(remote, [remote_sink], start, end,
+                   window_seconds=5, page_size=3)
+        dump_range(local, [local_sink], start, end,
+                   window_seconds=5, page_size=3)
+        # Sinks commit on close, as main() does before reading output files.
+        remote_sink.close({})
+        local_sink.close({})
+        assert len(read_csv(remote_csv)) == 65
+        with open(remote_csv) as a, open(local_csv) as b:
+            assert a.read() == b.read()
+    finally:
+        remote_sink.abort()
+        local_sink.abort()
 
 
 class _Recording:
