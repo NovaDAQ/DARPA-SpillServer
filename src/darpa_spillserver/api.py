@@ -37,6 +37,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -539,11 +540,10 @@ def build_router(
                 tags=["spills"], include_in_schema=False)
     async def events_csv(request: Request, user=Depends(current_user)):
         """Convenience alias so a browser or ``curl -O`` gets a file."""
-        params = dict(request.query_params)
-        params["format"] = "csv"
-        scope_query = "&".join(
-            "{}={}".format(k, v) for k, v in params.items()
-        )
+        params = [(key, value) for key, value in request.query_params.multi_items()
+                  if key != "format"]
+        params.append(("format", "csv"))
+        scope_query = urlencode(params)
         from fastapi.responses import RedirectResponse
         return RedirectResponse(
             url=str(request.url_for("events")) + "?" + scope_query,

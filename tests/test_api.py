@@ -498,3 +498,19 @@ def test_no_conflicting_licence_claim_remains(client):
     schema = client.get("/openapi.json").json()
     assert "MIT" not in schema["info"]["license"]["name"]
     assert "MIT" not in schema["info"]["description"]
+
+
+def test_csv_alias_preserves_repeated_and_encoded_parameters(client):
+    from urllib.parse import parse_qs, urlsplit
+
+    params = [("signal", "$1D"), ("signal", "$1F"),
+              ("source", "a"), ("source", "b"),
+              ("type", "BNB"), ("type", "NUMI"),
+              ("start", "2026-10-01T00:00:00+01:00"), ("format", "json")]
+    response = client.get("/api/events.csv", params=params, follow_redirects=False)
+    assert response.status_code == 307
+    redirected = parse_qs(urlsplit(response.headers["location"]).query)
+    assert redirected == {"signal": ["$1D", "$1F"], "source": ["a", "b"],
+                          "type": ["BNB", "NUMI"],
+                          "start": ["2026-10-01T00:00:00+01:00"],
+                          "format": ["csv"]}
