@@ -1584,8 +1584,8 @@ def main(argv: Optional[Sequence[str]] = None,
 
     @details
     Exit status: 0 success; 1 file/shift/I-O/JSON error, or info mismatch;
-    2 usage or token error (also argparse errors); 130 interrupted.  141 is
-    intended for a broken pipe (see the note at the BrokenPipeError clause).
+    2 usage or token error (also argparse errors); 130 interrupted; 141
+    (128 + SIGPIPE) when the reader of stdout closes the pipe early.
     @param argv Arguments (default sys.argv[1:]).
     @param environ Environment (default os.environ); copied, never modified.
     @return The exit status.
@@ -1613,20 +1613,19 @@ def main(argv: Optional[Sequence[str]] = None,
     except ShiftError as exc:
         _err(str(exc))
         return 1
-    except OSError as exc:
-        _err(str(exc))
-        return 1
-    except json.JSONDecodeError as exc:
-        _err("not valid JSON: {}".format(exc))
-        return 1
-    # NOTE: BrokenPipeError is a subclass of OSError, so the OSError clause
-    # above catches it first and this clause is not reached as written.
+    # BrokenPipeError is a subclass of OSError, so it must be caught first.
     except BrokenPipeError:
         # Point stdout at /dev/null so the interpreter's final flush cannot
         # raise again; 141 = 128 + SIGPIPE, the shell convention.
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         return 141
+    except OSError as exc:
+        _err(str(exc))
+        return 1
+    except json.JSONDecodeError as exc:
+        _err("not valid JSON: {}".format(exc))
+        return 1
     except KeyboardInterrupt:
         # shift_file has already removed any .part output.
         _err("interrupted; partial outputs removed")

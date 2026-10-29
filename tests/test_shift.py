@@ -533,3 +533,37 @@ def test_info(dumps, token_file, capsys):
     other = Path(token_file).parent / "o"
     other.write_text(VECTORS["tokens"]["flat"])
     assert main(["info", shifted, "--token-file", str(other)], environ={}) == 1
+
+
+def test_broken_pipe_exits_quietly(monkeypatch, capsys):
+    """!
+    @brief A reader closing stdout early (``| head``) gives exit 141 and no
+    error message, not the OSError path's status 1.
+    """
+    class Closed:
+        """!@brief stdout replacement whose writes raise BrokenPipeError."""
+
+        def write(self, text):
+            """!
+            @brief Raise BrokenPipeError, as a write to a closed pipe does.
+            @param text Ignored.
+            """
+            raise BrokenPipeError()
+
+        def flush(self):
+            """!@brief Nothing to flush."""
+
+        def fileno(self):
+            """!
+            @brief A plausible descriptor for the dup2 in the handler.
+            @return 1.
+            """
+            return 1
+
+    monkeypatch.setattr(shift.sys, "stdout", Closed())
+    # The handler points fd 1 at /dev/null; neutralise that so pytest's
+    # capture is not clobbered.
+    monkeypatch.setattr(shift.os, "dup2", lambda *a: None)
+    # 141 = 128 + SIGPIPE(13), the shell convention for a closed pipe.
+    assert main(["info", VECTORS["tokens"]["flat"]], environ={}) == 141
+    assert capsys.readouterr().err == ""
