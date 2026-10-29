@@ -20,7 +20,8 @@ range then dumps, shifts and uploads them afresh.
 
 FDP is done first: if it fails, nothing local is touched and the script can
 simply be run again.  It refuses to run while any darpa-spill-publish job is
-running, as section 8 requires.
+running, as section 8 requires, and holds the publisher dump and upload locks
+throughout withdrawal so scheduled jobs cannot begin conflicting work.
 
 PIECES is a file with one piece per line, ``STREAM KIND LABEL`` (e.g.
 ``all hourly 2026-10-21T00-0500`` or ``numi daily 2026-10-21``); anything
@@ -35,6 +36,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import sqlite3
@@ -78,6 +81,27 @@ def publish_jobs() -> List[str]:
     return pids
 
 
+@contextmanager
+def publisher_locks(state_db: str):
+    """Exclude dump/shift and upload jobs throughout the withdrawal."""
+    held = []
+    try:
+        # Match the publisher's lock files; acquire in this order everywhere
+        # a withdrawal needs both. No publisher holds upload while taking dump.
+        for name in ("dump", "upload"):
+            path = os.path.join(os.path.dirname(state_db) or ".", name + ".lock")
+            handle = open(path, "a+")
+            held.append(handle)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError("publisher {} lock is busy; try again later".format(name))
+        yield
+    finally:
+        for handle in reversed(held):
+            handle.close()
+
+
 def main(argv: Sequence[str] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Withdraw published pieces so they can be republished.")
@@ -96,6 +120,17 @@ def main(argv: Sequence[str] = None) -> int:
     parser.add_argument("--ca-path", default="~/anorman-fdp/certificates")
     args = parser.parse_args(argv)
 
+    if args.dry_run:
+        return _withdraw(args)
+    try:
+        with publisher_locks(args.state_db):
+            return _withdraw(args)
+    except (OSError, RuntimeError) as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+def _withdraw(args) -> int:
     running = publish_jobs()
     if running and not args.dry_run:
         print("error: darpa-spill-publish is running (pid {}); try again when "
