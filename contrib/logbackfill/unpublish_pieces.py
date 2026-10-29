@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Withdraw published pieces so darpa-spill-publish can publish them again.
+"""!
+@file contrib/logbackfill/unpublish_pieces.py
+@brief Withdraw published pieces so darpa-spill-publish can publish them again.
+
+Withdraw published pieces so darpa-spill-publish can publish them again.
 
 Copyright 2010-2026 Andrew Norman for Fermi Forward Discovery Group LLC.
 All rights reserved.
@@ -30,6 +34,37 @@ Usage::
 
     python contrib/logbackfill/unpublish_pieces.py -n changed.txt   # show
     python contrib/logbackfill/unpublish_pieces.py changed.txt
+
+**Raw versus shifted (blurred) copies.**  Every published piece exists
+twice: the *raw* file with true timestamps, uploaded to the group-only
+``--raw-dest`` (``/amsc/novaend/raw``), and the *shifted* file, the raw file
+passed through ``darpa-spill-shift apply`` (transform dts1: each event's
+time moved by a keyed pseudorandom offset, Gaussian sigma 50 us), uploaded
+to the anonymously readable ``--shifted-dest``
+(``/amsc/public/novaend/shifted``).  Both destinations mirror the local
+``{data_root}/raw/...`` and ``{data_root}/shifted/...`` trees.  The shifted
+copy is derived from the raw one, so once the raw piece is short the shifted
+piece is short too, and both must be withdrawn together; withdrawing only
+the raw copy would leave a public blurred file that disagrees with its
+eventual raw replacement.
+
+Re-shifting the regenerated raw file does not weaken the blur.  The offset
+of an event is a function of the month's dts1 token and the event's
+``(source, event_number)`` only.  Rows the TDU supplied are never altered by
+the log backfill, so the new shifted file carries the *same* offsets for
+events that were already public, and no one ends up holding two
+independently blurred copies of one event to average against each other
+(plan D7).  The caveat is a log-backfilled row that was published and then
+*renumbered* by a later backfill run: its offset changes, and the withdrawn
+and republished blurred copies of it differ.  The monthly tokens are not
+touched here.
+
+A shifted copy may be absent (``shifted_path`` NULL: the piece was dumped
+but never shifted) or present locally but never uploaded; both cases are
+handled by skipping what does not exist.
+
+Exit status: 0 success (or dry run); 1 a publish job is running, or FDP
+failed (nothing local changed).
 """
 
 from __future__ import annotations
@@ -42,16 +77,33 @@ import subprocess
 import sys
 from typing import List, Sequence
 
+## bash -c program run around every FDP tool: source the FDP environment
+## script (which puts fdp-stat/fdp-rm on PATH), then exec the tool with the
+## remaining arguments.  Exit 125 marks "env script unreadable" distinctly
+## from any status the FDP tools return.
 ENV_WRAPPER = ('[ -r "$ENV_SCRIPT" ] || { echo "cannot read env script '
                '$ENV_SCRIPT" >&2; exit 125; }; '
                'source "$ENV_SCRIPT" >/dev/null; exec "$@"')
 
-#: fdp-rm paths per call.
+## fdp-rm paths per call (bounds the command line and the blast radius of
+## one failed call).
 BATCH = 50
 
 
 def remote(local: str, data_root: str, area: str, dest: str) -> str:
-    """The FDP path of *local*: the same layout under *dest*."""
+    """!@brief The FDP path of *local*: the same layout under *dest*.
+
+    Raw and shifted files are mapped independently: a raw file relative to
+    ``{data_root}/raw`` lands under the raw destination, a shifted file
+    relative to ``{data_root}/shifted`` under the public shifted one.
+
+    @param local      absolute local path of the file.
+    @param data_root  publish data root, e.g. /data/DARPA-spilldata.
+    @param area       "raw" or "shifted": the subtree *local* must be in.
+    @param dest       FDP directory that mirrors that subtree.
+    @return the FDP path, with "/" separators.
+    @throws ValueError  *local* is not under ``data_root/area``.
+    """
     rel = os.path.relpath(local, os.path.join(data_root, area))
     if rel.startswith(".."):
         raise ValueError("{} is not under {}/{}".format(local, data_root, area))
@@ -59,10 +111,17 @@ def remote(local: str, data_root: str, area: str, dest: str) -> str:
 
 
 def publish_jobs() -> List[str]:
-    """PIDs of running darpa-spill-publish processes.
+    """!@brief PIDs of running darpa-spill-publish processes.
 
     Matched on an argument that *is* the program, not ``pgrep -f``, which
     also matches any shell whose command line merely mentions the name.
+    Only argv[0] and argv[1] are examined, which covers both a direct
+    exec and ``python .../darpa-spill-publish``.
+
+    Linux-only: reads /proc.
+
+    @return list of PID strings, excluding this process.
+    @throws FileNotFoundError  /proc does not exist (non-Linux host).
     """
     pids = []
     for pid in os.listdir("/proc"):
@@ -79,6 +138,20 @@ def publish_jobs() -> List[str]:
 
 
 def main(argv: Sequence[str] = None) -> int:
+    """!@brief Withdraw every piece listed in the PIECES file.
+
+    Order is FDP first, then local files, then state rows, so that an FDP
+    failure leaves the local state intact and the run can simply be
+    repeated.
+
+    @param argv  command-line arguments (default: sys.argv[1:]).
+    @return process exit status: 0 success or dry run; 1 publish job
+            running or FDP failure.
+    @throws ValueError        a state row's path is outside its data area.
+    @throws sqlite3.Error     the state database cannot be read or written.
+    @throws OSError           PIECES unreadable, or a local file cannot be
+                              removed for a reason other than absence.
+    """
     parser = argparse.ArgumentParser(
         description="Withdraw published pieces so they can be republished.")
     parser.add_argument("pieces", metavar="PIECES",
@@ -88,6 +161,9 @@ def main(argv: Sequence[str] = None) -> int:
     parser.add_argument("--state-db",
                         default="/data/DARPA-spilldata/publish/state/publish.db")
     parser.add_argument("--data-root", default="/data/DARPA-spilldata")
+    # Raw (true times) is group-private; shifted (dts1-blurred) is public.
+    # The defaults match fdp.raw_dest / fdp.shifted_dest in
+    # deploy/gateway/publish.yaml and must stay in step with it.
     parser.add_argument("--raw-dest", default="/amsc/novaend/raw")
     parser.add_argument("--shifted-dest", default="/amsc/public/novaend/shifted")
     parser.add_argument("--env-script", default="~/anorman-fdp/env.sh")
@@ -96,6 +172,8 @@ def main(argv: Sequence[str] = None) -> int:
     parser.add_argument("--ca-path", default="~/anorman-fdp/certificates")
     args = parser.parse_args(argv)
 
+    # A concurrent publish could re-upload a piece between the fdp-rm and the
+    # state-row delete, or record a piece this run is about to remove.
     running = publish_jobs()
     if running and not args.dry_run:
         print("error: darpa-spill-publish is running (pid {}); try again when "
@@ -106,9 +184,13 @@ def main(argv: Sequence[str] = None) -> int:
     with open(args.pieces) as handle:
         for line in handle:
             fields = line.split()
+            # Lines that are not a recognisable piece (headers, blanks) are
+            # ignored silently.
             if len(fields) >= 3 and fields[1] in ("hourly", "daily"):
                 pieces.append(tuple(fields[:3]))
 
+    # One state row per format (CSV, JSON) of a piece; each row names the
+    # raw file and, once shifted, its blurred counterpart.
     db = sqlite3.connect(args.state_db, timeout=60)
     rows = []
     for stream, kind, label in pieces:
@@ -123,8 +205,11 @@ def main(argv: Sequence[str] = None) -> int:
     remotes: List[str] = []
     locals_: List[str] = []
     for raw_path, shifted_path in rows:
+        # Raw copy -> private raw destination.
         remotes.append(remote(raw_path, args.data_root, "raw", args.raw_dest))
         locals_.append(raw_path)
+        # Shifted copy -> public shifted destination.  NULL when the piece
+        # was never shifted; then there is nothing blurred to withdraw.
         if shifted_path:
             remotes.append(remote(shifted_path, args.data_root, "shifted",
                                   args.shifted_dest))
@@ -139,6 +224,8 @@ def main(argv: Sequence[str] = None) -> int:
             print("  rm " + path)
         return 0
 
+    # The FDP tools take credentials from both the environment and options;
+    # both are set so either convention finds the novaendwrite bearer token.
     env = dict(os.environ, ENV_SCRIPT=os.path.expanduser(args.env_script))
     token = os.path.expanduser(args.token_file)
     env["FDP_TOKEN_DIR"] = os.path.dirname(token)
@@ -146,9 +233,13 @@ def main(argv: Sequence[str] = None) -> int:
     options = ["--token-file", token, "--ca-path", os.path.expanduser(args.ca_path)]
 
     def existing(paths: List[str]):
-        """The subset of *paths* on FDP, or None if fdp-stat failed.
+        """!@brief The subset of *paths* on FDP, or None if fdp-stat failed.
 
         fdp-stat lists only what exists and exits 5 if anything is missing.
+
+        @param paths  FDP paths to query.
+        @return list of paths fdp-stat reports as present (as it spells
+                them), or None on any other exit status or unparsable output.
         """
         stat = subprocess.run(
             ["bash", "-c", ENV_WRAPPER, "bash", "fdp-stat", "--json"] + options + paths,
@@ -160,6 +251,11 @@ def main(argv: Sequence[str] = None) -> int:
         return None if found is None else [entry["path"] for entry in found]
 
     def fail(message: str) -> int:
+        """!@brief Report an FDP failure before anything local was touched.
+
+        @param message  error text.
+        @return 1, the exit status for main to return.
+        """
         print("error: " + message, file=sys.stderr)
         print("nothing local was changed; re-run once FDP is fixed",
               file=sys.stderr)
@@ -177,6 +273,8 @@ def main(argv: Sequence[str] = None) -> int:
             proc = subprocess.run(
                 ["bash", "-c", ENV_WRAPPER, "bash", "fdp-rm", "-f"] + options + present,
                 env=env, capture_output=True, text=True)
+            # Confirm by re-stat rather than trusting fdp-rm's exit status:
+            # local files and state are only removed once FDP is empty.
             left = existing(present)
             if proc.returncode != 0 or left is None or left:
                 return fail("fdp-rm exit {} on batch starting {}; still there: "
@@ -185,11 +283,16 @@ def main(argv: Sequence[str] = None) -> int:
         print("  removed {} file(s); {} of {} checked on FDP".format(
             len(present), i + len(batch), len(remotes)))
 
+    # FDP is clean; now the local raw and shifted files.  Already-missing
+    # files (an earlier interrupted run) are fine.
     for path in locals_:
         try:
             os.remove(path)
         except FileNotFoundError:
             pass
+    # raw_path is the primary key; deleting the row also forgets the shifted
+    # copy's state (shifted_path, shifted_uploaded_at), so the next backfill
+    # dumps, re-shifts with the same monthly token, and re-uploads both.
     with db:
         for raw_path, _ in rows:
             db.execute("DELETE FROM files WHERE raw_path = ?", (raw_path,))

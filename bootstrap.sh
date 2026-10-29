@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+## @file bootstrap.sh
+## @brief Create or update ./venv and install darpa-spillserver into it.
+## @details
+##   Finds a Python >= 3.9 ($PYTHON, else ~/.local/opt/python3.1x, else the
+##   newest python3.x on PATH), creates ./venv if absent, upgrades pip,
+##   installs a sibling nova-time-decoder checkout editable if one exists,
+##   then installs this package editable with extras $EXTRAS.
+##   Usage:   ./bootstrap.sh
+##            PYTHON=python3.12 EXTRAS=test ./bootstrap.sh
+##   Env:     PYTHON  interpreter to use (must be >= 3.9)
+##            EXTRAS  pip extras to install (default "test")
+##   Exit:    0 success; 1 no suitable interpreter or PYTHON invalid;
+##            any other non-zero is a failing pip/venv step (set -e).
 #
 # bootstrap.sh -- set up the DARPA-SpillServer Python environment.
 #
@@ -32,6 +45,11 @@ MIN_MINOR=9
 # --------------------------------------------------------------------------
 # Pick an interpreter: $PYTHON wins, otherwise search newest-first.
 # --------------------------------------------------------------------------
+## @fn version_ok()
+## @brief Test whether an interpreter meets the MIN_MAJOR.MIN_MINOR floor.
+## @param $1 interpreter command or path.
+## @return 0 if it runs and is new enough, 1 otherwise (including when it
+##         cannot be executed).
 version_ok() {
     "$1" -c "import sys; sys.exit(0 if sys.version_info[:2] >= ($MIN_MAJOR, $MIN_MINOR) else 1)" \
         >/dev/null 2>&1
@@ -88,6 +106,7 @@ else
     echo ">> Reusing existing virtual environment in $VENV_DIR"
 fi
 
+# venv layout differs on Windows (Scripts/python.exe, e.g. Git Bash).
 if [ -x "$VENV_DIR/bin/python" ]; then
     VPY="$VENV_DIR/bin/python"
 else
