@@ -8,7 +8,9 @@ built.  Agreement with it is the definition of a correct implementation.
 import csv
 import json
 import os
+import random
 import stat
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,7 @@ from darpa_spillserver.shift import (
     Token,
     TokenError,
     _gauss_draw,
+    as241_decimal,
     as241_float,
     main,
     parse_duration,
@@ -93,6 +96,35 @@ def test_float_alone_would_get_a_tie_wrong():
         xs = as241_float((tie["k"] + 0.5) / 2**53) * tie["sigma"]
         wrong += round(xs) != tie["offset"]
     assert wrong >= 1
+
+
+def _exact_draw(k, sigma, cut):
+    """_gauss_draw evaluated entirely in 80-digit decimal, as the spec does."""
+    with localcontext() as ctx:
+        ctx.prec = 80
+        x = as241_decimal((Decimal(k) + Decimal("0.5")) / 2**53) * sigma
+        if abs(x) > cut:
+            return None
+        return int(x.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+# The last draws below 1: (k + 1/2) / 2**53 is not a double for k >= 2**52,
+# and k = 2**53 - 1 used to round to u = 1.0 and fail in log(0).  A wide cut
+# (32 sigma) reaches the far tail where the error was thousands of ticks.
+@pytest.mark.parametrize("j", [0, 1, 2, 3, 9, 999, 2**30, 2**51 - 1])
+def test_upper_half_draws_are_exact(j):
+    k = 2**53 - 1 - j
+    assert _gauss_draw(k, 10**6, MAX_OFFSET) == _exact_draw(k, 10**6, MAX_OFFSET)
+
+
+def test_draws_are_antisymmetric():
+    rng = random.Random(1)
+    for e in range(2, 52, 3):
+        for _ in range(50):
+            j = rng.randrange(2**e)
+            low, high = (_gauss_draw(k, 10**6, MAX_OFFSET)
+                         for k in (j, 2**53 - 1 - j))
+            assert high == (None if low is None else -low)
 
 
 @pytest.mark.parametrize("name", ["flat", "gauss"])

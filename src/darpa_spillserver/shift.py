@@ -274,8 +274,14 @@ def _gauss_draw(k: int, sigma: int, cut: int) -> Optional[int]:
     result lies within :data:`_GUARD` ticks of a rounding boundary or of the
     cut, in which case the decision is made in exact decimal arithmetic.
     """
-    u = (k + 0.5) / 9007199254740992.0          # exact: k < 2**53
-    xs = as241_float(u) * sigma
+    # u is an odd multiple of 2**-54, which a double holds exactly only for
+    # u < 1/2.  AS241 is odd about 1/2, so the upper half is evaluated as
+    # -x(1 - u) with 1 - u = (2**53 - 1 - k + 1/2) / 2**53, again exact.
+    if k < 4503599627370496:                    # 2**52
+        xs = as241_float((k + 0.5) / 9007199254740992.0) * sigma
+    else:
+        xs = -as241_float((9007199254740991 - k + 0.5)
+                          / 9007199254740992.0) * sigma
     frac = abs(xs) % 1.0
     if abs(frac - 0.5) > _GUARD and abs(abs(xs) - cut) > _GUARD:
         return round(xs) if abs(xs) <= cut else None
