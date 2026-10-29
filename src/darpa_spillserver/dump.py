@@ -1,4 +1,8 @@
-"""Bulk export of a time range to CSV and JSON (``darpa-spill-dump``).
+"""!
+@file src/darpa_spillserver/dump.py
+@brief Bulk export of a time range to CSV and JSON (darpa-spill-dump).
+
+Bulk export of a time range to CSV and JSON (``darpa-spill-dump``).
 
 ``darpa-spill-query`` answers a question; this tool takes a copy.  It walks a
 time range in windows and writes every matching event to a CSV file, a JSON
@@ -32,6 +36,18 @@ long dump runs are not half-included.
 **No partial files.**  Output is written to ``FILE.part`` and renamed into
 place only after the whole range has been read, so an interrupted dump never
 leaves a plausible-looking but short file behind.
+
+**Layout is a contract.**  The files written here are the input of the
+timestamp blur, ``darpa-spill-shift`` (:mod:`darpa_spillserver.shift`,
+transform dts1).  The shift tool rewrites them in place of layout --- same
+comment lines, same header, same column order, same quoting, ``\\n`` line
+endings, one JSON event per line --- so that ``invert(apply(f))`` is
+byte-identical to ``f``.  It moves ``nova_time``, ``pps_offset`` and
+``delta`` and recomputes every other time column from ``nova_time`` with
+:func:`darpa_spillserver.novatime.convert`, exactly as
+:func:`~darpa_spillserver.formats.event_row` produced them here.  Any change
+to how :class:`CsvSink` or :class:`JsonSink` lay out text must be matched in
+``shift.py`` (``_shift_csv``, ``_dump_layout``, ``_shift_json_stream``).
 """
 
 from __future__ import annotations
@@ -65,33 +81,55 @@ __all__ = ["main", "dump_range", "split_range", "segment_path",
            "label_fields", "SPLIT_FIELDS", "MONTH_ABBREVIATIONS", "CsvSink",
            "JsonSink", "LocalReader", "RemoteReader", "DumpError"]
 
-#: Seconds of archive time per request.  The near detector archive holds
-#: roughly 25k events per hour across three TDUs, so an hour is one request.
+## Seconds of archive time per request.  The near detector archive holds
+## roughly 25k events per hour across three TDUs, so an hour is one request.
 DEFAULT_WINDOW = 3600.0
 
-#: Rows per request.  A window holding more is halved and re-read.
+## Rows per request.  A window holding more is halved and re-read.
 DEFAULT_PAGE_SIZE = 50000
 
-#: Environment variables read by this tool alone.  They sit under the
-#: server's ``DARPA_SPILL_`` prefix but name no configuration section, so the
-#: server's loader ignores them.
+## Environment variables read by this tool alone.  They sit under the
+## server's ``DARPA_SPILL_`` prefix but name no configuration section, so the
+## server's loader ignores them.
+## Server URL; equivalent to --server.
 ENV_SERVER = ENV_PREFIX + "DUMP_SERVER"
+## Bearer ID token; equivalent to --token.
 ENV_TOKEN = ENV_PREFIX + "DUMP_TOKEN"
+## CA bundle file; equivalent to --ca-bundle.
 ENV_CA_BUNDLE = ENV_PREFIX + "DUMP_CA_BUNDLE"
+## Truthy (1/true/yes/on) to skip TLS verification; equivalent to --insecure.
 ENV_INSECURE = ENV_PREFIX + "DUMP_INSECURE"
 
 
 class DumpError(RuntimeError):
-    """A failure that ends the dump; the message is meant for the operator."""
+    """!
+    @brief A failure that ends the dump; the message is meant for the operator.
+    """
 
 
 # ----------------------------------------------------------------- readers
 
 
 class LocalReader:
-    """Read windows straight from a SQLite archive."""
+    """!
+    @brief Read windows straight from a SQLite archive.
+
+    @details Rows are rendered with formats.event_row(), the same function
+    the server's /api/events uses, so local and remote dumps are identical.
+    """
 
     def __init__(self, store: SpillStore, spill_types, signal_codes, sources):
+        """!
+        @brief Bind a store and a pre-validated selection.
+
+        @param store Open archive; closed by close().
+        @param spill_types SpillType values to match; empty means any.
+        @param signal_codes Low-byte codes to match (already including
+                            UNKNOWN_SIGNAL where wanted); empty means any.
+        @param sources TDU names to match; empty means all.
+        """
+        # Empty lists become None: SpillStore.query treats a falsy filter as
+        # "no filter", and None states that intent explicitly.
         self.store = store
         self.spill_types = spill_types or None
         self.signal_codes = signal_codes or None
@@ -99,6 +137,14 @@ class LocalReader:
         self.description = "sqlite:" + str(store.path)
 
     def extent(self) -> Tuple[Optional[int], Optional[int]]:
+        """!
+        @brief NOvA time of the earliest and latest stored event.
+
+        @details Restricted to the selected sources but not to the
+        selected types; it is only used to clamp the walk.
+        @return (first, last) in NOvA ticks; either is None for an empty
+                archive.
+        """
         first = self.store.earliest(self.sources)
         last = self.store.latest(None, self.sources)
         return (first.nova_time if first else None,
@@ -106,6 +152,17 @@ class LocalReader:
 
     def fetch(self, start_nova: int, end_nova: int,
               limit: int) -> Tuple[List[Dict[str, Any]], int]:
+        """!
+        @brief Read one window, ascending by time.
+
+        @param start_nova Inclusive lower bound, NOvA ticks.
+        @param end_nova Exclusive upper bound, NOvA ticks.
+        @param limit Maximum rows to return.
+        @return (rows as event_row dicts, total matching rows in the window).
+                total > len(rows) tells dump_range to narrow the window.
+        """
+        # Always offset 0: dump_range never pages by offset (see the module
+        # docstring); it narrows the window instead.
         page = self.store.query(
             start_nova=start_nova, end_nova=end_nova,
             spill_types=self.spill_types, signal_codes=self.signal_codes,
@@ -114,16 +171,41 @@ class LocalReader:
         return [event_row(e) for e in page.events], page.total
 
     def close(self) -> None:
+        """!
+        @brief Close the calling thread's archive connection.
+        """
         self.store.close()
 
 
 class RemoteReader:
-    """Read windows from a running server's ``/api/events``."""
+    """!
+    @brief Read windows from a running server's ``/api/events``.
+
+    @details The server returns rows already in formats.event_row() shape,
+    so they go to the sinks unchanged.
+    """
 
     def __init__(self, base_url: str, signals: Sequence[str],
                  types: Sequence[str], sources: Sequence[str],
                  token: Optional[str] = None, verify: Any = True,
                  timeout: float = 120.0, retries: int = 3, client=None):
+        """!
+        @brief Configure the HTTP client and the selection query parameters.
+
+        @param base_url Server root URL (a trailing slash is ignored).
+        @param signals Signal spellings, passed through as ``signal=``.
+        @param types Spill type spellings, passed through as ``type=``.
+        @param sources TDU names, passed through as ``source=``.
+        @param token Bearer ID token for an SSO-enabled server, or None.
+        @param verify httpx verify argument: True, False or a CA bundle path.
+        @param timeout Per-request timeout in seconds.
+        @param retries Attempts per request (at least 1).
+        @param client Pre-built httpx-compatible client (tests); None builds
+                      one.
+        @throws DumpError if httpx is not installed.
+        """
+        # The selection is not validated locally: the server is the authority
+        # on which spellings it accepts, and reports errors as 4xx.
         if client is None:
             try:
                 import httpx
@@ -146,6 +228,18 @@ class RemoteReader:
         self._status: Optional[Dict[str, Any]] = None
 
     def _get(self, path: str, params=None) -> Dict[str, Any]:
+        """!
+        @brief GET a JSON endpoint with retry and exponential back-off.
+
+        @details Transport errors and 5xx are retried (1 s, 2 s, 4 s, ...);
+        a TLS verification failure and any 4xx are not, since repeating
+        them cannot help.
+        @param path Path below the base URL, e.g. ``/api/events``.
+        @param params Query parameters (list of pairs, so keys may repeat).
+        @return The decoded JSON body.
+        @throws DumpError on an unreachable server, a 4xx/5xx after
+                retries, or a body that is not JSON.
+        """
         import httpx
         url = self.base + path
         delay = 1.0
@@ -173,6 +267,8 @@ class RemoteReader:
                     detail = response.json().get("detail", response.text)
                 except ValueError:
                     detail = response.text
+                # FastAPI error bodies may carry a structured detail with
+                # "error" and "hint" keys; flatten it to one line.
                 if isinstance(detail, dict):
                     detail = "; ".join(str(detail[k]) for k in ("error", "hint")
                                        if detail.get(k)) or str(detail)
@@ -189,18 +285,38 @@ class RemoteReader:
     # limit and the extent come from cheap requests.
 
     def status(self) -> Dict[str, Any]:
+        """!
+        @brief The server's /api/status body, fetched once and cached.
+
+        @return Decoded status JSON.
+        @throws DumpError if the request fails.
+        """
         if self._status is None:
             self._status = self._get("/api/status")
         return self._status
 
     def server_timezone(self) -> str:
+        """!
+        @brief The server's configured query timezone.
+
+        @details Used only when --timezone is not given, so a remote dump
+        interprets bare times the way the server's own query page does.
+        @return IANA zone name, or ``UTC`` if the server does not say.
+        """
         return self.status().get("query_defaults", {}).get("timezone", "UTC")
 
     def max_limit(self, wanted: int = DEFAULT_PAGE_SIZE) -> Optional[int]:
-        """The server's ``query.max_limit`` if *wanted* exceeds it, else None.
+        """!
+        @brief The server's ``query.max_limit`` if *wanted* exceeds it, else None.
 
         Probed with a one-tick query, which the server refuses with the
         ceiling in its message when the limit is too high.
+
+        @details If /api/status has already been fetched its max_limit is
+        returned whether or not *wanted* exceeds it; the caller compares.
+        @param wanted Page size the caller would like to use.
+        @return The server ceiling, or None if *wanted* is acceptable.
+        @throws DumpError if the probe fails for any other reason.
         """
         if self._status is not None:
             return self._status.get("query_defaults", {}).get("max_limit")
@@ -209,6 +325,7 @@ class RemoteReader:
                                       ("format", "json"),
                                       ("limit", str(wanted))])
         except DumpError as exc:
+            # Coupled to the wording of the API's limit error message.
             match = re.search(r"server maximum of (\d+)", str(exc))
             if match:
                 return int(match.group(1))
@@ -216,6 +333,13 @@ class RemoteReader:
         return None
 
     def extent(self) -> Tuple[Optional[int], Optional[int]]:
+        """!
+        @brief Latest event time on the server; the earliest is not known.
+
+        @return (None, last) in NOvA ticks, or (None, None) if the server
+                has no events (/api/latest answers 404).
+        @throws DumpError for any other failure.
+        """
         # Only the newest event is cheap to ask for (/api/latest).  The whole
         # archive's, not the selected sources'; clamping only needs a bound.
         # Without the earliest the walk starts at --start, which costs a few
@@ -230,6 +354,17 @@ class RemoteReader:
 
     def fetch(self, start_nova: int, end_nova: int,
               limit: int) -> Tuple[List[Dict[str, Any]], int]:
+        """!
+        @brief Read one window from /api/events, ascending by time.
+
+        @param start_nova Inclusive lower bound, NOvA ticks.
+        @param end_nova Exclusive upper bound, NOvA ticks.
+        @param limit Maximum rows to return.
+        @return (event rows, meta.total of the window).
+        @throws DumpError if the request fails.
+        """
+        # Bounds are sent as tagged tick counts so the server's parser
+        # cannot reinterpret them (no timezone, no bare-number heuristic).
         params = [
             ("start", "nova:{}".format(start_nova)),
             ("end", "nova:{}".format(end_nova)),
@@ -241,6 +376,9 @@ class RemoteReader:
         return body.get("events", []), int(body["meta"]["total"])
 
     def close(self) -> None:
+        """!
+        @brief Close the HTTP client.
+        """
         self.client.close()
 
 
@@ -248,18 +386,37 @@ class RemoteReader:
 
 
 class _AtomicFile:
-    """A text file written to ``PATH.part`` and renamed on success."""
+    """!
+    @brief A text file written to ``PATH.part`` and renamed on success.
+
+    @details ``-`` means stdout, written directly with nothing to rename.
+    """
 
     def __init__(self, path: str):
+        """!
+        @brief Open ``PATH.part`` for writing (or bind stdout for ``-``).
+
+        @param path Final output path, or ``-``.
+        @throws OSError if the part file cannot be created.
+        """
         self.path = path
         if path == "-":
             self.stream = sys.stdout
             self.part = None
         else:
             self.part = path + ".part"
+            # newline="" disables newline translation, so the "\n" the sinks
+            # write is the byte on disk on every platform (Windows included).
+            # darpa-spill-shift relies on that for byte-identical inversion.
             self.stream = open(self.part, "w", newline="", encoding="utf-8")
 
     def commit(self) -> None:
+        """!
+        @brief Close the part file and atomically rename it into place.
+
+        @details os.replace is atomic on POSIX and Windows for a rename on
+        the same filesystem, which ``PATH.part`` -> ``PATH`` always is.
+        """
         if self.part is None:
             self.stream.flush()
             return
@@ -267,6 +424,9 @@ class _AtomicFile:
         os.replace(self.part, self.path)
 
     def abort(self) -> None:
+        """!
+        @brief Close and delete the part file; the final path is untouched.
+        """
         if self.part is None:
             return
         self.stream.close()
@@ -277,10 +437,26 @@ class _AtomicFile:
 
 
 class CsvSink:
-    """CSV in the same layout as ``/api/events?format=csv``."""
+    """!
+    @brief CSV in the same layout as ``/api/events?format=csv``.
+
+    @details Layout: ``# <comment>`` lines, the header row, then one row per
+    event, all ``\\n``-terminated, csv.QUOTE_MINIMAL.  darpa-spill-shift
+    copies the comment and header lines verbatim (appending or removing its
+    own ``# darpa-spill-shift:`` marker) and re-writes each row with the
+    same csv dialect, which is what makes its inversion byte-identical.
+    """
 
     def __init__(self, path: str, columns: Sequence[str],
                  comments: Sequence[str] = (), header: bool = True):
+        """!
+        @brief Open the file and write the comment block and header.
+
+        @param path Output path, or ``-`` for stdout.
+        @param columns Column names, in output order.
+        @param comments Provenance lines, written as ``# <line>``.
+        @param header Write the column-name row.
+        """
         self.file = _AtomicFile(path)
         for line in comments:
             self.file.stream.write("# {}\n".format(line))
@@ -290,26 +466,71 @@ class CsvSink:
             self.writer.writeheader()
 
     def write(self, rows: Sequence[Dict[str, Any]]) -> None:
+        """!
+        @brief Append rows; keys outside the selected columns are ignored.
+
+        @param rows event_row-shaped dicts.
+        """
+        # None (e.g. an absent delta) is written as an empty field.
         self.writer.writerows(rows)
 
     def close(self, summary: Dict[str, Any]) -> None:
+        """!
+        @brief Commit the file.
+
+        @param summary Ignored: CSV has no trailer, so the row count lives
+                       only in the JSON summary and the console report.
+        """
         self.file.commit()
 
     def abort(self) -> None:
+        """!
+        @brief Discard the partial file.
+        """
         self.file.abort()
 
 
 class JsonSink:
-    """A JSON document ``{"meta": ..., "events": [...], "summary": ...}``.
+    """!
+    @brief A JSON document ``{"meta": ..., "events": [...], "summary": ...}``.
 
     ``meta`` and ``events`` match the ``/api/events`` envelope so the two are
     interchangeable to a reader.  ``summary`` is written last because the
     row count is not known until the walk ends.  Each event is on its own
     line, which keeps a multi-gigabyte file greppable.
+
+    @details Exact layout with the default ``indent=None``::
+
+        {
+        "meta": {...},
+        "events": [
+        {...},
+        {...}
+        ],
+        "summary": {...}
+        }
+
+    (``"events": [],`` on one line when empty).  darpa-spill-shift
+    recognises this layout from its first three lines (``_dump_layout``) and
+    streams it line by line, re-serialising meta and each event with
+    json.dumps defaults, so invert(apply(f)) reproduces the bytes.  With
+    --indent the layout no longer matches; shift then parses the whole
+    document and writes it back compactly, so byte identity with the
+    original indented file is not preserved.
     """
 
     def __init__(self, path: str, columns: Sequence[str],
                  meta: Dict[str, Any], indent: Optional[int] = None):
+        """!
+        @brief Open the file and write the opening brace, meta and the
+               start of the events array.
+
+        @param path Output path, or ``-`` for stdout.
+        @param columns Event keys to keep, in output order.
+        @param meta Envelope metadata; non-JSON values are rendered with str().
+        @param indent JSON indent for meta, events and summary; None keeps
+                      each on one line.
+        """
         self.file = _AtomicFile(path)
         self.columns = list(columns)
         self.indent = indent
@@ -320,14 +541,29 @@ class JsonSink:
         out.write(',\n"events": [')
 
     def write(self, rows: Sequence[Dict[str, Any]]) -> None:
+        """!
+        @brief Append rows, one JSON object per line, projected to columns.
+
+        @param rows event_row-shaped dicts.
+        """
         out = self.file.stream
         for row in rows:
+            # Built in column order; json.dumps keeps insertion order, which
+            # fixes the key order in the file.
             record = {name: row.get(name) for name in self.columns}
+            # The separator precedes the row, so the last event line carries
+            # no trailing comma and no look-ahead is needed.
             out.write("\n" if self.first else ",\n")
             self.first = False
             out.write(json.dumps(record, indent=self.indent, default=str))
 
     def close(self, summary: Dict[str, Any]) -> None:
+        """!
+        @brief Close the events array, write the summary and commit.
+
+        @param summary Counts and timing for this file (returned, expected,
+                       complete, requests, seconds).
+        """
         out = self.file.stream
         out.write("\n],\n" if not self.first else "],\n")
         out.write('"summary": ')
@@ -336,6 +572,9 @@ class JsonSink:
         self.file.commit()
 
     def abort(self) -> None:
+        """!
+        @brief Discard the partial file.
+        """
         self.file.abort()
 
 
@@ -346,17 +585,32 @@ def dump_range(reader, sinks, start_nova: int, end_nova: int,
                window_seconds: float = DEFAULT_WINDOW,
                page_size: int = DEFAULT_PAGE_SIZE,
                progress=None) -> Tuple[int, int]:
-    """Walk ``[start_nova, end_nova)`` and write every row to every sink.
+    """!
+    @brief Walk ``[start_nova, end_nova)`` and write every row to every sink.
 
     Returns ``(rows, requests)``.  Raises :class:`DumpError` if a window of
     one NOvA tick still exceeds *page_size*, which would mean more events
     share a single timestamp than a request may return.
+
+    @param reader LocalReader or RemoteReader.
+    @param sinks Sinks to receive every row, in time order.
+    @param start_nova Inclusive start, NOvA ticks.
+    @param end_nova Exclusive end, NOvA ticks.
+    @param window_seconds Initial and maximum window width, seconds.
+    @param page_size Maximum rows per request.
+    @param progress Optional callback(cursor, rows_written, requests).
+    @return (rows written, requests made).
+    @throws DumpError if one tick holds more than page_size events, or the
+            reader fails.
     """
+    # Window width in ticks (64e6 per second); at least one tick.
     full_window = max(1, int(window_seconds * TICKS_PER_SECOND))
     window = full_window
     cursor = start_nova
     rows_written = requests = 0
 
+    # Invariant: every event with t < cursor has been written exactly once,
+    # and windows are half-open, so adjacent windows never share an event.
     while cursor < end_nova:
         upper = min(cursor + window, end_nova)
         rows, total = reader.fetch(cursor, upper, page_size)
@@ -378,6 +632,8 @@ def dump_range(reader, sinks, start_nova: int, end_nova: int,
             progress(cursor, rows_written, requests)
         # Grow back after a dense stretch so a burst does not leave the rest
         # of a long range crawling in tiny windows.
+        # Hysteresis: grow only when the window was under a quarter full,
+        # so a density near page_size does not oscillate halve/double.
         if window < full_window and total < page_size // 4:
             window = min(full_window, window * 2)
 
@@ -389,7 +645,8 @@ def dump_range(reader, sinks, start_nova: int, end_nova: int,
 
 def split_range(start_nova: int, end_nova: int, unit: Optional[str],
                 zone) -> List[Tuple[int, int, Optional[str]]]:
-    """Cut ``[start_nova, end_nova)`` at calendar boundaries in *zone*.
+    """!
+    @brief Cut ``[start_nova, end_nova)`` at calendar boundaries in *zone*.
 
     Returns ``(start, end, label)`` triples that tile the range exactly; the
     first and last are partial when the range does not begin or end on a
@@ -401,12 +658,23 @@ def split_range(start_nova: int, end_nova: int, unit: Optional[str],
     repeated autumn hour gets its own piece.  Hour labels carry the UTC
     offset outside UTC for exactly that reason: ``2026-11-01T01-0500`` and
     ``2026-11-01T01-0600`` are different hours.
+
+    @param start_nova Inclusive start, NOvA ticks.
+    @param end_nova Exclusive end, NOvA ticks.
+    @param unit ``"day"``, ``"hour"`` or None.
+    @param zone tzinfo whose calendar defines the boundaries.
+    @return List of (start, end, label) with contiguous, non-empty pieces.
+    @throws ValueError for an unknown unit.
     """
     if unit is None or end_nova <= start_nova:
         return [(start_nova, end_nova, None)]
 
+    # A zone is treated as UTC (no offset in hour labels) if it has zero
+    # offset in both January and July, i.e. no DST and no standard offset.
     utc = zone.utcoffset(datetime(2000, 1, 1)) == timedelta(0) and \
         zone.utcoffset(datetime(2000, 7, 1)) == timedelta(0)
+    # Microsecond resolution is enough here: only the calendar floor of the
+    # start is needed, and the first piece still begins at start_nova exactly.
     local = nova_to_datetime(start_nova).astimezone(zone)
     if unit == "day":
         floor = datetime.combine(local.date(), dtime(0), tzinfo=zone)
@@ -430,6 +698,8 @@ def split_range(start_nova: int, end_nova: int, unit: Optional[str],
             # Step in UTC so the repeated autumn hour is not skipped.
             following = (boundary.astimezone(timezone.utc)
                          + timedelta(hours=1)).astimezone(zone)
+        # Boundaries go back through NOvA ticks (leap seconds included), so
+        # pieces tile the tick range exactly with no gap or overlap.
         upper = min(datetime_to_nova(following), end_nova)
         if upper > lower:
             pieces.append((lower, upper, label))
@@ -438,26 +708,33 @@ def split_range(start_nova: int, end_nova: int, unit: Optional[str],
     return pieces
 
 
-#: Placeholders a split path may contain, in the order they are documented.
+## Placeholders a split path may contain, in the order they are documented.
 SPLIT_FIELDS = ("start", "date", "year", "month", "mon", "day", "hour",
                 "offset")
 
-#: ``{mon}`` values, fixed rather than ``strftime("%b")`` so a path does not
-#: depend on the locale the dump runs under.
+## ``{mon}`` values, fixed rather than ``strftime("%b")`` so a path does not
+## depend on the locale the dump runs under.
 MONTH_ABBREVIATIONS = ("jan", "feb", "mar", "apr", "may", "jun",
                        "jul", "aug", "sep", "oct", "nov", "dec")
 
+## A piece label as split_range() makes it: ``YYYY-MM-DD`` for a day,
+## ``YYYY-MM-DDTHH`` for an hour, plus ``+HHMM``/``-HHMM`` outside UTC.
 _LABEL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})([+-]\d{4})?)?$")
 
 
 def label_fields(label: str) -> Dict[str, str]:
-    """The path placeholders for one piece, parsed from its *label*.
+    """!
+    @brief The path placeholders for one piece, parsed from its *label*.
 
     ``{mon}`` is the lowercase English month abbreviation (``oct``) from
     :data:`MONTH_ABBREVIATIONS`, whatever the locale.  ``{hour}`` is ``00``
     for a day piece, which starts at local midnight, and ``{offset}`` is
     empty unless the label carries one (hour pieces outside UTC), so
     ``{hour}`` alone repeats on the autumn changeover.
+
+    @param label Piece label from split_range().
+    @return Mapping of every SPLIT_FIELDS name to its text.
+    @throws ValueError if *label* is not a piece label.
     """
     match = _LABEL.match(label)
     if match is None:
@@ -472,7 +749,8 @@ def label_fields(label: str) -> Dict[str, str]:
 
 
 def segment_path(template: str, label: Optional[str]) -> str:
-    """The output path for one piece of a split dump.
+    """!
+    @brief The output path for one piece of a split dump.
 
     Each ``{field}`` of :data:`SPLIT_FIELDS` in *template* is replaced from
     the piece's label, which allows a directory per day
@@ -481,6 +759,11 @@ def segment_path(template: str, label: Optional[str]) -> str:
     ``raw/{mon}/{year}-{mon}-{day}/nd-all-{start}.csv``).  A template with
     none of them gets the label before the extension: ``week.csv`` becomes
     ``week_2026-10-12.csv``.
+
+    @param template Output path given on the command line.
+    @param label Piece label, or None for an unsplit dump.
+    @return The path for this piece.
+    @throws ValueError if *label* is not a piece label.
     """
     if label is None:
         return template
@@ -494,7 +777,12 @@ def segment_path(template: str, label: Optional[str]) -> str:
 
 
 def _path_fields(template: Optional[str]) -> List[str]:
-    """The :data:`SPLIT_FIELDS` placeholders used in *template*."""
+    """!
+    @brief The :data:`SPLIT_FIELDS` placeholders used in *template*.
+
+    @param template Output path, or None.
+    @return Placeholder names present, in SPLIT_FIELDS order.
+    """
     return [name for name in SPLIT_FIELDS
             if template and "{" + name + "}" in template]
 
@@ -503,6 +791,14 @@ def _path_fields(template: Optional[str]) -> List[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """!
+    @brief Build the darpa-spill-dump argument parser.
+
+    @details Options override the environment variables listed in the
+    epilog, which override the YAML configuration (archive path, query
+    timezone).
+    @return The parser.
+    """
     parser = argparse.ArgumentParser(
         prog="darpa-spill-dump",
         description="Dump a time range of NOvA accelerator events to CSV "
@@ -538,6 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="bearer ID token for a server with SSO enabled")
     source.add_argument("--ca-bundle", metavar="FILE",
                         help="CA certificate(s) to verify the server with")
+    # default=None (not False) so main can tell "not given" from "given" and
+    # fall back to DARPA_SPILL_DUMP_INSECURE only in the first case.
     source.add_argument("-k", "--insecure", action="store_true", default=None,
                         help="do not verify the server's TLS certificate")
 
@@ -606,6 +904,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _split(values: Sequence[str]) -> List[str]:
+    """!
+    @brief Flatten repeatable, comma-separated option values.
+
+    @param values Raw option values, e.g. ["a,b", "c"].
+    @return Non-empty stripped names, de-duplicated, first occurrence order.
+    """
     names: List[str] = []
     for text in values:
         names.extend(t.strip() for t in text.split(",") if t.strip())
@@ -613,15 +917,37 @@ def _split(values: Sequence[str]) -> List[str]:
 
 
 def _truthy(text: Optional[str]) -> bool:
+    """!
+    @brief Interpret an environment value as a boolean.
+
+    @param text Value, or None.
+    @return True for 1/true/yes/on (case-insensitive), else False.
+    """
     return (text or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _err(message: str) -> None:
+    """!
+    @brief Print an error in the tool's standard form to stderr.
+
+    @param message Error text.
+    """
     print("darpa-spill-dump: error: {}".format(message), file=sys.stderr)
 
 
 def _open_reader(args, environ) -> Tuple[Any, str]:
-    """Build the reader named by *args*; return it with the default zone."""
+    """!
+    @brief Build the reader named by *args*; return it with the default zone.
+
+    @details Source precedence: --server / DARPA_SPILL_DUMP_SERVER selects a
+    remote reader; otherwise --database, else the archive named by the
+    configuration (-c FILE, DARPA_SPILL_CONFIG, or the search path).
+    @param args Parsed command line.
+    @param environ Environment mapping.
+    @return (reader, default timezone name).
+    @throws DumpError on a bad selection, missing archive, unknown source,
+            configuration error, or (remote) a failed status request.
+    """
     server = args.server or environ.get(ENV_SERVER)
     if server:
         insecure = args.insecure if args.insecure is not None \
@@ -651,6 +977,8 @@ def _open_reader(args, environ) -> Tuple[Any, str]:
         # in darpa-spill-query and the API.
         signal_codes.append(UNKNOWN_SIGNAL)
 
+    # legacy_source only matters if this open migrates a version 1 archive;
+    # it mirrors what the server would tag the rows with.
     database = args.database
     legacy_source = None
     zone = "UTC"
@@ -664,6 +992,8 @@ def _open_reader(args, environ) -> Tuple[Any, str]:
         database = config.storage.path
         zone = config.query.timezone
         legacy_source = config.tdu.resolved_sources()[0].name
+    # Checked explicitly because SpillStore would otherwise create an empty
+    # archive at a mistyped path.
     if not os.path.exists(database):
         raise DumpError("no archive at {}".format(database))
     try:
@@ -687,10 +1017,28 @@ def _open_reader(args, environ) -> Tuple[Any, str]:
 
 def _progress_printer(start_nova: int, end_nova: int, expected: int,
                       stream) -> Any:
+    """!
+    @brief Make a rate-limited progress callback for dump_range.
+
+    @param start_nova Start of the walked range, NOvA ticks.
+    @param end_nova End of the walked range, NOvA ticks.
+    @param expected Row count from the snapshot, for display.
+    @param stream Where to print (stderr).
+    @return report(cursor, rows, requests, final=False); prints at most
+            every 2 s unless final, and never repeats an identical line.
+    """
     started = time.monotonic()
     state: Dict[str, Any] = {"last": 0.0, "shown": None}
 
     def report(cursor: int, rows: int, requests: int, final: bool = False):
+        """!
+        @brief Print one progress line.
+
+        @param cursor Current walk position, NOvA ticks.
+        @param rows Rows written so far.
+        @param requests Requests made so far.
+        @param final Print regardless of the 2 s rate limit.
+        """
         now = time.monotonic()
         if not final and now - state["last"] < 2.0:
             return
@@ -710,6 +1058,16 @@ def _progress_printer(start_nova: int, end_nova: int, expected: int,
 
 def main(argv: Optional[Sequence[str]] = None,
          environ: Optional[Dict[str, str]] = None) -> int:
+    """!
+    @brief darpa-spill-dump entry point.
+
+    @param argv Arguments without the program name; None means sys.argv[1:].
+    @param environ Environment; None means os.environ (copied).
+    @return Exit status: 0 success; 1 a failure while walking (any reader)
+            or while opening a remote reader; 2 usage, time-expression or
+            local reader setup error; 3 written count differs from the
+            snapshot count; 130 interrupted; 141 broken pipe on stdout.
+    """
     environ = dict(os.environ if environ is None else environ)
     args = build_parser().parse_args(argv)
 
@@ -754,6 +1112,8 @@ def main(argv: Optional[Sequence[str]] = None,
         reader, default_zone = _open_reader(args, environ)
     except DumpError as exc:
         _err(str(exc))
+        # A remote failure is operational (1); a local one is almost always
+        # a wrong path or selection, i.e. usage (2).
         return 1 if (args.server or environ.get(ENV_SERVER)) else 2
 
     sinks: List[Any] = []
@@ -776,10 +1136,14 @@ def main(argv: Optional[Sequence[str]] = None,
         # Clamp the walk to what the archive held when the dump began: it
         # skips the empty stretch before the first event and fixes the
         # snapshot, so rows arriving during a long dump are not half-included.
+        # last + 1 because the range is half-open and must include the last
+        # event.  An empty archive (last None) gives an empty snapshot.
         snap_start = req_start if first is None else max(req_start, first)
         snap_end = req_start if last is None else min(req_end, last + 1)
         snap_end = max(snap_end, snap_start)
 
+        # Pieces are cut on the requested range, not the snapshot, so labels
+        # and the range recorded in each file are whole calendar units.
         pieces = split_range(req_start, req_end, args.split, zone)
         if args.split:
             # Pieces wholly after the snapshot have not happened yet.
@@ -800,6 +1164,7 @@ def main(argv: Optional[Sequence[str]] = None,
                         return 2
                     seen[path] = label
 
+        # A limit-1 fetch is a cheap COUNT: only the window total is used.
         _, expected_total = (reader.fetch(snap_start, snap_end, 1)
                              if snap_end > snap_start else (None, 0))
         if not quiet:
@@ -837,6 +1202,8 @@ def main(argv: Optional[Sequence[str]] = None,
             if args.skip_empty and expected == 0:
                 continue
 
+            # One timestamp shared by the CSV comment and the JSON meta, so
+            # the two files of a piece are recognisably the same run.
             generated = datetime.now(timezone.utc).isoformat()
             meta = dict(base_meta, generated=generated, range={
                 "start": convert(seg_start).as_dict(),
@@ -849,6 +1216,8 @@ def main(argv: Optional[Sequence[str]] = None,
             paths = []
             if args.csv:
                 path = segment_path(args.csv, label)
+                # The shift tool keeps these lines verbatim and appends its
+                # own "# darpa-spill-shift: ..." marker after them.
                 comments = [] if args.no_comments else [
                     "darpa-spill-dump {} generated {}".format(
                         __version__, generated),
@@ -869,7 +1238,18 @@ def main(argv: Optional[Sequence[str]] = None,
                 sinks.append(JsonSink(path, columns, meta, indent=args.indent))
                 paths.append(path)
 
+            # Default arguments freeze the totals from earlier pieces at
+            # definition time, so progress shows the running grand total.
             def progress(cursor, seg_rows, seg_requests, _r=rows, _q=requests):
+                """!
+                @brief Forward per-piece progress as run-wide totals.
+
+                @param cursor Walk position, NOvA ticks.
+                @param seg_rows Rows written in this piece.
+                @param seg_requests Requests made in this piece.
+                @param _r Rows written by earlier pieces (bound at definition).
+                @param _q Requests made by earlier pieces (bound at definition).
+                """
                 printer(cursor, _r + seg_rows, _q + seg_requests)
 
             seg_started = time.monotonic()
@@ -940,19 +1320,32 @@ def main(argv: Optional[Sequence[str]] = None,
 
 
 def _quiet_stdout() -> None:
-    """Point stdout at /dev/null so the interpreter's final flush of a
+    """!
+    @brief Point stdout at /dev/null so the interpreter's final flush of a
     closed pipe does not print a second BrokenPipeError on exit."""
     devnull = os.open(os.devnull, os.O_WRONLY)
     os.dup2(devnull, sys.stdout.fileno())
 
 
 def _make_parent(path: str) -> None:
+    """!
+    @brief Create the parent directory of an output path if needed.
+
+    @param path Output path; ``-`` and bare file names are left alone.
+    """
     parent = os.path.dirname(path)
     if path != "-" and parent:
         os.makedirs(parent, exist_ok=True)
 
 
 def _report_kept(written: Sequence[str]) -> None:
+    """!
+    @brief After a failure, list the split pieces that were completed.
+
+    @details Completed pieces were committed before the failure and are
+    whole files; only the piece in progress was discarded.
+    @param written Paths committed so far.
+    """
     if written:
         print("darpa-spill-dump: {} complete file(s) kept: {}".format(
             len(written), ", ".join(written)), file=sys.stderr)

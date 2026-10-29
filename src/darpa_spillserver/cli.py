@@ -1,4 +1,8 @@
-"""Command-line entry point for the server (``darpa-spill-server``).
+"""!
+@file src/darpa_spillserver/cli.py
+@brief Command-line entry point for the server (darpa-spill-server).
+
+Command-line entry point for the server (``darpa-spill-server``).
 
 Parses the command line, merges it with the YAML file and the environment (see
 :mod:`darpa_spillserver.config`), and hands the resulting application to
@@ -27,6 +31,16 @@ log = logging.getLogger(__name__)
 
 
 def _print_version() -> None:
+    """!
+    @brief Print the server version and the versions of its key runtime deps.
+
+    @details Reports Python, nova-time-decoder (the NOvA time arithmetic used
+    by novatime) and fastapi. A missing optional package is reported as
+    "NOT INSTALLED" instead of raising, so --version works in a partially
+    bootstrapped environment.
+    """
+    # Imports are local so that --version costs nothing on the normal path
+    # and survives a broken install of any one dependency.
     import platform
     print("darpa-spill-server {}".format(__version__))
     print("Python {}".format(platform.python_version()))
@@ -43,7 +57,14 @@ def _print_version() -> None:
 
 
 def run(config: Config) -> int:
-    """Start the HTTP server and block until it stops."""
+    """!
+    @brief Start the HTTP server and block until it stops.
+
+    @param config Fully merged and validated configuration.
+    @return Process exit status: 0 on clean shutdown, 1 if uvicorn is not
+            installed, 2 if a TLS file is unreadable or the application
+            factory rejects the configuration or archive.
+    """
     try:
         import uvicorn
     except ImportError:
@@ -60,11 +81,15 @@ def run(config: Config) -> int:
     # Check the TLS files here rather than in Config.validate(), so that
     # --print-config still works for someone who cannot read the private key.
     # uvicorn would otherwise fail on them with a bare traceback.
+    # Only the TLS keys that pass the readability check are forwarded to
+    # uvicorn; an empty dict means plain HTTP.
     ssl_options = {}
     if config.server.ssl_certfile:
         for key in ("ssl_certfile", "ssl_keyfile"):
             path = Path(getattr(config.server, key)).expanduser()
             try:
+                # Open-and-close is the reliable readability test (os.access
+                # ignores ACLs and effective-uid subtleties).
                 path.open("rb").close()
             except OSError as exc:
                 print("error: server.{}: cannot read {}: {}".format(
@@ -91,6 +116,8 @@ def run(config: Config) -> int:
             "query the archive. Set auth.enabled to require Fermilab SSO."
         )
 
+    # Access logging is tied to DEBUG: per-request lines are noise at the
+    # normal level for a server polled continuously by clients.
     uvicorn.run(
         app,
         host=config.server.host,
@@ -103,10 +130,24 @@ def run(config: Config) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Entry point.  Returns a process exit status."""
+    """!
+    @brief Entry point.  Returns a process exit status.
+
+    @details Precedence of settings (command line > DARPA_SPILL_* environment
+    > YAML file > defaults) is implemented by load_config(); this function
+    only sequences --version, --print-config, logging setup and run().
+
+    @param argv Argument vector without the program name; None means
+                sys.argv[1:].
+    @return Process exit status: 0 on success, interrupt, --version or
+            --print-config; 2 on a configuration error; otherwise whatever
+            run() returns.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # --version is answered before configuration is loaded so that it works
+    # even when the config file is missing or invalid.
     if args.version:
         _print_version()
         return 0
@@ -121,6 +162,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # being able to open a log file, create a database, or reach a TDU, so it
     # runs before any of that is set up.
     if args.print_config:
+        # default=str renders Path and other non-JSON values readably.
         print(json.dumps(config.to_dict(), indent=2, default=str))
         return 0
 
