@@ -1,10 +1,23 @@
-"""Time parsing and conversion for spill queries.
+"""!
+@file src/darpa_spillserver/novatime.py
+@brief Time parsing and conversion between NOvA ticks, UNIX, UTC and GPS.
+
+Time parsing and conversion for spill queries.
 
 Everything the TDU records is stamped in **NOvA time** --- a 64-bit count of
 64 MHz ticks since 01-Jan-2010 00:00:00 UTC.  Clients, though, ask questions in
 human terms ("all the $74 events between Jul 1, 2026 and today", "from 09:15
 today until 11:34 today") and want answers back in UTC and GPS.  This module is
 the boundary between the two.
+
+**Timescales and units.** NOvA time is an atomic, leap-second-free count:
+it advances by exactly 64,000,000 ticks per SI second (1 tick = 15.625 ns =
+15625 ps), so it is a fixed integer-second offset from GPS time
+(``NOVA_GPS_OFFSET`` in :mod:`nova_time_decoder`).  UNIX time does not count
+leap seconds, so NOvA <-> UNIX/UTC goes through the decoder's post-epoch
+leap-second table (2012-06-30, 2015-06-30, 2016-12-31).  The TDU-reported
+``pps_offset`` stored elsewhere in the project is the tick phase within the
+current second; with a GPS-aligned PPS it equals ``nova mod 64e6``.
 
 The arithmetic itself is delegated to the :mod:`nova_time_decoder` package;
 nothing here reimplements a conversion.  What this module adds is
@@ -55,16 +68,22 @@ __all__ = [
     "nova_to_datetime",
 ]
 
+## The UTC tzinfo; the default zone for every input that carries none.
 UTC = timezone.utc
 
-#: Ticks per second of the NOvA 64 MHz clock; re-exported for callers.
+## Ticks per second of the NOvA 64 MHz clock; re-exported for callers.
 TICKS_PER_SECOND = NOVA_TIME_FACTOR
 
-#: A NOvA tick count large enough that it cannot be confused with a UNIX
-#: timestamp.  The NOvA epoch is 2010, so one year of ticks is ~2.0e15 while a
-#: plausible UNIX time is ~1.8e9; anything at or above this is unambiguous.
+## A NOvA tick count large enough that it cannot be confused with a UNIX
+## timestamp.  The NOvA epoch is 2010, so one year of ticks is ~2.0e15 while a
+## plausible UNIX time is ~1.8e9; anything at or above this is unambiguous.
+## (1e12 ticks is only ~4.3 h after the NOvA epoch, and 1e12 UNIX seconds is
+## ~31,700 years out, so neither side of the cut is ever reached in practice.)
 _NOVA_TICK_THRESHOLD = 10 ** 12
 
+## Relative offsets: ``-2h``, ``now-30m``, ``+1.5d``.  The caller strips
+## blanks before matching.  ``m`` is minutes, never months (months have no
+## fixed length, so they are deliberately not offered).
 _RELATIVE_RE = re.compile(
     r"^(?:now\s*)?(?P<sign>[-+])\s*(?P<value>\d+(?:\.\d+)?)\s*"
     r"(?P<unit>ns|us|ms|s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
@@ -72,6 +91,9 @@ _RELATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+## Seconds per unit for every unit spelling _RELATIVE_RE accepts.  Values
+## are SI seconds; a "day" is 86400 s, i.e. relative offsets ignore DST and
+## leap seconds (they are applied as timedelta on an aware datetime).
 _UNIT_SECONDS = {
     "ns": 1e-9, "us": 1e-6, "ms": 1e-3,
     "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
@@ -81,18 +103,23 @@ _UNIT_SECONDS = {
     "w": 604800, "week": 604800, "weeks": 604800,
 }
 
+## Bare clock time ``HH:MM`` or ``HH:MM:SS[.frac]``, interpreted on the
+## reference date in the query timezone.
 _BARE_TIME_RE = re.compile(
     r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}(?:\.\d+)?))?$"
 )
 
-#: Calendar formats accepted in addition to ISO 8601, covering the spellings
-#: used in NOvA logbooks and in Design.md ("Jul 1, 2026").
+## Calendar formats accepted in addition to ISO 8601, covering the spellings
+## used in NOvA logbooks and in Design.md ("Jul 1, 2026").
 _DATE_FORMATS = (
     "%Y-%m-%d", "%Y/%m/%d", "%d-%b-%Y", "%d %b %Y",
     "%b %d %Y", "%b %d, %Y", "%B %d %Y", "%B %d, %Y",
     "%m/%d/%Y",
 )
 
+## Every _DATE_FORMATS spelling followed by a clock time (space or ``T``
+## separator; minute, second or microsecond resolution).  strptime's ``%f``
+## takes at most 6 digits, so these cannot express sub-microsecond input.
 _DATETIME_FORMATS = tuple(
     fmt + sep + tfmt
     for fmt in _DATE_FORMATS
@@ -102,54 +129,85 @@ _DATETIME_FORMATS = tuple(
 
 
 class NovaTimeError(ValueError):
-    """Raised when a time expression cannot be understood."""
+    """!
+    @brief Raised when a time expression cannot be understood.
+
+    @details Subclasses ValueError so callers that treat any bad input as a
+    ValueError (e.g. the HTTP layer mapping to 400) need no special case.
+    """
 
 
 @dataclass(frozen=True)
 class ConvertedTime:
-    """One instant rendered in every representation the API emits."""
+    """!
+    @brief One instant rendered in every representation the API emits.
 
+    @details Immutable; built only by convert().  Integer fields are exact
+    except gps_nsec and unix_nsec, which truncate the 15.625 ns tick to
+    whole nanoseconds.
+    """
+
+    ## NOvA base time: 64 MHz ticks since 2010-01-01T00:00:00Z.
     nova: int
     """NOvA base time, in 64 MHz ticks since the NOvA epoch."""
 
+    ## UNIX time_t (leap seconds removed via the decoder's table).
     unix_sec: int
+    ## Sub-second part of the UNIX time in ns, truncated from the tick.
     unix_nsec: int
+    ## ISO 8601 UTC string with 9 fractional digits and a trailing Z.
     utc: str
     """ISO 8601 UTC, e.g. ``2026-09-22T15:53:33.229378890Z``."""
 
+    ## The DAQ's own UTC rendering (picosecond fraction).
     utc_string: str
     """The DAQ's own rendering, e.g. ``2026-Sep-22 15:53:33.229378890625 UTC``."""
 
+    ## Whole GPS seconds since 1980-01-06T00:00:00Z.
     gps_seconds: int
     """Whole GPS seconds since the GPS epoch."""
 
+    ## GPS sub-second in ns (truncated; see gps_psec for the exact value).
     gps_nsec: int
     """Sub-second remainder in nanoseconds, as :mod:`nova_time_decoder`
     reports it.  A NOvA tick is 15.625 ns, so this *truncates*: it cannot
     land on a tick boundary.  Use :attr:`gps_psec` or :attr:`gps` when the
     exact instant matters."""
 
+    ## GPS sub-second in ps; exact, since 1 tick = 15625 ps.
     gps_psec: int
     """Sub-second remainder in picoseconds, exact.  1e12 / 64e6 is 15625
     exactly, so every NOvA tick maps to a whole number of picoseconds with
     nothing lost.  This is the same unit the DAQ's own ``utc_string`` uses."""
 
+    ## Full GPS week number (not reduced modulo 1024).
     gps_week: int
+    ## Whole-second GPS time-of-week, 0..604799.
     gps_tow: int
     """Whole-second GPS time-of-week; the sub-second part is in
     :attr:`gps_psec`."""
 
+    ## GPS seconds with a 12-digit (picosecond) fraction.
     gps: str
     """Full-precision GPS seconds, e.g. ``1474127631.229378890625``."""
 
+    ## GPS time-of-week with a 12-digit (picosecond) fraction.
     gps_tow_exact: str
     """Full-precision GPS time-of-week, e.g. ``230031.229378890625``."""
 
+    ## Human-readable "week W, TOW t (s s)" rendering.
     gps_string: str
     """Both together, e.g.
     ``week 2437, TOW 230031.229378890625 (1474127631.229378890625 s)``."""
 
     def as_dict(self) -> dict:
+        """!
+        @brief Return the fields as a plain dict in declaration order.
+
+        @details The key order is the column order of the JSON and CSV
+        renderers that consume it; keep it stable.
+        @return Mapping of field name to value.
+        """
         return {
             "nova": self.nova,
             "unix_sec": self.unix_sec,
@@ -168,7 +226,13 @@ class ConvertedTime:
 
 
 def get_timezone(name: str) -> timezone:
-    """Resolve a timezone name, accepting ``UTC`` and any IANA zone.
+    """!
+    @brief Resolve a timezone name, accepting ``UTC`` and any IANA zone.
+
+    @param name Zone name (``UTC``/``Z``/``GMT``, case-insensitive, or an IANA
+                name such as ``America/Chicago``); None means UTC.
+    @return A tzinfo: the fixed UTC zone or a zoneinfo.ZoneInfo.
+    @throws NovaTimeError if the zone is not installed on this host.
 
     :raises NovaTimeError: if the zone is not installed on this host.
     """
@@ -181,22 +245,38 @@ def get_timezone(name: str) -> timezone:
 
 
 def nova_now() -> int:
-    """Return the current wall-clock instant as a NOvA tick count."""
+    """!
+    @brief Return the current wall-clock instant as a NOvA tick count.
+
+    @details Resolution is that of datetime (1 us); the host clock is assumed
+    to be NTP-disciplined UTC.
+    @return NOvA ticks for the current instant.
+    """
     return datetime_to_nova(datetime.now(tz=UTC))
 
 
 def datetime_to_nova(moment: datetime) -> int:
-    """Convert an aware :class:`~datetime.datetime` to NOvA ticks.
+    """!
+    @brief Convert an aware :class:`~datetime.datetime` to NOvA ticks.
 
     A naive datetime is rejected rather than assumed to be UTC, so that a
     caller which forgot to attach a zone gets an error instead of a six-hour
     offset.
+
+    @param moment Timezone-aware instant.
+    @return NOvA tick count (leap seconds added per the decoder's table).
+    @throws NovaTimeError if moment is naive or predates the NOvA epoch.
     """
     if moment.tzinfo is None:
         raise NovaTimeError(
             "refusing to convert a naive datetime; attach a timezone first"
         )
     utc_moment = moment.astimezone(UTC)
+    # Whole seconds and the fraction are taken separately: the float from
+    # timestamp() only supplies the integer part (its ~240 ns resolution is
+    # far finer than 1 s), and the sub-second part comes exactly from the
+    # microsecond field.  us -> ns is exact; ns -> ticks in unix_to_nova
+    # floors (ticks = nsec * 64e6 // 1e9).
     epoch_seconds = int(utc_moment.timestamp())
     nsec = utc_moment.microsecond * 1000
     ticks = unix_to_nova(epoch_seconds, nsec)
@@ -210,25 +290,42 @@ def datetime_to_nova(moment: datetime) -> int:
 
 
 def nova_to_datetime(nova: int) -> datetime:
-    """Convert NOvA ticks to an aware UTC :class:`~datetime.datetime`.
+    """!
+    @brief Convert NOvA ticks to an aware UTC :class:`~datetime.datetime`.
 
     ``datetime`` resolves to microseconds, so the returned value is truncated
     from the tick-level precision the hardware provides.  Use
     :func:`convert` when the full precision matters.
+
+    @param nova NOvA tick count (non-negative).
+    @return Aware UTC datetime, truncated to the microsecond.  During an
+            inserted leap second the result repeats the preceding UNIX
+            second, as UNIX time itself does.
     """
     unix = nova_to_unix(nova)
+    # Build from the integer second plus a timedelta rather than from a float
+    # timestamp, so the sub-second part is not rounded through float64.
     return datetime.fromtimestamp(unix.sec, tz=UTC) + timedelta(
         microseconds=unix.nsec // 1000
     )
 
 
 def convert(nova: int) -> ConvertedTime:
-    """Render one NOvA tick count in every supported representation."""
+    """!
+    @brief Render one NOvA tick count in every supported representation.
+
+    @param nova NOvA tick count.
+    @return The ConvertedTime for that instant.
+    @throws NovaTimeError if nova is negative.
+    """
     if nova < 0:
         raise NovaTimeError("NOvA time cannot be negative: {}".format(nova))
 
+    # UNIX/UTC go through the leap-second table; GPS is a fixed offset.
     unix = nova_to_unix(nova)
     gps: GpsTime = nova_to_gps(nova)
+    # Only whole seconds go through datetime; the 9-digit fraction is
+    # appended from the integer ns so no float rounding enters the string.
     moment = datetime.fromtimestamp(unix.sec, tz=UTC)
     iso = "{}.{:09d}Z".format(moment.strftime("%Y-%m-%dT%H:%M:%S"), unix.nsec)
 
@@ -263,7 +360,15 @@ def convert(nova: int) -> ConvertedTime:
 
 
 def _end_of_day(day: date, tz) -> datetime:
-    """The first instant of the following day, used as an exclusive bound."""
+    """!
+    @brief The first instant of the following day, used as an exclusive bound.
+
+    @details Midnight is computed in *tz*, so a DST-transition day in a local
+    zone is correctly 23 or 25 hours long.
+    @param day Calendar date.
+    @param tz tzinfo the date is interpreted in.
+    @return Aware datetime of 00:00 on day + 1 in tz.
+    """
     return datetime.combine(day + timedelta(days=1), dtime(0, 0), tzinfo=tz)
 
 
@@ -273,7 +378,20 @@ def parse_instant(
     tz=UTC,
     end_of_day: bool = False,
 ) -> int:
-    """Parse a time expression into a NOvA tick count.
+    """!
+    @brief Parse a time expression into a NOvA tick count.
+
+    @param text Expression to parse: str, int (bare-number rules), or an
+                aware datetime.
+    @param now Reference instant for relative and date-less forms; must be
+               aware.  None means the real clock.
+    @param tz Zone for inputs that carry none.
+    @param end_of_day Return the exclusive end of a date-only day instead of
+                      its start.
+    @return NOvA tick count.
+    @throws NovaTimeError if the expression cannot be understood, is
+            negative, or predates the NOvA epoch.
+
 
     Accepted forms, tried in this order:
 
@@ -306,6 +424,7 @@ def parse_instant(
     if isinstance(text, datetime):
         return datetime_to_nova(text)
 
+    # bool is an int subclass; True/False are not times.
     if isinstance(text, int) and not isinstance(text, bool):
         return _from_bare_number(str(text))
 
@@ -316,11 +435,14 @@ def parse_instant(
     reference = now if now is not None else datetime.now(tz=UTC)
     if reference.tzinfo is None:
         raise NovaTimeError("the reference 'now' must carry a timezone")
+    # "today", bare clock times etc. are calendar notions, so they are taken
+    # on the reference's date *in the query zone*, not in UTC.
     local_now = reference.astimezone(tz)
 
     lowered = token.lower()
 
     # --- explicitly tagged timescales -----------------------------------
+    # Checked first so a tag always overrides every heuristic below.
     for prefix in ("nova:", "novatime:", "ticks:"):
         if lowered.startswith(prefix):
             return _require_nonnegative(token[len(prefix):].strip(), "NOvA ticks")
@@ -349,12 +471,15 @@ def parse_instant(
         )
         return datetime_to_nova(moment)
 
+    # NOvA tick 0 is 2010-01-01T00:00:00Z, the earliest representable instant.
     if lowered in ("epoch", "beginning", "start"):
         return 0
 
     # --- relative offsets -------------------------------------------------
     match = _RELATIVE_RE.match(lowered.replace(" ", ""))
     if match:
+        # Offsets are applied to the aware reference instant, i.e. in elapsed
+        # civil (UNIX) seconds; float precision is ample at s..week scales.
         seconds = float(match.group("value")) * _UNIT_SECONDS[match.group("unit")]
         if match.group("sign") == "-":
             seconds = -seconds
@@ -363,6 +488,8 @@ def parse_instant(
     # --- bare clock time, meaning "today at" -------------------------------
     match = _BARE_TIME_RE.match(lowered)
     if match:
+        # Seconds may carry a fraction; split it into datetime's whole
+        # second + microsecond.  Precision below 1 us is dropped.
         second_text = match.group("second") or "0"
         whole_second = int(float(second_text))
         microsecond = int(round((float(second_text) - whole_second) * 1e6))
@@ -380,12 +507,17 @@ def parse_instant(
         )
 
     # --- ISO 8601 ----------------------------------------------------------
+    # datetime.fromisoformat() before Python 3.11 rejects a trailing "Z",
+    # so it is rewritten to the equivalent explicit offset.
     iso_candidate = token[:-1] + "+00:00" if token.endswith(("Z", "z")) else token
     try:
         parsed = datetime.fromisoformat(iso_candidate)
     except ValueError:
         parsed = None
     if parsed is not None:
+        # A date-only ISO string (no T/space/colon) names a whole day and is
+        # eligible for end-of-day widening; anything with a clock is exact.
+        # An explicit offset in the string wins over tz.
         had_clock = any(sep in token for sep in ("T", " ", ":"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=tz)
@@ -394,6 +526,7 @@ def parse_instant(
         return datetime_to_nova(parsed)
 
     # --- other calendar spellings -------------------------------------------
+    # Date+time spellings first: they are exact instants and never widened.
     for fmt in _DATETIME_FORMATS:
         try:
             parsed = datetime.strptime(token, fmt)
@@ -401,6 +534,7 @@ def parse_instant(
             continue
         return datetime_to_nova(parsed.replace(tzinfo=tz))
 
+    # Date-only spellings: midnight, or the next midnight if end_of_day.
     for fmt in _DATE_FORMATS:
         try:
             parsed = datetime.strptime(token, fmt)
@@ -413,6 +547,8 @@ def parse_instant(
         return datetime_to_nova(moment)
 
     # --- a bare number ------------------------------------------------------
+    # Last: the threshold heuristic is the least specific rule, so every
+    # tagged, keyword and calendar form gets first refusal.
     try:
         return _from_bare_number(token)
     except NovaTimeError:
@@ -427,12 +563,20 @@ def parse_instant(
 
 
 def _from_bare_number(token: str) -> int:
-    """Interpret a bare number as NOvA ticks or a UNIX time.
+    """!
+    @brief Interpret a bare number as NOvA ticks or a UNIX time.
 
     Values at or above :data:`_NOVA_TICK_THRESHOLD` are NOvA ticks; smaller
     ones are UNIX seconds.  The two ranges do not overlap for any instant this
     server can serve, so the guess is safe --- but callers who want certainty
     should use the ``nova:`` or ``unix:`` prefix.
+
+    @details A ``0x`` prefix is always read as NOvA ticks, regardless of
+    magnitude.  A fractional value must be a UNIX time.
+    @param token Numeric text.
+    @return NOvA tick count.
+    @throws NovaTimeError if not a number, negative, a fractional value
+            above the threshold, or before the NOvA epoch.
     """
     stripped = token.strip()
     if stripped.lower().startswith("0x"):
@@ -469,16 +613,25 @@ def _from_bare_number(token: str) -> int:
 
 
 def _unix_string_to_nova(token: str) -> int:
-    """Parse a UNIX time, keeping the seconds and the fraction separate.
+    """!
+    @brief Parse a UNIX time, keeping the seconds and the fraction separate.
 
     float64 has about 240 ns of resolution near the present epoch, which is
     coarser than the 15.625 ns NOvA tick, so the two halves are parsed
     independently rather than through a single float.
+
+    @param token ``SECONDS[.FRACTION]`` text.
+    @return NOvA tick count (leap seconds added per the decoder's table).
+    @throws NovaTimeError if malformed, negative, or before the NOvA epoch.
     """
     stripped = token.strip()
     whole, _, fraction = stripped.partition(".")
     try:
         seconds = int(whole)
+        # The fraction alone is < 1, so float64 holds it to ~1e-16 s; the
+        # result is rounded to whole ns and then floored to ticks by
+        # unix_to_nova.  A fraction like .9999999999 rounds to 1e9 ns, which
+        # unix_to_nova turns into a full extra second of ticks (correct).
         nsec = int(round(float("0." + fraction) * 1e9)) if fraction else 0
     except ValueError:
         raise NovaTimeError("{!r} is not a UNIX time".format(token)) from None
@@ -493,6 +646,20 @@ def _unix_string_to_nova(token: str) -> int:
 
 
 def _gps_string_to_nova(token: str) -> int:
+    """!
+    @brief Parse a GPS time as ``SECONDS[.frac]`` or ``WEEK:TOW[.frac]``.
+
+    @details GPS and NOvA time are both leap-second-free, so the conversion
+    is a fixed integer-second offset with no table lookup.  The value is
+    parsed as a Decimal with precision scaled to the input, and the fraction
+    is rounded half-to-even directly to NOvA ticks, so every digit the
+    caller supplies is honoured exactly.
+    @param token GPS seconds since 1980-01-06, or week number and
+                 time-of-week separated by a colon.
+    @return NOvA tick count.
+    @throws NovaTimeError if malformed, negative, non-finite or before the
+            NOvA epoch.
+    """
     try:
         # Precision scales with the supplied decimal, including its fraction.
         with localcontext() as context:
@@ -516,6 +683,14 @@ def _gps_string_to_nova(token: str) -> int:
 
 
 def _require_nonnegative(token: str, what: str) -> int:
+    """!
+    @brief Parse a decimal integer and reject negatives.
+
+    @param token Integer text.
+    @param what Name of the quantity, used in the error message.
+    @return The parsed non-negative integer.
+    @throws NovaTimeError if not an integer or negative.
+    """
     try:
         value = int(token)
     except ValueError:
@@ -526,11 +701,16 @@ def _require_nonnegative(token: str, what: str) -> int:
 
 
 def _swap_hint(start, end) -> str:
-    """Spell out the corrected range when both ends are bare dates.
+    """!
+    @brief Spell out the corrected range when both ends are bare dates.
 
     Only then is the widening of a date-only end worth mentioning: swapping
     ``2026-10-11`` / ``2026-10-10`` gives two whole days, which is not what
     swapping two clock times gives.
+
+    @param start Start expression as the caller supplied it.
+    @param end End expression as the caller supplied it.
+    @return A sentence to append to the error, or "" when not applicable.
     """
     bare = re.compile(r"^\s*\d{4}-\d{2}-\d{2}\s*$")
     if isinstance(start, str) and isinstance(end, str) \
@@ -547,7 +727,19 @@ def parse_range(
     now: Optional[datetime] = None,
     tz=UTC,
 ) -> "tuple[int, int]":
-    """Resolve a start/end pair into an inclusive-exclusive NOvA tick range.
+    """!
+    @brief Resolve a start/end pair into an inclusive-exclusive NOvA tick range.
+
+    @param start Start expression (see parse_instant); None or "" means tick 0.
+    @param end End expression; None or "" means now.
+    @param now Reference instant (aware) for relative forms; None means the
+               real clock.  Both ends share it so "-1h" to "now" is exactly
+               one hour.
+    @param tz Zone for inputs that carry none.
+    @return (start, end) NOvA ticks with start <= end; start inclusive,
+            end exclusive.
+    @throws NovaTimeError if either end is unparseable or the range runs
+            backwards.
 
     An omitted *start* means the beginning of time; an omitted *end* means
     now.  The *end* is parsed with ``end_of_day=True`` so that a date-only
@@ -581,4 +773,6 @@ def parse_range(
         )
 
     end_nova = parse_instant(end, now=reference, tz=tz, end_of_day=True)
+    # end_of_day only ever moves the end later, so this max() is a guard
+    # that keeps the returned range well-formed rather than a correction.
     return start_nova, max(end_nova, start_nova)

@@ -1,4 +1,8 @@
-"""Tests for darpa-spill-shift, the dts1 reversible timestamp blur.
+"""!
+@file tests/test_shift.py
+@brief Tests of darpa-spill-shift (dts1): reference vectors, row algebra, file round trips and CLI refusals.
+
+Tests for darpa-spill-shift, the dts1 reversible timestamp blur.
 
 The reference values come from docs/shift/dts1_test_vectors.json, written by
 the Mathematica reference implementation when docs/TimestampShift.nb is
@@ -8,7 +12,9 @@ built.  Agreement with it is the definition of a correct implementation.
 import csv
 import json
 import os
+import random
 import stat
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -23,6 +29,7 @@ from darpa_spillserver.shift import (
     Token,
     TokenError,
     _gauss_draw,
+    as241_decimal,
     as241_float,
     main,
     parse_duration,
@@ -40,12 +47,21 @@ TOKENS = {name: Token.parse(text) for name, text in VECTORS["tokens"].items()}
 
 
 def tagged(path, tag):
-    """d.csv -> d.<tag>.csv, as darpa-spill-shift names its outputs."""
+    """!
+    @brief @c d.csv -> @c d.&lt;tag&gt;.csv, as darpa-spill-shift names its outputs.
+    @param path Input file path.
+    @param tag Tag to insert, e.g. "shifted" or "restored".
+    @return The tagged path, as str.
+    """
     root, ext = os.path.splitext(str(path))
     return root + "." + tag + ext
 
 
 def sample_rows():
+    """!
+    @brief Rows of the reference sample CSV (comment lines skipped), as str dicts.
+    @return List of csv.DictReader rows.
+    """
     with open(SAMPLE) as handle:
         return list(csv.DictReader(l for l in handle if not l.startswith("#")))
 
@@ -54,6 +70,7 @@ def sample_rows():
 
 
 def test_hmac_matches_rfc4231():
+    """!@brief Python HMAC-SHA256 equals RFC 4231 test case 2 as recorded by the reference."""
     import hashlib
     import hmac
     digest = hmac.new(b"Jefe", b"what do ya want for nothing?",
@@ -62,12 +79,14 @@ def test_hmac_matches_rfc4231():
 
 
 def test_seed_derivation_matches_reference():
+    """!@brief secret_from_seed (PBKDF2-HMAC-SHA256, salt SEED_SALT) equals the reference secret."""
     p = VECTORS["pbkdf2"]
     assert p["salt"] == shift.SEED_SALT
     assert secret_from_seed(p["seed"], p["iterations"]).hex() == p["secret_hex"]
 
 
 def test_fingerprints_match_reference():
+    """!@brief Token fingerprints equal the reference values for every test token."""
     for name, token in TOKENS.items():
         assert token.fingerprint == VECTORS["fingerprints"][name]
 
@@ -75,18 +94,29 @@ def test_fingerprints_match_reference():
 @pytest.mark.parametrize("vector", VECTORS["offsets"],
                          ids=lambda v: "{token}-{source}-{n}".format(**v))
 def test_offsets_match_reference(vector):
+    """!
+    @brief o(source, n) equals the Mathematica value for each edge-case vector.
+    @param vector Reference entry {token, source, n, offset}.
+    """
     offsets = OffsetFunction(TOKENS[vector["token"]])
     assert offsets(vector["source"], vector["n"]) == vector["offset"]
 
 
 @pytest.mark.parametrize("tie", VECTORS["near_ties"], ids=lambda t: str(t["k"]))
 def test_near_ties_round_exactly(tie):
+    """!
+    @brief _gauss_draw rounds near-.5 draws to the reference tick (decimal fallback).
+    @param tie Reference entry {k, sigma, offset}.
+    """
     # No cut: these test the rounding alone.
     assert _gauss_draw(tie["k"], tie["sigma"], 10**12) == tie["offset"]
 
 
 def test_float_alone_would_get_a_tie_wrong():
-    """The reason for the decimal fallback: one reference case lands on
+    """!
+    @brief Pure float rounding gets at least one reference near-tie wrong.
+
+    The reason for the decimal fallback: one reference case lands on
     exactly .5 in double precision and rounds to the wrong tick."""
     wrong = 0
     for tie in VECTORS["near_ties"]:
@@ -95,8 +125,54 @@ def test_float_alone_would_get_a_tie_wrong():
     assert wrong >= 1
 
 
+def _exact_draw(k, sigma, cut):
+    """!
+    @brief _gauss_draw evaluated entirely in 80-digit decimal, as the spec does.
+    @param k Top 53 bits of an HMAC word, 0 <= k < 2**53.
+    @param sigma Gaussian standard deviation in ticks.
+    @param cut Truncation bound in ticks.
+    @return The exact offset in ticks, or None if rejected by the cut.
+    """
+    with localcontext() as ctx:
+        ctx.prec = 80
+        x = as241_decimal((Decimal(k) + Decimal("0.5")) / 2**53) * sigma
+        if abs(x) > cut:
+            return None
+        return int(x.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+
+
+# The last draws below 1: (k + 1/2) / 2**53 is not a double for k >= 2**52,
+# and k = 2**53 - 1 used to round to u = 1.0 and fail in log(0).  A wide cut
+# (32 sigma) reaches the far tail where the error was thousands of ticks.
+@pytest.mark.parametrize("j", [0, 1, 2, 3, 9, 999, 2**30, 2**51 - 1])
+def test_upper_half_draws_are_exact(j):
+    """!
+    @brief Draws with u > 1/2 agree with the all-decimal evaluation.
+    @param j Distance of k below 2**53 - 1.
+    """
+    k = 2**53 - 1 - j
+    assert _gauss_draw(k, 10**6, MAX_OFFSET) == _exact_draw(k, 10**6, MAX_OFFSET)
+
+
+def test_draws_are_antisymmetric():
+    """!
+    @brief o(k) = -o(2**53 - 1 - k), as AS241's oddness about 1/2 requires.
+    """
+    rng = random.Random(1)
+    for e in range(2, 52, 3):
+        for _ in range(50):
+            j = rng.randrange(2**e)
+            low, high = (_gauss_draw(k, 10**6, MAX_OFFSET)
+                         for k in (j, 2**53 - 1 - j))
+            assert high == (None if low is None else -low)
+
+
 @pytest.mark.parametrize("name", ["flat", "gauss"])
 def test_shifted_sample_matches_reference(name):
+    """!
+    @brief Shifted nova_time, delta and pps_offset of the sample equal the reference rows.
+    @param name Token name, "flat" or "gauss".
+    """
     offsets = OffsetFunction(TOKENS[name])
     expected = VECTORS["shifted_sample"][name]
     for row, want in zip(sample_rows(), expected):
@@ -110,6 +186,11 @@ def test_shifted_sample_matches_reference(name):
 
 @pytest.mark.parametrize("name", ["flat", "gauss"])
 def test_rows_invert_exactly_and_stay_consistent(name):
+    """!
+    @brief Shifted rows keep pps_offset == t mod 1 s and delta == t(n) - t(n-1);
+    invert restores every row exactly.
+    @param name Token name, "flat" or "gauss".
+    """
     offsets = OffsetFunction(TOKENS[name])
     original = sample_rows()
     shifted = [dict(r) for r in original]
@@ -130,6 +211,7 @@ def test_rows_invert_exactly_and_stay_consistent(name):
 
 
 def test_offsets_stay_inside_their_bounds():
+    """!@brief |o| <= a (flat) and |o| <= cut (gauss); flat mean near 0, Gaussian RMS near sigma."""
     flat, gauss = TOKENS["flat"], TOKENS["gauss"]
     f, g = OffsetFunction(flat), OffsetFunction(gauss)
     fo = [f("s", n) for n in range(3000)]
@@ -142,6 +224,7 @@ def test_offsets_stay_inside_their_bounds():
 
 
 def test_parameters_and_secret_both_matter():
+    """!@brief Changing either the parameters (via P) or the secret decorrelates the offsets."""
     secret = TOKENS["flat"].secret
     a = OffsetFunction(Token.generate("flat", secret=secret, a=3200000))
     b = OffsetFunction(Token.generate("flat", secret=secret, a=3200001))
@@ -152,6 +235,7 @@ def test_parameters_and_secret_both_matter():
 
 
 def test_derived_columns_follow_nova_time():
+    """!@brief Derived time columns follow the shifted nova_time; a None delta is left alone."""
     row = {"nova_time": BASE, "source": "s", "event_number": 7, "delta": None,
            "pps_offset": BASE % TICKS}
     times = convert(BASE)
@@ -168,6 +252,7 @@ def test_derived_columns_follow_nova_time():
 
 
 def test_token_round_trip_and_canonical_form():
+    """!@brief parse(str(token)) round-trips, repr hides the secret, non-canonical text is rejected."""
     token = Token.generate("gauss", sigma=1280000, cut=3840000)
     assert Token.parse(str(token)) == token
     assert token.secret.hex() not in repr(token)
@@ -188,11 +273,16 @@ def test_token_round_trip_and_canonical_form():
     "dts1:poisson:a=1:" + "0" * 64,
 ])
 def test_bad_tokens_are_rejected(bad):
+    """!
+    @brief Malformed or out-of-range tokens raise TokenError.
+    @param bad Token text to reject.
+    """
     with pytest.raises(TokenError):
         Token.parse(bad)
 
 
 def test_parse_duration():
+    """!@brief Durations convert to whole 64 MHz ticks; no unit, sub-tick or negative is refused."""
     assert parse_duration("20ms") == 1280000
     assert parse_duration("0.5s") == MAX_OFFSET
     assert parse_duration("500us") == 32000
@@ -208,7 +298,10 @@ def test_parse_duration():
 
 @pytest.fixture
 def dumps(populated, tmp_path):
-    """A CSV and a JSON dump of the populated archive, by darpa-spill-dump."""
+    """!
+    @brief A CSV and a JSON dump of the populated archive, by darpa-spill-dump.
+    @return (csv_path, json_path) as pathlib.Path.
+    """
     out_csv, out_json = tmp_path / "d.csv", tmp_path / "d.json"
     code = dump.main(["-d", populated.path, "-q", "--start", "nova:{}".format(BASE),
                       "--end", "nova:{}".format(BASE + 61 * SECOND),
@@ -219,12 +312,17 @@ def dumps(populated, tmp_path):
 
 @pytest.fixture
 def token_file(tmp_path):
+    """!
+    @brief A token file holding the reference Gaussian token.
+    @return Path of the file, as str.
+    """
     path = tmp_path / "tok"
     path.write_text(VECTORS["tokens"]["gauss"] + "\n")
     return str(path)
 
 
 def test_dump_files_round_trip_byte_identical(dumps, token_file, tmp_path):
+    """!@brief CLI apply then invert of dump CSV and JSON gives byte-identical files."""
     for original in dumps:
         assert main(["apply", "-q", "--token-file", token_file, str(original)],
                     environ={}) == 0
@@ -237,6 +335,7 @@ def test_dump_files_round_trip_byte_identical(dumps, token_file, tmp_path):
 
 
 def test_shifted_files_carry_a_marker_but_no_secret(dumps, token_file):
+    """!@brief Shifted CSV and JSON carry the params/fingerprint marker, never the secret."""
     csv_path, json_path = dumps
     main(["apply", "-q", "--token-file", token_file, str(csv_path), str(json_path)],
          environ={})
@@ -255,6 +354,10 @@ def test_shifted_files_carry_a_marker_but_no_secret(dumps, token_file):
 
 
 def test_shifted_json_times_are_consistent(dumps, token_file):
+    """!
+    @brief In shifted JSON, utc/gps follow the new nova_time, event_number is
+    unchanged, and almost every time moved.
+    """
     _, json_path = dumps
     main(["apply", "-q", "--token-file", token_file, str(json_path)], environ={})
     doc = json.loads(Path(tagged(json_path, "shifted")).read_text())
@@ -269,6 +372,7 @@ def test_shifted_json_times_are_consistent(dumps, token_file):
 
 
 def test_api_style_json_is_handled(tmp_path, token_file):
+    """!@brief A non-dump (API-style) JSON document round-trips to equal data."""
     doc = {"meta": {"total": 1}, "events": [
         {"nova_time": BASE, "source": "s", "event_number": 3,
          "delta": 1000, "pps_offset": BASE % TICKS}]}
@@ -282,6 +386,10 @@ def test_api_style_json_is_handled(tmp_path, token_file):
 
 
 def test_refuses_double_shift_and_foreign_inversion(dumps, token_file, tmp_path):
+    """!
+    @brief Double shift, wrong-token inversion and inversion of an unmarked file
+    are refused, leaving no output; --force overrides.
+    """
     csv_path, _ = dumps
     main(["apply", "-q", "--token-file", token_file, str(csv_path)], environ={})
     shifted = tagged(csv_path, "shifted")
@@ -304,12 +412,14 @@ def test_refuses_double_shift_and_foreign_inversion(dumps, token_file, tmp_path)
 
 
 def test_refuses_to_overwrite_input(dumps, token_file):
+    """!@brief An output path equal to the input path is refused."""
     csv_path, _ = dumps
     assert main(["apply", "-q", "--token-file", token_file, str(csv_path),
                  "-o", str(csv_path)], environ={}) == 1
 
 
 def test_missing_columns_are_explained(tmp_path, token_file, capsys):
+    """!@brief A CSV lacking source/event_number is refused, naming the columns."""
     src = tmp_path / "c.csv"
     src.write_text("nova_time,utc\n{},x\n".format(BASE))
     assert main(["apply", "--token-file", token_file, str(src)], environ={}) == 1
@@ -317,6 +427,7 @@ def test_missing_columns_are_explained(tmp_path, token_file, capsys):
 
 
 def test_split_directory_in_one_call(populated, tmp_path, token_file):
+    """!@brief Several split dump files are shifted in one invocation, one output each."""
     out = tmp_path / "split"
     dump.main(["-d", populated.path, "-q", "--timezone", "UTC",
                "--start", "nova:{}".format(BASE), "--end", "nova:{}".format(BASE + 61 * SECOND),
@@ -331,6 +442,7 @@ def test_split_directory_in_one_call(populated, tmp_path, token_file):
 
 
 def test_token_command_writes_private_file(tmp_path, capsys):
+    """!@brief ``token -o`` writes a mode-0600 file and will not overwrite it without --force."""
     path = tmp_path / "t"
     assert main(["token", "--dist", "flat", "--width", "50ms", "-o", str(path)],
                 environ={}) == 0
@@ -344,7 +456,11 @@ def test_token_command_writes_private_file(tmp_path, capsys):
 
 
 def test_token_created_concurrently_is_never_replaced(tmp_path, monkeypatch):
-    """Two runs that both found the file missing: the second must refuse,
+    """!
+    @brief A token file created between the existence check and the write is
+    never replaced, and no temporary file is left behind.
+
+    Two runs that both found the file missing: the second must refuse,
     not truncate the token the first may already have shifted data with."""
     from darpa_spillserver import shift as shift_module
     path = tmp_path / "t"
@@ -361,6 +477,10 @@ def test_token_created_concurrently_is_never_replaced(tmp_path, monkeypatch):
 
 
 def test_token_command_defaults_and_seed(capsys):
+    """!
+    @brief Default cut is 3 sigma clamped to 500 ms; a seed gives a reproducible
+    token with a warning; an explicit cut over 500 ms is an error.
+    """
     assert main(["token", "--dist", "gauss", "--sigma", "20ms", "--seed", "x"],
                 environ={}) == 0
     out = capsys.readouterr()
@@ -379,6 +499,7 @@ def test_token_command_defaults_and_seed(capsys):
 
 
 def test_apply_with_new_token_requires_saving_it(dumps, tmp_path):
+    """!@brief ``apply --dist`` refuses to run without --token-out, and saves the token with it."""
     csv_path, _ = dumps
     assert main(["apply", "-q", "--dist", "flat", "--width", "10ms", str(csv_path)],
                 environ={}) == 2
@@ -389,6 +510,7 @@ def test_apply_with_new_token_requires_saving_it(dumps, tmp_path):
 
 
 def test_token_from_environment(dumps, token_file):
+    """!@brief Tokens come from DARPA_SPILL_SHIFT_TOKEN or _TOKEN_FILE; no token is a usage error."""
     csv_path, _ = dumps
     env = {shift.ENV_TOKEN: VECTORS["tokens"]["gauss"]}
     assert main(["apply", "-q", str(csv_path)], environ=env) == 0
@@ -399,6 +521,7 @@ def test_token_from_environment(dumps, token_file):
 
 
 def test_info(dumps, token_file, capsys):
+    """!@brief ``info`` reports token match/mismatch for a shifted file and describes a bare token."""
     csv_path, _ = dumps
     main(["apply", "-q", "--token-file", token_file, str(csv_path)], environ={})
     shifted = tagged(csv_path, "shifted")
@@ -414,6 +537,10 @@ def test_info(dumps, token_file, capsys):
 
 @pytest.mark.parametrize("sigma,cut", [(1280000, 3840000), (1, 32000000)])
 def test_maximum_gaussian_draw_uses_exact_open_interval(sigma, cut):
+    """!
+    @brief k = 2**53 - 1, whose u rounds to 1.0 in binary64, matches an
+    all-decimal evaluation instead of raising in log(0).
+    """
     from decimal import Decimal, localcontext, ROUND_HALF_EVEN
     from darpa_spillserver.shift import as241_decimal
 
@@ -425,3 +552,37 @@ def test_maximum_gaussian_draw_uses_exact_open_interval(sigma, cut):
         expected = (None if abs(exact) > cut else
                     int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)))
     assert _gauss_draw(k, sigma, cut) == expected
+
+
+def test_broken_pipe_exits_quietly(monkeypatch, capsys):
+    """!
+    @brief A reader closing stdout early (``| head``) gives exit 141 and no
+    error message, not the OSError path's status 1.
+    """
+    class Closed:
+        """!@brief stdout replacement whose writes raise BrokenPipeError."""
+
+        def write(self, text):
+            """!
+            @brief Raise BrokenPipeError, as a write to a closed pipe does.
+            @param text Ignored.
+            """
+            raise BrokenPipeError()
+
+        def flush(self):
+            """!@brief Nothing to flush."""
+
+        def fileno(self):
+            """!
+            @brief A plausible descriptor for the dup2 in the handler.
+            @return 1.
+            """
+            return 1
+
+    monkeypatch.setattr(shift.sys, "stdout", Closed())
+    # The handler points fd 1 at /dev/null; neutralise that so pytest's
+    # capture is not clobbered.
+    monkeypatch.setattr(shift.os, "dup2", lambda *a: None)
+    # 141 = 128 + SIGPIPE(13), the shell convention for a closed pipe.
+    assert main(["info", VECTORS["tokens"]["flat"]], environ={}) == 141
+    assert capsys.readouterr().err == ""

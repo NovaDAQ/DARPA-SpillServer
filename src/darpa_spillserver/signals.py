@@ -1,4 +1,8 @@
-"""Accelerator signal registry.
+"""!
+@file src/darpa_spillserver/signals.py
+@brief Accelerator signal registry and the TDU event-word decode rules.
+
+Accelerator signal registry.
 
 The NOvA timing hardware reports accelerator events as a 16-bit *event word*.
 The DAQ decodes that word into a coarse :class:`SpillType` enumeration before
@@ -52,11 +56,15 @@ __all__ = [
 
 
 class SpillType(IntEnum):
-    """Decoded spill type, matching the C++ ``SpillType`` enum value-for-value.
+    """!
+    @brief Decoded spill type, matching the C++ ``SpillType`` enum value-for-value.
 
     The integer values are wire format: they are what the TDU writes into
     shared memory and what ``DumpSpillHistory`` reports as ``"Type"``.  They
     must not be reordered.
+
+    @details They are also the stored ``spill_type`` column of the archive
+    and the ``spill_type`` column of every CSV/JSON dump.
     """
 
     NUMI = 0             # MIBS $74, proton extraction into NuMI
@@ -73,13 +81,17 @@ class SpillType(IntEnum):
     TB_TRIG = 11         # test-beam trigger card signal
 
 
-#: Carrier bits in the 16-bit event word.
+## Carrier bits in the 16-bit event word.
+## Bit 8 (0x0100): event arrived on the Tevatron clock (TCLK).
 CARRIER_TCLK = 1 << 8
+## Bit 9 (0x0200): event arrived on the Main Injector beam sync (MIBS).
 CARRIER_MIBS = 1 << 9
+## Bit 10 (0x0400): event arrived on the Booster Neutrino Beam (BNB) line.
 CARRIER_BNB = 1 << 10
+## Bit 15 (0x8000): the TDU flagged a parity error; the word is untrusted.
 PARITY_ERROR = 1 << 15
 
-#: Human-readable name for each carrier bit.
+## Human-readable name for each carrier bit.
 _CARRIER_NAMES = {
     CARRIER_TCLK: "TCLK",
     CARRIER_MIBS: "MIBS",
@@ -88,41 +100,63 @@ _CARRIER_NAMES = {
 
 
 class Signal(NamedTuple):
-    """One accelerator signal the DAQ knows how to decode."""
+    """!
+    @brief One accelerator signal the DAQ knows how to decode.
 
+    @details Immutable registry entry; the full set is SIGNALS.
+    """
+
+    ## Low byte of the event word (the ``$XX`` number).
     code: int
     """Low byte of the event word, e.g. ``0x74``."""
 
+    ## Carrier bit the signal arrives on.
     carrier: int
     """Carrier bit: one of :data:`CARRIER_TCLK`, :data:`CARRIER_MIBS`,
     :data:`CARRIER_BNB`."""
 
+    ## The SpillType this signal decodes to.
     spill_type: SpillType
     """The type this signal decodes to."""
 
+    ## Short stable identifier (URL- and CSV-safe).
     name: str
     """Short stable identifier, safe in a URL or a CSV column."""
 
+    ## One-line explanation for docs and the web UI.
     description: str
     """One-line explanation for documentation and the web UI."""
 
     @property
     def hex(self) -> str:
-        """The operator-facing spelling, e.g. ``"$74"``."""
+        """!
+        @brief The operator-facing spelling, e.g. ``"$74"``.
+
+        @return ``$`` followed by the code as two upper-case hex digits.
+        """
         return "${:02X}".format(self.code)
 
     @property
     def event_word(self) -> int:
-        """The full 16-bit event word for this signal."""
+        """!
+        @brief The full 16-bit event word for this signal.
+
+        @return carrier | code, with the parity bit clear.
+        """
         return self.carrier | self.code
 
     @property
     def carrier_name(self) -> str:
+        """!
+        @brief Name of the carrier bit: ``TCLK``, ``MIBS`` or ``BNB``.
+
+        @return The carrier name.
+        """
         return _CARRIER_NAMES[self.carrier]
 
 
-#: Every signal decoded by ``NssSpillInfo::getSpillTypeFromEvent``, in the
-#: order that function tests them.
+## Every signal decoded by ``NssSpillInfo::getSpillTypeFromEvent``, in the
+## order that function tests them.
 SIGNALS: Tuple[Signal, ...] = (
     Signal(0x74, CARRIER_MIBS, SpillType.NUMI, "numi",
            "MIBS $74 -- 120 GeV proton extraction from MI into NuMI"),
@@ -150,9 +184,14 @@ SIGNALS: Tuple[Signal, ...] = (
            "TCLK $39 -- start of test-beam slow extraction"),
 )
 
+## Lookup by low-byte code.  Keyed by code alone, which relies on every code
+## in SIGNALS being unique across carriers (true of the C++ table today).
 _BY_CODE: Dict[int, Signal] = {s.code: s for s in SIGNALS}
+## Lookup by Signal.name.
 _BY_NAME: Dict[str, Signal] = {s.name: s for s in SIGNALS}
 
+## One-line description of every SpillType, including those with no Signal
+## (FAKE, TEST_CONNECTION, TB_TRIG).
 _TYPE_DESCRIPTIONS: Dict[SpillType, str] = {
     SpillType.NUMI: "NuMI proton extraction (MIBS $74)",
     SpillType.BNB: "Booster neutrino beam inhibit / TCR reference ($1B)",
@@ -170,12 +209,18 @@ _TYPE_DESCRIPTIONS: Dict[SpillType, str] = {
 
 
 def describe_type(spill_type: SpillType) -> str:
-    """Return a human-readable description of *spill_type*."""
+    """!
+    @brief Return a human-readable description of *spill_type*.
+
+    @param spill_type The type to describe.
+    @return Its description, or ``"Unknown spill type"``.
+    """
     return _TYPE_DESCRIPTIONS.get(spill_type, "Unknown spill type")
 
 
 def decode_event_word(evt: int) -> SpillType:
-    """Decode a raw 16-bit event word into a :class:`SpillType`.
+    """!
+    @brief Decode a raw 16-bit event word into a :class:`SpillType`.
 
     A direct port of ``NssSpillInfo::getSpillTypeFromEvent``.  An event word
     whose parity bit is set, or whose low byte is not a signal the DAQ knows
@@ -185,11 +230,18 @@ def decode_event_word(evt: int) -> SpillType:
     True
     >>> decode_event_word(0x018F) is SpillType.ACCEL_ONE_HZ_TCLK
     True
+
+    @param evt Raw 16-bit event word.
+    @return The decoded SpillType; FAKE for anything undecodable.
     """
     if evt & PARITY_ERROR:
         return SpillType.FAKE
 
     code = evt & 0xFF
+    # Carrier precedence MIBS > BNB > TCLK follows the C++ decode: only the
+    # first carrier bit found is considered, and a code that is not
+    # registered on *that* carrier is FAKE even if it exists on another.
+    # A word with no carrier bit at all is FAKE.
     for carrier in (CARRIER_MIBS, CARRIER_BNB, CARRIER_TCLK):
         if evt & carrier:
             signal = _BY_CODE.get(code)
@@ -200,7 +252,8 @@ def decode_event_word(evt: int) -> SpillType:
 
 
 def normalise_signal(text: str) -> str:
-    """Normalise an operator-supplied signal spelling to ``"$XX"`` form.
+    """!
+    @brief Normalise an operator-supplied signal spelling to ``"$XX"`` form.
 
     Accepts the spellings people actually type --- ``$74``, ``74``, ``0x74``,
     ``0X74``, ``$8f`` --- and the registry's short names (``one-hertz``).
@@ -210,12 +263,22 @@ def normalise_signal(text: str) -> str:
     '$8F'
     >>> normalise_signal("one-hertz")
     '$8F'
+
+    @param text Signal spelling.
+    @return The canonical ``$XX`` spelling.
+    @throws ValueError if *text* is not a registered signal.
     """
     return parse_signal(text).hex
 
 
 def parse_signal(text: str) -> Signal:
-    """Resolve *text* to a registered :class:`Signal`.
+    """!
+    @brief Resolve *text* to a registered :class:`Signal`.
+
+    @param text Hex code (``$74``, ``74``, ``0x74``) or registry name.
+    @return The matching Signal.
+    @throws ValueError if *text* is not a recognised spelling, or names a
+            code the DAQ does not decode.
 
     :raises ValueError: if *text* is not a recognised spelling, or names a
         code the DAQ does not decode.
@@ -228,6 +291,8 @@ def parse_signal(text: str) -> Signal:
         raise ValueError("no signal given")
 
     lowered = token.lower()
+    # Names are tried before hex so no name can be shadowed by a digit
+    # string; no registered name is valid hex anyway.
     if lowered in _BY_NAME:
         return _BY_NAME[lowered]
 
@@ -237,6 +302,8 @@ def parse_signal(text: str) -> Signal:
     elif digits.startswith("0x"):
         digits = digits[2:]
 
+    # At most two hex digits: a signal is the low byte only; a full event
+    # word (carrier bits included) is deliberately not accepted here.
     if not digits or len(digits) > 2 or any(c not in "0123456789abcdef" for c in digits):
         raise ValueError(
             "{!r} is not a signal; expected a hex code such as $74, "
@@ -257,17 +324,30 @@ def parse_signal(text: str) -> Signal:
 
 
 def signal_for_code(code: int) -> Optional[Signal]:
-    """Return the :class:`Signal` for a low-byte *code*, or ``None``."""
+    """!
+    @brief Return the :class:`Signal` for a low-byte *code*, or ``None``.
+
+    @param code Low byte of the event word.
+    @return The Signal, or None if the code is not registered (including
+            the storage sentinel -1).
+    """
     return _BY_CODE.get(code)
 
 
 def spill_type_for_signal(text: str) -> SpillType:
-    """Return the :class:`SpillType` that signal *text* decodes to."""
+    """!
+    @brief Return the :class:`SpillType` that signal *text* decodes to.
+
+    @param text Signal spelling accepted by parse_signal().
+    @return The SpillType.
+    @throws ValueError if *text* is not a registered signal.
+    """
     return parse_signal(text).spill_type
 
 
 def signals_for_type(spill_type: SpillType) -> List[Signal]:
-    """Return every signal that decodes to *spill_type*.
+    """!
+    @brief Return every signal that decodes to *spill_type*.
 
     More than one entry means a stored record carrying this type is ambiguous:
     the hardware did not preserve which signal produced it.  Callers should
@@ -275,20 +355,31 @@ def signals_for_type(spill_type: SpillType) -> List[Signal]:
 
     >>> [s.hex for s in signals_for_type(SpillType.BNB_TCLK)]
     ['$1D', '$1F']
+
+    @param spill_type The type to invert.
+    @return Signals in SIGNALS order; empty for FAKE, TEST_CONNECTION and
+            TB_TRIG, which no registered signal produces.
     """
     return [s for s in SIGNALS if s.spill_type == spill_type]
 
 
 def parse_spill_type(text: str) -> SpillType:
-    """Resolve *text* to a :class:`SpillType`.
+    """!
+    @brief Resolve *text* to a :class:`SpillType`.
 
     Accepts the enum member name (``BNB_TCLK``, case-insensitive), the C++
     spelling (``kBNBtclk``), or the integer wire value.
+
+    @param text Name, C++ spelling or integer (any object; str() is taken).
+    @return The SpillType.
+    @throws ValueError if *text* matches none of the accepted forms.
     """
     token = str(text).strip()
     if not token:
         raise ValueError("no spill type given")
 
+    # A leading "-" is let through so "-1" gets the range error below rather
+    # than the generic "not a spill type" message.
     if token.lstrip("-").isdigit():
         value = int(token)
         try:
@@ -300,6 +391,7 @@ def parse_spill_type(text: str) -> SpillType:
                 )
             ) from None
 
+    # "bnb-tclk" and "BNB_TCLK" both name BNB_TCLK.
     canonical = token.lower().replace("-", "_")
     for member in SpillType:
         if member.name.lower() == canonical:
@@ -331,10 +423,17 @@ def parse_spill_type(text: str) -> SpillType:
 
 
 def resolve_selection(signals_requested=None, types_requested=None):
-    """Return types, raw codes, labels and types unrestricted by raw code.
+    """!
+    @brief Resolve ``signal``/``type`` selections into store filters.
 
     Explicit types union with exact signals. Unknown raw codes (-1) match
     through their decoded type; an explicit type also admits any raw code.
+
+    @param signals_requested signal tokens (repeatable, comma lists), or None.
+    @param types_requested type tokens (repeatable, comma lists), or None.
+    @return ``(spill_types, signal_codes, labels, unrestricted_types)``, each
+        de-duplicated in first-seen order.
+    @throws ValueError an unrecognised signal or type.
     """
     def tokens(values):
         return [token.strip() for value in values or []

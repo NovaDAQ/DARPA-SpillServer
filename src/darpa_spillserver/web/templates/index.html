@@ -131,15 +131,37 @@
 </footer>
 
 <script>
+/**
+ * @file src/darpa_spillserver/web/templates/index.html
+ * @brief Query page client: builds /api/events queries from the form,
+ *        renders the JSON result table, and triggers CSV/JSON downloads.
+ *
+ * Wrapped in an IIFE so nothing leaks into the global scope.  All DOM
+ * text is set via textContent (never innerHTML), so archived values cannot
+ * inject markup.
+ */
 (function () {
   "use strict";
 
+  // Mount prefix (server.root_path) for API URLs behind a reverse proxy;
+  // tojson makes it a safely quoted JS string.
   var ROOT = {{ root_path | tojson }};
   var form = document.getElementById("query");
   var tbody = document.querySelector("#table tbody");
   var summary = document.getElementById("summary");
   var banner = document.getElementById("banner");
 
+  /**
+   * @brief Serialise the form into API query parameters.
+   *
+   * Empty text fields are omitted so the server applies its defaults;
+   * checked signal/source boxes become repeated parameters (the API takes
+   * their union).
+   *
+   * @param extra optional object of parameters that override the form,
+   *        e.g. {format: "csv"}.
+   * @return a URLSearchParams.
+   */
   function params(extra) {
     var data = new URLSearchParams();
     ["start", "end", "tz", "limit", "order"].forEach(function (name) {
@@ -157,18 +179,31 @@
     return data;
   }
 
+  /**
+   * @brief Show warning messages (meta.warnings, degraded ingest) above the table.
+   * @param messages array of strings; empty or missing hides the banner.
+   */
   function showBanner(messages) {
     if (!messages || !messages.length) { banner.hidden = true; return; }
     banner.textContent = messages.join("  ");
     banner.hidden = false;
   }
 
+  /**
+   * @brief Append one table cell, showing an em dash for null/empty values.
+   * @param row the <tr> to append to.
+   * @param text the cell value.
+   */
   function cell(row, text) {
     var td = document.createElement("td");
     td.textContent = (text === null || text === undefined || text === "") ? "—" : text;
     row.appendChild(td);
   }
 
+  /**
+   * @brief Replace the table body with the events of an /api/events JSON reply.
+   * @param payload parsed JSON: {events: [...], meta: {...}}.
+   */
   function render(payload) {
     tbody.textContent = "";
     var events = payload.events || [];
@@ -185,6 +220,7 @@
       tbody.appendChild(tr);
     });
 
+    // Summary line: rows shown, total matching (absent for exports), range.
     var meta = payload.meta || {};
     var parts = [events.length + " event(s) shown"];
     if (typeof meta.total === "number") { parts.push("of " + meta.total + " matching"); }
@@ -193,6 +229,7 @@
     showBanner(meta.warnings);
   }
 
+  // Run the query in place instead of navigating to the raw JSON.
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     summary.textContent = "Querying…";
@@ -201,6 +238,8 @@
     })
       .then(function (response) {
         if (!response.ok) {
+          // API errors arrive as {detail: {error, hint}} (or a plain string
+          // detail); surface the error text.
           return response.json().then(function (body) {
             var detail = body.detail || body;
             throw new Error(detail.error || JSON.stringify(detail));
@@ -215,6 +254,15 @@
       });
   });
 
+  /**
+   * @brief Download the current query as a file by navigating to it.
+   *
+   * The server sends Content-Disposition for CSV; navigation (not fetch)
+   * lets the browser handle the save.  Subject to the same limit/offset
+   * paging as the on-page table.
+   *
+   * @param format "csv" or "json".
+   */
   function download(format) {
     window.location = ROOT + "/api/events?" + params({format: format}).toString();
   }

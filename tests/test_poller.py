@@ -1,4 +1,6 @@
-"""Tests for the background ingest loop.
+"""!
+@file tests/test_poller.py
+@brief Tests for the background ingest loop.
 
 The poller is exercised against a stub client rather than a live TDU, so the
 tests can drive the exact conditions that matter: an empty archive, an
@@ -32,10 +34,20 @@ DEFAULT_SOURCE = "tdu-near-master-ppc-01"
 
 
 class StubClient:
-    """A TDUClient stand-in that records what was asked of it."""
+    """!
+    @brief A TDUClient stand-in that records what was asked of it.
+    """
 
     def __init__(self, events=None, route=HISTORY_ROUTE, error=None,
                  truncated=False):
+        """!
+        @brief Configure what the stub serves.
+        @param events SpillEvents the stub serves.
+        @param route route reported in each FetchResult; anything other than
+        HISTORY_ROUTE models a degraded (legacy) TDU.
+        @param error exception raised by fetch_history, or None.
+        @param truncated value of FetchResult.truncated.
+        """
         self.events = events or []
         self.route = route
         self.error = error
@@ -45,15 +57,33 @@ class StubClient:
         self.closed = False
 
     async def open(self):
+        """!
+        @brief Mark the client opened.
+        """
         self.opened = True
 
     async def close(self):
+        """!
+        @brief Mark the client closed.
+        """
         self.closed = True
 
     async def supports_history(self):
+        """!
+        @brief Report history-route support.
+        @return True iff the stub serves the history route.
+        """
         return self.route == HISTORY_ROUTE
 
     async def fetch_history(self, since_nova=None, limit=None, **kwargs):
+        """!
+        @brief Record the request and serve the stored events at or after
+        since_nova.
+        @param since_nova lower bound in ticks, or None for everything.
+        @param limit requested batch limit (recorded only).
+        @param kwargs further fetch options of the real client (ignored).
+        @return FetchResult over the selected events.
+        """
         self.calls.append({"since": since_nova, "limit": limit})
         if self.error is not None:
             raise self.error
@@ -64,7 +94,13 @@ class StubClient:
 
 
 def make_events(count, start=None, step=SECOND):
-    """Build *count* consecutive events, by default ending ten minutes ago."""
+    """!
+    @brief Build *count* consecutive events, by default ending ten minutes ago.
+    @param count number of events.
+    @param start tick of the first event; default nova_now() - ANCHOR_OFFSET.
+    @param step ticks between events (default one second).
+    @return list of 1 Hz SpillEvents from DEFAULT_SOURCE.
+    """
     if start is None:
         start = nova_now() - ANCHOR_OFFSET
     return [
@@ -82,6 +118,12 @@ def make_events(count, start=None, step=SECOND):
 
 @pytest.fixture
 def config(tmp_path):
+    """!
+    @brief Config with a per-test archive, a 10 ms poll interval, a 5 s overlap
+    and a one-hour cold-start backfill.
+    @param tmp_path pytest per-test temporary directory.
+    @return the Config.
+    """
     cfg = Config()
     cfg.storage.path = str(tmp_path / "spills.db")
     cfg.ingest.interval = 0.01
@@ -92,12 +134,21 @@ def config(tmp_path):
 
 @pytest.fixture
 def store(config):
+    """!
+    @brief Empty SpillStore on the configured path; closed on teardown.
+    @param config the config fixture.
+    @return the open SpillStore.
+    """
     archive = SpillStore(config.storage.path)
     yield archive
     archive.close()
 
 
 async def test_single_poll_inserts_events(config, store):
+    """!
+    @brief One poll inserts every served event and updates the inserted
+    counter; no errors recorded.
+    """
     client = StubClient(events=make_events(10))
     poller = Poller(config, store, client=client)
 
@@ -109,6 +160,10 @@ async def test_single_poll_inserts_events(config, store):
 
 
 async def test_cold_start_backfills_rather_than_asking_for_everything(config, store):
+    """!
+    @brief With an empty archive the first request starts ingest.backfill
+    seconds back, not at the start of the ring.
+    """
     client = StubClient(events=[])
     poller = Poller(config, store, client=client)
 
@@ -121,6 +176,10 @@ async def test_cold_start_backfills_rather_than_asking_for_everything(config, st
 
 
 async def test_second_poll_resumes_from_the_watermark_less_overlap(config, store):
+    """!
+    @brief The next poll asks from the newest stored event minus
+    ingest.overlap.
+    """
     events = make_events(10)
     client = StubClient(events=events)
     poller = Poller(config, store, client=client)
@@ -134,6 +193,9 @@ async def test_second_poll_resumes_from_the_watermark_less_overlap(config, store
 
 
 async def test_overlapping_reread_does_not_duplicate(config, store):
+    """!
+    @brief Re-reading the overlap inserts nothing new.
+    """
     client = StubClient(events=make_events(10))
     poller = Poller(config, store, client=client)
 
@@ -143,9 +205,11 @@ async def test_overlapping_reread_does_not_duplicate(config, store):
 
 
 async def test_progress_is_counted_in_rows_inserted_not_fetched(config, store):
-    """Fetched counts every row seen, including re-reads; inserted counts
+    """!
+    @brief Fetched counts every row seen, including re-reads; inserted counts
     only real progress. The 5 s overlap re-reads the last 6 of 10 one-second
-    events, so the two counters must diverge by exactly that much."""
+    events, so the two counters must diverge by exactly that much.
+    """
     client = StubClient(events=make_events(10))
     poller = Poller(config, store, client=client)
 
@@ -153,23 +217,34 @@ async def test_progress_is_counted_in_rows_inserted_not_fetched(config, store):
     await poller.poll_once()
 
     assert poller.status.events_inserted == 10
+    # 10 on the first poll + 6 re-read (newest - 5 s .. newest inclusive) on
+    # the second.
     assert poller.status.events_fetched == 16
     assert store.count() == 10
 
 
 async def test_failures_are_recorded_without_stopping(config, store):
+    """!
+    @brief poll_once propagates TDUUnavailable; _record_error counts it and
+    keeps the message.
+    """
     client = StubClient(error=TDUUnavailable("TDU is down"))
     poller = Poller(config, store, client=client)
 
     with pytest.raises(TDUUnavailable):
         await poller.poll_once()
 
+    # poll_once raises; the run loop is what records the error, so do that step
+    # by hand.
     poller._record_error(TDUUnavailable("TDU is down"))
     assert poller.status.consecutive_errors == 1
     assert "TDU is down" in poller.status.last_error
 
 
 async def test_error_counter_resets_after_a_success(config, store):
+    """!
+    @brief A successful poll resets consecutive_errors to zero.
+    """
     client = StubClient(events=make_events(3))
     poller = Poller(config, store, client=client)
 
@@ -181,7 +256,9 @@ async def test_error_counter_resets_after_a_success(config, store):
 
 
 async def test_degraded_mode_is_flagged(config, store):
-    """A TDU with no history route yields a sample, and must say so."""
+    """!
+    @brief A TDU with no history route yields a sample, and must say so.
+    """
     client = StubClient(events=make_events(1), route="/tcr_status")
     poller = Poller(config, store, client=client)
 
@@ -194,6 +271,10 @@ async def test_degraded_mode_is_flagged(config, store):
 
 
 async def test_healthy_mode_is_not_flagged(config, store):
+    """!
+    @brief A TDU serving the history route is not flagged degraded and has no
+    degraded_reason.
+    """
     client = StubClient(events=make_events(1))
     poller = Poller(config, store, client=client)
     await poller.poll_once()
@@ -203,8 +284,10 @@ async def test_healthy_mode_is_not_flagged(config, store):
 
 
 async def test_a_quiet_tdu_is_still_polled_through(config, store):
-    """No events (beam off) still advances polled_through_nova, which the
-    publisher's ingest gate relies on; watermark_nova stays put."""
+    """!
+    @brief No events (beam off) still advances polled_through_nova, which the
+    publisher's ingest gate relies on; watermark_nova stays put.
+    """
     events = make_events(3)
     client = StubClient(events=events)
     poller = Poller(config, store, client=client)
@@ -228,6 +311,10 @@ async def test_a_quiet_tdu_is_still_polled_through(config, store):
 
 
 async def test_a_truncated_read_covers_only_what_it_fetched(config, store):
+    """!
+    @brief After a truncated read polled_through_nova stops at the last fetched
+    event, not at now.
+    """
     events = make_events(5)
     poller = Poller(config, store,
                     client=StubClient(events=events, truncated=True))
@@ -236,11 +323,16 @@ async def test_a_truncated_read_covers_only_what_it_fetched(config, store):
 
 
 async def test_start_and_stop_run_the_loop(config, store):
+    """!
+    @brief start() runs the background loop, which polls and stores events;
+    stop() ends it.
+    """
     client = StubClient(events=make_events(5))
     poller = Poller(config, store, client=client)
 
     await poller.start()
     assert poller.status.running is True
+    # ~8 poll intervals at 10 ms.
     await asyncio.sleep(0.08)
     await poller.stop()
 
@@ -250,15 +342,24 @@ async def test_start_and_stop_run_the_loop(config, store):
 
 
 async def test_stop_is_safe_when_never_started(config, store):
+    """!
+    @brief stop() on a poller that never started is a no-op.
+    """
     poller = Poller(config, store, client=StubClient())
     await poller.stop()
     assert poller.status.running is False
 
 
 async def test_retention_prunes_old_events(config, store):
+    """!
+    @brief With retention_days=1 a prune pass removes events 3 days old and
+    keeps those a minute old.
+    """
     config.storage.retention_days = 1.0
+    # Prune on every pass rather than on the production schedule.
     config.storage.prune_interval = 0.0
 
+    # 3 days old, beyond the 1-day retention; `recent` is 1 minute old.
     old = nova_now() - int(3 * 86400 * TICKS_PER_SECOND)
     recent = nova_now() - int(60 * TICKS_PER_SECOND)
     store.insert_events(make_events(5, start=old) + make_events(5, start=recent))
@@ -272,6 +373,10 @@ async def test_retention_prunes_old_events(config, store):
 
 
 async def test_retention_disabled_by_default_keeps_everything(config, store):
+    """!
+    @brief retention_days defaults to 0 (keep forever): even 10-year-old events
+    survive a prune pass.
+    """
     assert config.storage.retention_days == 0.0
 
     old = nova_now() - int(3650 * 86400 * TICKS_PER_SECOND)
@@ -284,6 +389,10 @@ async def test_retention_disabled_by_default_keeps_everything(config, store):
 
 
 async def test_ingest_log_records_each_pass(config, store):
+    """!
+    @brief Each poll writes one ingest_log row with the inserted count, route
+    and source name.
+    """
     client = StubClient(events=make_events(3))
     poller = Poller(config, store, client=client)
 
@@ -297,7 +406,8 @@ async def test_ingest_log_records_each_pass(config, store):
 
 
 async def test_default_events_sit_inside_the_cold_start_backfill(config, store):
-    """Guard against time-dependent flakiness in this file.
+    """!
+    @brief Guard against time-dependent flakiness in this file.
 
     make_events() anchors to the current time for a reason: a fixed timestamp
     drifts out of the backfill window as wall time passes, and every test that
@@ -317,12 +427,21 @@ SENTINEL_NOVA = 2 ** 63 - 1
 
 
 def sentinel_event():
+    """!
+    @brief Build the clock-unset sentinel event.
+    @return the bogus far-future event a TDU with an unset clock reported
+    (SENTINEL_NOVA).
+    """
     return SpillEvent(nova_time=SENTINEL_NOVA, spill_type=SpillType.FAKE,
                       signal_code=-1, event_number=10663,
                       source=DEFAULT_SOURCE, route="spill_history")
 
 
 async def test_an_event_far_in_the_future_is_dropped(config, store):
+    """!
+    @brief An event beyond ingest.max_future is rejected and counted; it
+    neither enters the archive nor moves the watermark.
+    """
     events = make_events(5)
     client = StubClient(events=events + [sentinel_event()])
     poller = Poller(config, store, client=client)
@@ -337,9 +456,11 @@ async def test_an_event_far_in_the_future_is_dropped(config, store):
 
 
 async def test_a_stored_future_event_does_not_stall_the_source(config, store):
-    """The 2026-10-22 failure: a sentinel stored before the check existed
+    """!
+    @brief The 2026-10-22 failure: a sentinel stored before the check existed
     became the resume point, and every later poll asked for events after the
-    year 6576.  The watermark now ignores it."""
+    year 6576.  The watermark now ignores it.
+    """
     events = make_events(5)
     store.insert_events(events + [sentinel_event()])
     client = StubClient(events=events)
@@ -352,6 +473,10 @@ async def test_a_stored_future_event_does_not_stall_the_source(config, store):
 
 
 async def test_max_future_zero_disables_the_check(config, store):
+    """!
+    @brief ingest.max_future = 0 disables the future check: the sentinel is
+    inserted.
+    """
     config.ingest.max_future = 0
     client = StubClient(events=make_events(2) + [sentinel_event()])
     poller = Poller(config, store, client=client)

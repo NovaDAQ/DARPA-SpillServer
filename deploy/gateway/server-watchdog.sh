@@ -45,6 +45,18 @@
 #
 # Exit status: 0 healthy or restarted, 1 restart failed or server unhealthy.
 
+## @file deploy/gateway/server-watchdog.sh
+## @brief cron watchdog: restart darpa-spill-server if it is down, alert
+##        (never kill) if it is alive but unhealthy.
+## @details
+##   This Doxygen block sits below the usage comment on purpose: --help
+##   prints from line 2 to the first blank line, so text placed above it
+##   would change the help output.  See the header comment above for the
+##   algorithm, options and environment.
+##   Usage:   server-watchdog.sh [-v] [--boot-delay SECONDS]
+##   Exit:    0 healthy, paused, restarted, or another run holds the lock;
+##            1 restart failed or server alive but unhealthy; 2 bad option.
+##   Linux-only (/proc, flock, pgrep).
 set -euo pipefail
 
 SPILL_REPO="${SPILL_REPO:-/home/novadaq/DARPA/DARPA-SpillServer}"
@@ -72,10 +84,21 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+## @fn log()
+## @brief Print a timestamped line to stdout (cron redirects it to the log).
+## @param $* message.
+## @return 0.
 log() {
     echo "$(date '+%Y-%m-%dT%H:%M:%S%z') server-watchdog $*"
 }
 
+## @fn alert()
+## @brief Mail an alert, rate-limited per condition key.
+## @param $1 subject (prefixed with "[darpa-spill-publish] ").
+## @param $2 body.
+## @param $3 condition key; names the stamp file whose mtime records the
+##           last send.
+## @return 0 always; a mailer failure is logged, not propagated.
 # Mail $1 (subject) with body $2, at most once per ALERT_MINUTES for the key
 # $3. A failing mailer is logged, never fatal.
 alert() {
@@ -93,10 +116,17 @@ alert() {
     fi
 }
 
+## @fn healthy()
+## @brief GET the health URL, TLS-verified against the server's own cert.
+## @return curl's status: 0 on HTTP 2xx/3xx within 20 s, non-zero otherwise.
 healthy() {
     curl -sf -o /dev/null --max-time 20 --cacert "$CACERT" "$URL"
 }
 
+## @fn is_server()
+## @brief Whether a PID is a live darpa-spill-server process.
+## @param $1 PID to test.
+## @return 0 if /proc/$1/cmdline mentions darpa-spill-server.
 # Same check as start.sh / stop.sh: the PID must be a darpa-spill-server,
 # not whatever process later reused the number.
 is_server() {

@@ -1,4 +1,7 @@
-"""Tests for the ring-buffer backfill tool."""
+"""!
+@file tests/test_backfill.py
+@brief Tests for the ring-buffer backfill tool.
+"""
 
 import httpx
 import pytest
@@ -11,10 +14,19 @@ from darpa_spillserver.storage import SpillStore
 from darpa_spillserver.tdu_client import HISTORY_ROUTE, TDUClient
 
 BASE_URL = "http://tdu-test:8080"
+# 2026-09-22 15:53:33 UTC in NOvA ticks (64 MHz); the live tcr_status reading
+# used throughout the suite.
 START = 33778458638680249
 
 
 def event(offset_seconds, number):
+    """!
+    @brief Build one TDU history record for a 1 Hz TCLK event.
+    @param offset_seconds seconds after START (may be fractional).
+    @param number TDU event number.
+    @return dict in the TDU's JSON record shape (Time, Type, Number, Delta,
+    Offset).
+    """
     return {
         "Time": START + int(offset_seconds * TICKS_PER_SECOND),
         "Type": int(SpillType.ACCEL_ONE_HZ_TCLK),
@@ -26,12 +38,21 @@ def event(offset_seconds, number):
 
 @pytest.fixture
 def store(tmp_path):
+    """!
+    @brief Empty SpillStore in a per-test temporary file; closed on teardown.
+    @param tmp_path pytest per-test temporary directory.
+    @return the open SpillStore.
+    """
     s = SpillStore(str(tmp_path / "bf.db"))
     yield s
     s.close()
 
 
 def mock_info():
+    """!
+    @brief Mock /spill_history_info so the client sees a TDU that supports the
+    history route (avoids the fallback probe).
+    """
     respx.get(BASE_URL + "/spill_history_info").mock(
         return_value=httpx.Response(200, json={"spill_history": True})
     )
@@ -39,12 +60,18 @@ def mock_info():
 
 @respx.mock
 async def test_range_is_walked_in_windows(store):
-    """The whole point: bound both ends of each request, or the TDU tries to
-    return the rest of the ring for every call."""
+    """!
+    @brief The whole point: bound both ends of each request, or the TDU tries
+    to return the rest of the ring for every call.
+    """
     mock_info()
     seen = []
 
     def handler(request):
+        """!
+        @brief Record each request's [since, until) and answer with an empty
+        window.
+        """
         since = int(request.url.params["since"])
         until = int(request.url.params["until"])
         seen.append((since, until))
@@ -66,6 +93,10 @@ async def test_range_is_walked_in_windows(store):
 
 @respx.mock
 async def test_events_are_inserted(store):
+    """!
+    @brief A single window's records are fetched and inserted; backfill_source
+    returns (fetched, inserted, windows) = (2, 2, 1).
+    """
     mock_info()
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json={
@@ -84,7 +115,9 @@ async def test_events_are_inserted(store):
 
 @respx.mock
 async def test_rerunning_inserts_nothing_new(store):
-    """Safe to run over a range already covered."""
+    """!
+    @brief Safe to run over a range already covered.
+    """
     mock_info()
     respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json={
@@ -102,15 +135,23 @@ async def test_rerunning_inserts_nothing_new(store):
 
 @respx.mock
 async def test_a_truncated_window_is_narrowed_not_skipped(store):
-    """Advancing past a truncated window would drop events silently."""
+    """!
+    @brief Advancing past a truncated window would drop events silently.
+    """
     mock_info()
     calls = []
 
     def handler(request):
+        """!
+        @brief Report truncation for any window wider than 150 s, otherwise
+        return nothing.
+        """
         since = int(request.url.params["since"])
         until = int(request.url.params["until"])
         calls.append(until - since)
         # Report truncation until the window is small enough.
+        # 150 s threshold: the 600 s request must be halved twice (600 -> 300
+        # -> 150) before the TDU stops truncating.
         if until - since > int(150 * TICKS_PER_SECOND):
             return httpx.Response(200, json={
                 "events": [event(0, 1)], "count": 1, "truncated": True})
@@ -128,10 +169,18 @@ async def test_a_truncated_window_is_narrowed_not_skipped(store):
 
 @respx.mock
 async def test_probe_finds_the_earliest_bounded_window():
+    """!
+    @brief Discovery scans the lookback oldest first in contiguous windows and
+    returns the first event it finds, not an estimate from sparse probes.
+    """
     mock_info()
     end = START + 1200 * TICKS_PER_SECOND
     edge = START + 601 * TICKS_PER_SECOND
     def handler(request):
+        """!
+        @brief Return one event at `since` when since lies inside the ring (>=
+        edge), nothing otherwise.
+        """
         since = int(request.url.params["since"])
         until = int(request.url.params["until"])
         rows = [{"Time": edge, "Type": 4, "Number": 1}] if since <= edge < until else []
@@ -143,6 +192,9 @@ async def test_probe_finds_the_earliest_bounded_window():
 
 @respx.mock
 async def test_probe_returns_none_when_the_ring_is_empty():
+    """!
+    @brief _probe_earliest returns None when no probe window finds any event.
+    """
     mock_info()
     route = respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json={"events": [], "count": 0})
@@ -153,8 +205,10 @@ async def test_probe_returns_none_when_the_ring_is_empty():
 
 
 def test_default_window_is_modest():
-    """A wide window makes one request produce more than the TDU's output
-    cap allows."""
+    """!
+    @brief A wide window makes one request produce more than the TDU's output
+    cap allows.
+    """
     assert 60.0 <= DEFAULT_WINDOW <= 900.0
 
 

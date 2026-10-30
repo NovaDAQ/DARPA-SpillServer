@@ -1,4 +1,8 @@
-"""Command-line query tool (``darpa-spill-query``).
+"""!
+@file src/darpa_spillserver/query_cli.py
+@brief ``darpa-spill-query``: query events from a local archive or a running server.
+
+Command-line query tool (``darpa-spill-query``).
 
 Answers the same questions as ``/api/events`` without a browser, reading
 either a local archive file or a running server.  It exists because the
@@ -13,6 +17,11 @@ node, and because a shell pipeline is the natural home for a CSV.
 
 Quote ``$74`` in a shell, or write it as ``0x74`` or ``74``: an unquoted
 ``$74`` is a shell variable and expands to nothing.
+
+Two back ends with deliberately parallel semantics: ``--server`` forwards the
+selection as API query parameters; otherwise the archive is opened directly
+(path from ``--database``, or from the merged configuration, which then also
+supplies the default time zone and row limit).
 """
 
 from __future__ import annotations
@@ -34,6 +43,10 @@ __all__ = ["main"]
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """!
+    @brief Build the ``darpa-spill-query`` command-line parser.
+    @return the parser.
+    """
     parser = argparse.ArgumentParser(
         prog="darpa-spill-query",
         description="Query NOvA accelerator event timestamps.",
@@ -99,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _list_signals() -> int:
+    """!
+    @brief Print the signal registry and an example of an ambiguous type.
+
+    The ambiguity footer stops at the first many-to-one type it meets
+    (``break``), so it shows one example, not every such type.
+
+    @return exit status 0.
+    """
     print("{:<6} {:<8} {:<20} {:<18} {}".format(
         "HEX", "CARRIER", "NAME", "TYPE", "DESCRIPTION"))
     print("-" * 100)
@@ -119,7 +140,11 @@ def _list_signals() -> int:
 
 
 def _print_table(rows, stream) -> None:
-    """Render rows shaped by :func:`event_row` as an aligned text table."""
+    """!
+    @brief Render rows shaped by :func:`event_row` as an aligned text table.
+    @param rows iterable of row dicts (consumed once; may be a generator).
+    @param stream file-like object to write to.
+    """
     header = "{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}  {}".format(
         "NOVA TIME", "UTC", "SIGNAL", "TYPE", "GPS TIME", "DELTA", "SOURCE")
     print(header, file=stream)
@@ -130,6 +155,7 @@ def _print_table(rows, stream) -> None:
         print("{:<20} {:<28} {:<8} {:<18} {:>26} {:>12}  {}".format(
             row["nova_time"],
             row["utc"][:27],
+            # Empty signal = record stored without a raw event word.
             row["signal"] or "-",
             row["spill_type_name"],
             row["gps"],
@@ -143,7 +169,18 @@ def _print_table(rows, stream) -> None:
 
 
 def _query_server(args, columns) -> int:
-    """Fetch results from a running server over HTTP."""
+    """!
+    @brief Fetch results from a running server over HTTP.
+
+    Maps the CLI selection onto ``/api/events`` query parameters; selection
+    semantics are then the server's.  ``--last`` is the same request with
+    ``limit=1&order=desc``, so ranges and every filter still apply.
+    ``table`` output is rendered locally from the JSON response.
+
+    @param args parsed command line.
+    @param columns validated column subset, or None.
+    @return exit status: 0 success, 1 on transport or HTTP error.
+    """
     try:
         import httpx
     except ImportError:
@@ -151,6 +188,7 @@ def _query_server(args, columns) -> int:
               file=sys.stderr)
         return 1
 
+    # List of pairs, not a dict, so repeated parameters survive.
     params: List[tuple] = []
     if args.start:
         params.append(("start", args.start))
@@ -168,13 +206,17 @@ def _query_server(args, columns) -> int:
         params.append(("tz", args.timezone))
     if args.desc and not args.last:
         params.append(("order", "desc"))
+    # The server has no "table"; ask for JSON and render it here.
     params.append(("format", "csv" if args.format == "csv" else "json"))
     if columns and args.format == "csv":
         params.append(("columns", ",".join(columns)))
 
+    # --last goes through /api/events so the JSON envelope, CSV output, range
+    # and every selection filter behave exactly as for an ordinary query.
     if args.last:
         params.extend([("limit", "1"), ("order", "desc")])
     url = args.server.rstrip("/") + "/api/events"
+    # httpx verify: False, a CA bundle path, or True for the system store.
     verify = False if args.insecure else (args.ca_bundle or True)
     try:
         response = httpx.get(url, params=params, timeout=60.0, verify=verify)
@@ -209,6 +251,7 @@ def _query_server(args, columns) -> int:
                               meta.get("returned"), meta.get("total")),
                           file=sys.stderr)
             else:
+                # /api/latest shape: {"event": {...}}.
                 rows = [body["event"]] if body.get("event") else []
             _print_table(rows, stream)
         else:
@@ -236,6 +279,11 @@ def _query_server(args, columns) -> int:
 
 
 def _source_names(args) -> List[str]:
+    """!
+    @brief Flatten ``--source`` values (repeatable, comma-separated).
+    @param args parsed command line.
+    @return de-duplicated names in first-seen order.
+    """
     names: List[str] = []
     for text in args.sources or []:
         names.extend(t.strip() for t in text.split(",") if t.strip())
@@ -243,6 +291,11 @@ def _source_names(args) -> List[str]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """!
+    @brief Entry point for ``darpa-spill-query``.
+    @param argv command line (default ``sys.argv[1:]``).
+    @return exit status; 141 (128 + SIGPIPE) when the output pipe closes early.
+    """
     try:
         return _main(argv)
     except BrokenPipeError:
@@ -254,6 +307,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def _main(argv: Optional[Sequence[str]] = None) -> int:
+    """!
+    @brief The body of main(), without the broken-pipe handling.
+    @param argv command line.
+    @return exit status: 0 success, 1 server error, 2 usage/configuration error.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -264,6 +322,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     if args.list_signals:
         return _list_signals()
 
+    # Validate --columns up front so both back ends reject the same input.
     columns = None
     if args.columns:
         columns = [name.strip() for name in args.columns.split(",") if name.strip()]
@@ -277,6 +336,8 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         return _query_server(args, columns)
 
     # -- local archive ----------------------------------------------------
+    # With --database the configuration is not loaded at all: zone defaults
+    # to UTC and limit to 10000, regardless of any YAML/env settings.
     database = args.database
     legacy_source = None
     if not database:
@@ -288,6 +349,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         database = config.storage.path
         timezone_name = args.timezone or config.query.timezone
         default_limit = config.query.default_limit
+        # Name given to rows of a pre-multi-source (version 1) archive.
         legacy_source = config.tdu.resolved_sources()[0].name
     else:
         timezone_name = args.timezone or "UTC"
@@ -319,6 +381,8 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         sources = _source_names(args)
         if sources:
+            # Validated against the archive, not the configuration: a local
+            # file may hold sources this host does not configure.
             known = store.source_names()
             unknown = [name for name in sources if name not in known]
             if unknown:
@@ -337,6 +401,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         events = page.events
         if not args.last:
             if page.truncated:
+                # To stderr, so a CSV on stdout stays clean.
                 print(
                     "note: {} of {} matching events shown; raise --limit to "
                     "see more".format(len(events), page.total),

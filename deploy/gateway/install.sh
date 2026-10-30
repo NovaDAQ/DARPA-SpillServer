@@ -39,6 +39,19 @@
 #   DATA_ROOT      [/data/DARPA-spilldata]
 #   FDP_HOME       [/home/novadaq/anorman-fdp]
 
+## @file deploy/gateway/install.sh
+## @brief Install or refresh the darpa-spill-publish deployment on the
+##        gateway (scripts, config, directories, crontab merge).
+## @details
+##   This Doxygen block sits below the usage comment on purpose: --help
+##   prints from line 2 to the first blank line, so text placed above it
+##   would change the help output.  See the header comment above for what
+##   is installed, options and environment.
+##   Usage:   deploy/gateway/install.sh [-n|--dry-run] [--install-cron]
+##                                      [--any-user]
+##   Exit:    0 done (warnings, if any, are counted on stderr); 1 wrong
+##            user, incomplete checkout, or the merged crontab would lose
+##            grabSpills.sh; 2 bad option.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,9 +77,21 @@ while [ $# -gt 0 ]; do
 done
 
 WARNINGS=0
+## @fn say()
+## @brief Print a progress line prefixed ">> ".
+## @param $* message.
+## @return 0.
+## @fn warn()
+## @brief Print a warning to stderr and count it in WARNINGS.
+## @param $* message.
+## @return 0.
 say()  { echo ">> $*"; }
 warn() { echo "warning: $*" >&2; WARNINGS=$((WARNINGS + 1)); }
 
+## @fn run()
+## @brief Execute a command, or only echo it under --dry-run.
+## @param $@ command and arguments.
+## @return the command's status (0 under --dry-run).
 # Run "$@", or only print it under --dry-run.
 run() {
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -116,6 +141,12 @@ fi
 
 # --- scripts: always the repository version ---------------------------------
 
+## @fn install_file()
+## @brief Install bin/NAME from this directory with MODE, or just fix the
+##        mode if the installed copy is already identical.
+## @param $1 octal mode, e.g. 0755.
+## @param $2 file name, relative to deploy/gateway and to $BIN.
+## @return status of install/chmod (fatal under set -e).
 install_file() {   # mode name
     local src="$SCRIPT_DIR/$2" dst="$BIN/$2"
     if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
@@ -134,6 +165,10 @@ install_file 0644 logrotate.conf
 
 # --- credentials area -------------------------------------------------------
 
+## @fn mode_of()
+## @brief Print a file's permission bits in octal, without leading zero.
+## @param $1 path.
+## @return 0 on success; tries GNU stat -c first, then BSD stat -f.
 mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 TOKENS="$FDP_HOME/tokens"
@@ -179,6 +214,10 @@ crontab -l >"$TMP/current" 2>/dev/null || : >"$TMP/current"
 # Append fragment lines that are not already present. Job lines are keyed by
 # their command (the schedule stripped), comments by the whole line; blank
 # lines are dropped. The number of job lines added goes to $TMP/added.
+# key(): a comment line keys as itself; a job line keys as its command,
+# i.e. fields from 6 on (5-field schedule) or from 2 on (@reboot etc.),
+# re-joined with single spaces.  Pass 1 (NR == FNR) records the current
+# crontab's keys and echoes it; pass 2 appends unseen fragment lines.
 awk -v added="$TMP/added" '
     function key(line,   f, n, i, k) {
         if (line ~ /^[ \t]*#/) return line
@@ -198,6 +237,9 @@ awk -v added="$TMP/added" '
 ' "$TMP/current" "$FRAGMENT" >"$TMP/merged"
 ADDED="$(cat "$TMP/added")"
 
+# Guard for the one pre-existing job that must survive (alec's
+# grabSpills.sh, sharing this account's crontab); refuse rather than
+# install a crontab that dropped it.
 if grep -q grabSpills.sh "$TMP/current" && ! grep -q grabSpills.sh "$TMP/merged"; then
     echo "error: merged crontab lost the grabSpills.sh line; not installing" >&2
     exit 1

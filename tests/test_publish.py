@@ -1,4 +1,9 @@
-"""Tests for the gateway publishing pipeline, ``darpa-spill-publish``.
+"""!
+@file tests/test_publish.py
+@brief Tests of the gateway publishing pipeline, darpa-spill-publish
+       (dump -> shift -> upload -> status).
+
+Tests for the gateway publishing pipeline, ``darpa-spill-publish``.
 
 Nothing here touches the network or the gateway.  darpa-spill-dump is the
 real tool reading a local test archive through a thin wrapper that drops the
@@ -34,10 +39,16 @@ PASSWORD = "s3cr3t-Pa55word!"
 
 
 def utc(*args):
+    """!@brief An aware UTC datetime from ``datetime`` arguments.
+    @return aware datetime.
+    """
     return datetime(*args, tzinfo=UTC)
 
 
 def nova(moment):
+    """!@brief A datetime as NOvA clock ticks.
+    @return 64 MHz ticks.
+    """
     return datetime_to_nova(moment)
 
 
@@ -107,9 +118,9 @@ fi
 cp "$last" "$out"
 '''
 
-#: The fake FDP tools share a tiny remote store under REMOTE: the entry for
-#: remote path P is the JSON file REMOTE + P holding its size and adler32
-#: ({"size": -1, "adler32": null} for the empty entry a failed PUT leaves).
+## The fake FDP tools share a tiny remote store under REMOTE: the entry for
+## remote path P is the JSON file REMOTE + P holding its size and adler32
+## ({"size": -1, "adler32": null} for the empty entry a failed PUT leaves).
 FAKE_FDP_COMMON = r'''
 import json, os, sys, zlib
 LOG = {log!r}
@@ -291,9 +302,14 @@ ENV_SCRIPT = "export FAKE_ENV_SOURCED=yes\n"
 
 
 class Rig:
-    """Paths, fakes and helpers for one test."""
+    """!@brief Paths, fakes and helpers for one test."""
 
     def __init__(self, tmp_path, archive_path):
+        """!@brief Build the directories, fakes and base config under
+        *tmp_path*.
+        @param tmp_path     pytest temporary directory.
+        @param archive_path SQLite archive the fake dump reads.
+        """
         self.root = tmp_path
         self.bin = tmp_path / "bin"
         self.logs = tmp_path / "logs"
@@ -365,6 +381,10 @@ class Rig:
         self.running = True
 
     def configure(self, **sections):
+        """!@brief Update config sections (merged), or replace top-level
+        values and ``streams``.
+        @param sections section name -> value.
+        """
         for key, value in sections.items():
             if isinstance(value, dict) and isinstance(self.config.get(key), dict) \
                     and key != "streams":
@@ -373,11 +393,21 @@ class Rig:
                 self.config[key] = value
 
     def write_config(self):
+        """!@brief Write the config as ``publish.yaml``.
+        @return its path.
+        """
         path = self.root / "publish.yaml"
         path.write_text(yaml.safe_dump(self.config, sort_keys=False))
         return path
 
     def main(self, *argv, now, environ=None):
+        """!@brief Run :func:`publish.main` with the rig's config and
+        environment.
+        @param argv    command-line arguments.
+        @param now     pinned current time.
+        @param environ extra environment variables.
+        @return the exit status.
+        """
         # The dump subprocess must use the same simulated clock as publisher.
         (self.ctl / "clock").write_text(now.isoformat())
         env = dict(self.environ)
@@ -386,6 +416,10 @@ class Rig:
                             environ=env, now=now)
 
     def log(self, name):
+        """!@brief A fake tool's call log.
+        @param name log file name, e.g. ``fdp-put.log``.
+        @return JSON records, or plain lines for the shell fakes.
+        """
         path = self.logs / name
         if not path.exists():
             return []
@@ -396,37 +430,68 @@ class Rig:
         return lines
 
     def mails(self):
+        """!@brief Every alert mail the fake mailx received.
+        @return list of ``{argv, body}``.
+        """
         return self.log("mail.log")
 
     def db(self):
+        """!@brief Open the publisher's state database.
+        @return a connection with ``sqlite3.Row`` rows.
+        """
         conn = sqlite3.connect(str(self.state_dir / "publish.db"))
         conn.row_factory = sqlite3.Row
         return conn
 
     def files(self):
+        """!@brief The ``files`` table.
+        @return ``{raw_path: row dict}``.
+        """
         with self.db() as conn:
             return {r["raw_path"]: dict(r) for r in
                     conn.execute("SELECT * FROM files")}
 
     def runs(self):
+        """!@brief The ``runs`` table.
+        @return row dicts in id order.
+        """
         with self.db() as conn:
             return [dict(r) for r in conn.execute("SELECT * FROM runs ORDER BY id")]
 
     def remote_entry(self, path):
-        """The fake FDP store's entry for remote *path*, or None."""
+        """!@brief The fake FDP store's entry for remote *path*, or None.
+        @param path remote path.
+        """
         entry = self.remote / path.lstrip("/")
         return json.loads(entry.read_text()) if entry.exists() else None
 
     def set_remote(self, path, size, adler32):
+        """!@brief Plant an entry in the fake FDP store.
+        @param path    remote path.
+        @param size    size (-1 for an incomplete entry).
+        @param adler32 checksum, or None.
+        """
         entry = self.remote / path.lstrip("/")
         entry.parent.mkdir(parents=True, exist_ok=True)
         entry.write_text(json.dumps({"size": size, "adler32": adler32}))
 
     def set_codes(self, tool, *codes):
+        """!@brief Queue exit codes for successive calls of a fake tool.
+        @param tool  ``dump``, ``fdp-put``, ``fdp-stat`` or ``fdp-rm``.
+        @param codes exit codes, one per call.
+        """
         (self.ctl / "{}.codes".format(tool)).write_text(
             "\n".join(str(c) for c in codes))
 
     def sources(self, url, ca_bundle, insecure, timeout):
+        """!@brief Stand-in for :func:`publish.http_get_json`: ``/api/health``
+        ok, ``/api/sources`` from the rig's watermark settings.
+        @param url       requested URL.
+        @param ca_bundle ignored.
+        @param insecure  ignored.
+        @param timeout   ignored.
+        @return the JSON body.
+        """
         if url.endswith("/api/health"):
             return {"status": "ok"}
         ingest = {"watermark_nova": self.watermark, "running": self.running}
@@ -441,7 +506,12 @@ class Rig:
 
 @pytest.fixture(scope="module")
 def archive(tmp_path_factory):
-    """Events every 5 min from 2026-10-21 to 2026-11-03 UTC, cycling types."""
+    """!@brief Events every 5 min from 2026-10-21 to 2026-11-03 UTC,
+           cycling types.
+
+    Module-scoped: the archive is built once and only read.
+    @return path of the SQLite archive.
+    """
     path = tmp_path_factory.mktemp("archive") / "spills.db"
     store = SpillStore(str(path))
     kinds = [SpillType.ACCEL_ONE_HZ_TCLK, SpillType.NUMI, SpillType.BNB]
@@ -458,6 +528,9 @@ def archive(tmp_path_factory):
 
 @pytest.fixture
 def rig(tmp_path, archive, monkeypatch):
+    """!@brief Function fixture: a fresh :class:`Rig` with ``http_get_json``
+    answered by :meth:`Rig.sources` and the ingest sleep disabled.
+    """
     r = Rig(tmp_path, archive)
     monkeypatch.setattr(publish, "http_get_json", r.sources)
     monkeypatch.setattr(publish, "_sleep", lambda seconds: None)
@@ -465,6 +538,13 @@ def rig(tmp_path, archive, monkeypatch):
 
 
 def publisher(rig, now=None, dry_run=False):
+    """!@brief A :class:`publish.Publisher` built from the rig's config,
+    for calling methods directly.
+    @param rig     the test rig.
+    @param now     pinned current time.
+    @param dry_run build it in dry-run mode.
+    @return the publisher (the caller closes its state).
+    """
     args = publish.build_parser().parse_args(["-c", str(rig.write_config()),
                                               "status"])
     cfg = publish.load_settings(args, rig.environ)
@@ -475,6 +555,9 @@ def publisher(rig, now=None, dry_run=False):
 
 
 def test_paths_for_a_normal_hour(rig):
+    """!@brief Hourly raw/shifted paths follow D3/D4, and each tree maps to its
+    own FDP area (raw private, shifted public).
+    """
     pub = publisher(rig)
     paths = pub.file_paths("numi", "2026-10-22T13-0500")
     raw, shifted = paths["csv"]
@@ -488,6 +571,9 @@ def test_paths_for_a_normal_hour(rig):
 
 
 def test_daily_label_and_path(rig):
+    """!
+    @brief A daily piece is labelled by its date and shares the day directory.
+    """
     pub = publisher(rig)
     raw, shifted = pub.file_paths("booster", "2026-10-22")["json"]
     assert raw.endswith("raw/oct/2026-oct-22/nd-booster-2026-10-22.json")
@@ -496,6 +582,7 @@ def test_daily_label_and_path(rig):
 
 
 def test_spring_forward_day_has_23_hours(rig):
+    """!@brief The spring-forward day is 23 h with no 02:00 hour piece."""
     pub = publisher(rig)
     from datetime import date
     start = pub.midnight(date(2027, 3, 14))
@@ -513,6 +600,10 @@ def test_spring_forward_day_has_23_hours(rig):
 
 
 def test_fall_back_day_has_25_hours_and_two_one_oclocks(rig):
+    """!
+    @brief The fall-back day is 25 h; the two 01:00 hours are distinct files
+    in one directory.
+    """
     pub = publisher(rig)
     from datetime import date
     start = pub.midnight(date(2026, 11, 1))
@@ -528,6 +619,9 @@ def test_fall_back_day_has_25_hours_and_two_one_oclocks(rig):
 
 
 def test_month_and_year_rollover(rig):
+    """!@brief Directories and token names roll over at local, not UTC,
+    month and year boundaries.
+    """
     pub = publisher(rig)
     start = nova(datetime(2026, 12, 31, 23, tzinfo=CHICAGO))
     labels = [p[2] for p in split_range(start, start + 2 * publish.HOUR,
@@ -547,6 +641,7 @@ def test_month_and_year_rollover(rig):
 
 
 def test_parse_hour_accepts_labels_and_local_times(rig):
+    """!@brief ``--hour`` accepts labels with offset and naive local times."""
     pub = publisher(rig)
     assert pub.parse_hour("2026-11-01T01-0600") == nova(utc(2026, 11, 1, 7))
     assert pub.parse_hour("2026-11-01T01-0500") == nova(utc(2026, 11, 1, 6))
@@ -558,6 +653,10 @@ def test_parse_hour_accepts_labels_and_local_times(rig):
 
 
 def test_hourly_dumps_shifts_uploads_and_reports(rig):
+    """!@brief End to end: one hourly run dumps three streams, shifts, uploads
+    raw and shifted to separate areas, creates and announces the
+    month's token, writes the status page; a rerun does nothing.
+    """
     rig.configure(streams={"numi": {"signals": ["$74", "$A9"]}, "all": {},
                            "booster": {"types": ["BNB", "BNB_TCLK"]}})
     # 13:10 CDT: the preceding hour is 12:00-13:00.
@@ -646,6 +745,7 @@ def test_hourly_dumps_shifts_uploads_and_reports(rig):
 
 
 def test_hourly_catches_up_missing_hours_in_one_call(rig):
+    """!@brief Missed hours in the catch-up window are dumped in one call."""
     rig.configure(hourly={"catchup_hours": 3})
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     first = rig.log("dump.log")
@@ -665,6 +765,9 @@ def test_hourly_catches_up_missing_hours_in_one_call(rig):
 
 
 def test_a_hole_in_the_catchup_window_is_refilled_alone(rig):
+    """!@brief A lost file is re-dumped alone (only its format), and a complete
+    but different copy on FDP is never removed or replaced.
+    """
     rig.configure(hourly={"catchup_hours": 3})
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     # Lose the 11:00 hour's JSON from both disk and the database.
@@ -691,6 +794,9 @@ def test_a_hole_in_the_catchup_window_is_refilled_alone(rig):
 
 
 def test_file_on_disk_but_not_recorded_is_adopted_not_redumped(rig):
+    """!@brief A complete raw file on disk but not in the database is adopted
+    (recorded and shifted), not dumped again.
+    """
     pub = publisher(rig)
     label = "2026-10-22T12-0500"
     for fmt, (raw, _) in pub.file_paths("all", label).items():
@@ -707,6 +813,7 @@ def test_file_on_disk_but_not_recorded_is_adopted_not_redumped(rig):
 
 
 def test_fall_back_hours_are_two_distinct_files(rig):
+    """!@brief The two fall-back 01:00 hours hold disjoint events."""
     rig.configure(hourly={"catchup_hours": 3})
     # The second 01:00 (CST), as a label; catch-up adds 00:00 and 01:00 CDT.
     assert rig.main("hourly", "--hour", "2026-11-01T01-0600",
@@ -723,6 +830,9 @@ def test_fall_back_hours_are_two_distinct_files(rig):
 
 
 def test_fall_back_day_file_holds_all_25_hours(rig):
+    """!
+    @brief The 25 h day file holds exactly the rows of its 25 hourly files.
+    """
     rig.configure(hourly={"catchup_hours": 25})
     assert rig.main("hourly", "--hour", "2026-11-01T23",
                     now=utc(2026, 11, 3)) == 0
@@ -742,6 +852,11 @@ def test_fall_back_day_file_holds_all_25_hours(rig):
 
 
 def test_token_is_chosen_by_data_month_not_run_month(rig):
+    """!
+    @brief Blur token choice (D7): the hour 23:00 of 31 October, processed on
+    1 November, is shifted with October's token and no November
+    token is created.
+    """
     # 00:10 CDT on 1 November: the preceding hour is 23:00 on 31 October.
     assert rig.main("hourly", now=utc(2026, 11, 1, 5, 10)) == 0
     shifts = [l for l in rig.log("shift.log") if l.startswith("apply")]
@@ -753,6 +868,9 @@ def test_token_is_chosen_by_data_month_not_run_month(rig):
 
 
 def test_existing_token_is_never_overwritten(rig):
+    """!@brief An existing token file is used unchanged; no token is created or
+    announced.
+    """
     token = rig.tokens / "dts1-2026-10.token"
     token.write_text("keep-me\n")
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
@@ -762,6 +880,10 @@ def test_existing_token_is_never_overwritten(rig):
 
 
 def test_real_shift_inverts_byte_identically(rig):
+    """!@brief With the real darpa-spill-shift: the token is Gaussian 3200/9600
+    ticks and mode 0600, the shifted files differ from raw, and
+    inverting them restores the raw files byte for byte.
+    """
     rig.configure(tools={"shift": rig.real_shift})
     if not os.access(rig.real_shift, os.X_OK):
         pytest.skip("darpa-spill-shift is not installed beside this python")
@@ -785,6 +907,9 @@ def test_real_shift_inverts_byte_identically(rig):
 
 
 def test_stalled_ingest_blocks_the_dump(rig):
+    """!@brief A stalled watermark blocks the dump (exit 75), alerts once, and
+    the alert is rate-limited.
+    """
     rig.watermark = nova(utc(2026, 10, 22, 17, 30))      # 12:30 CDT
     code = rig.main("hourly", now=utc(2026, 10, 22, 18, 10))
     assert code == publish.EXIT_TEMPFAIL
@@ -801,6 +926,10 @@ def test_stalled_ingest_blocks_the_dump(rig):
 
 
 def test_ingest_gate_lets_ready_catchup_hours_through(rig):
+    """!
+    @brief Hours before the watermark are processed; later ones wait for the
+    next run.
+    """
     rig.configure(hourly={"catchup_hours": 3})
     rig.watermark = nova(utc(2026, 10, 22, 17, 30))      # 12:30 CDT
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 75
@@ -813,7 +942,13 @@ def test_ingest_gate_lets_ready_catchup_hours_through(rig):
 
 
 def test_unreadable_sources_count_as_not_ready(rig, monkeypatch):
+    """!
+    @brief An unreachable ``/api/sources`` counts as not ready, and says why.
+    """
     def broken(*args):
+        """!@brief Fake ``http_get_json`` that always fails.
+        @throws OSError always.
+        """
         raise OSError("connection refused")
     monkeypatch.setattr(publish, "http_get_json", broken)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 75
@@ -821,6 +956,7 @@ def test_unreadable_sources_count_as_not_ready(rig, monkeypatch):
 
 
 def test_ingest_check_can_be_disabled(rig):
+    """!@brief With ``ingest_check.enabled`` false the watermark is ignored."""
     rig.configure(ingest_check={"enabled": False})
     rig.watermark = 0
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
@@ -830,6 +966,9 @@ def test_ingest_check_can_be_disabled(rig):
 
 
 def test_dump_exit_3_is_retried_once(rig):
+    """!@brief Dump exit 3 (archive changed) is retried once; a second 3 keeps
+    the files with a warning.
+    """
     rig.set_codes("dump", 3, 3)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     assert len(rig.log("dump.log")) == 2
@@ -839,6 +978,10 @@ def test_dump_exit_3_is_retried_once(rig):
 
 
 def test_dump_failure_is_recorded_and_alerted(rig):
+    """!
+    @brief A failed dump records errors, alerts, fails the run, and the next
+    run retries the hour.
+    """
     rig.set_codes("dump", 1)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 1
     rows = list(rig.files().values())
@@ -857,6 +1000,10 @@ def test_dump_failure_is_recorded_and_alerted(rig):
 
 @pytest.mark.parametrize("code", [4, 7])
 def test_upload_auth_or_network_failure_then_retry(rig, code):
+    """!
+    @brief fdp-put exit 4/7 stops the upload stage, leaves files pending and
+    alerts; the next ``upload`` sends everything.
+    """
     rig.configure(hourly={"catchup_hours": 2})
     rig.set_codes("fdp-put", code)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == \
@@ -888,6 +1035,9 @@ ZOMBIE_ERROR = ("raw upload: removed incomplete remote copy (size -1, "
 
 
 def test_partial_upload_zombie_is_removed_and_retried(rig):
+    """!@brief After fdp-put exit 12 the ``size -1`` entry is removed with
+    ``fdp-rm -f`` and re-sent; verified files are marked uploaded.
+    """
     rig.set_codes("fdp-put", 12, 0)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 3
     zombie = RAW_DIR + "nd-all-2026-10-22T12-0500.csv"
@@ -919,8 +1069,13 @@ def test_partial_upload_zombie_is_removed_and_retried(rig):
 
 
 def test_skip_existing_over_a_zombie_is_not_marked_uploaded(rig):
-    """The gateway bug: the retry's --skip-existing skipped the empty entry
-    a failed PUT left, exited 0, and every file was recorded uploaded."""
+    """!@brief The gateway bug: the retry's --skip-existing skipped the empty
+    entry a failed PUT left, exited 0, and every file was recorded
+    uploaded.
+
+    Checks that the fdp-stat verification catches it and the copy
+    stays pending until really sent.
+    """
     rig.set_codes("fdp-put", 12, 0)
     rig.set_codes("fdp-rm", 1)                 # the zombie survives run 1
     raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.csv")
@@ -946,6 +1101,10 @@ def test_skip_existing_over_a_zombie_is_not_marked_uploaded(rig):
 
 
 def test_a_missing_remote_file_stays_pending(rig):
+    """!
+    @brief A file fdp-put claims to have sent but fdp-stat cannot find stays
+    pending (per-path stat fallback) and is sent next time.
+    """
     (rig.ctl / "fdp-put.drop").write_text("nd-all-2026-10-22T12-0500.json\n")
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 3
     raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.json")
@@ -967,6 +1126,9 @@ def test_a_missing_remote_file_stays_pending(rig):
 
 
 def test_a_good_remote_file_is_uploaded_only_after_the_stat_matches(rig):
+    """!@brief Uploads are marked only after size and adler32 match; a complete
+    copy with a wrong checksum is left on FDP and the file pending.
+    """
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     stats = rig.log("fdp-stat.log")
     assert len(stats) == 2                       # one per batch, both found
@@ -999,6 +1161,9 @@ def test_a_good_remote_file_is_uploaded_only_after_the_stat_matches(rig):
 
 
 def test_upload_verify_repairs_zombies_and_reports_mismatches(rig):
+    """!@brief ``upload --verify`` removes and re-sends zombies and missing
+    copies, and reports (never removes) a real mismatch.
+    """
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     rows = rig.files()
     zombie = RAW_DIR + "nd-all-2026-10-22T12-0500.csv"
@@ -1039,6 +1204,9 @@ def test_upload_verify_repairs_zombies_and_reports_mismatches(rig):
 
 
 def test_a_mismatch_on_a_copy_already_recorded_uploaded_is_never_removed(rig):
+    """!@brief A ``size -1`` entry for a copy already recorded uploaded is
+    reported, never removed.
+    """
     rig.configure(fdp={"enabled": False})
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     raw = str(rig.data / "raw/oct/2026-oct-22/nd-all-2026-10-22T12-0500.csv")
@@ -1057,6 +1225,9 @@ def test_a_mismatch_on_a_copy_already_recorded_uploaded_is_never_removed(rig):
 
 
 def test_upload_verify_since_and_dry_run(rig, capsys):
+    """!@brief ``--since`` limits the verify, needs ``--verify`` and a date; a
+    dry run stats and removes nothing and leaves the database as is.
+    """
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     stats = len(rig.log("fdp-stat.log"))
     assert rig.main("upload", "--verify", "--since", "2026-10-23",
@@ -1084,6 +1255,9 @@ def test_upload_verify_since_and_dry_run(rig, capsys):
 
 
 def test_adler32_formatting_and_stat_parsing(tmp_path):
+    """!@brief adler32 is 8 lowercase hex digits across chunks; fdp-stat JSON
+    and checksum shapes are parsed.
+    """
     empty = tmp_path / "empty"
     empty.write_bytes(b"")
     assert publish.adler32_file(str(empty)) == "00000001"
@@ -1110,6 +1284,9 @@ def test_adler32_formatting_and_stat_parsing(tmp_path):
 
 
 def test_old_state_database_gains_the_checksum_columns(tmp_path):
+    """!
+    @brief A database from before the adler32 cache is migrated in place.
+    """
     path = tmp_path / "publish.db"
     conn = sqlite3.connect(str(path))
     conn.executescript(
@@ -1130,6 +1307,9 @@ def test_old_state_database_gains_the_checksum_columns(tmp_path):
 
 
 def test_upload_groups_by_destination_directory(rig):
+    """!@brief One fdp-put per destination directory; shifted files go only to
+    the shifted area and raw only to the raw area.
+    """
     rig.configure(hourly={"catchup_hours": 3}, fdp={"enabled": False})
     # 23:00, 00:00 and 01:00 CDT across midnight: two day directories.
     assert rig.main("hourly", now=utc(2026, 10, 23, 6, 10)) == 0
@@ -1156,6 +1336,10 @@ def test_upload_groups_by_destination_directory(rig):
 
 
 def test_upload_disabled_leaves_files_pending(rig):
+    """!
+    @brief With ``fdp.enabled`` false nothing is uploaded and the grid shows
+    ``shifted``.
+    """
     rig.configure(fdp={"enabled": False})
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     assert rig.log("fdp-put.log") == []
@@ -1167,6 +1351,7 @@ def test_upload_disabled_leaves_files_pending(rig):
 
 
 def test_backfill_whole_pieces_only(rig):
+    """!@brief Backfill dumps only whole hours/days of the range."""
     code = rig.main("backfill", "--start", "2026-10-22T09:30",
                     "--end", "2026-10-22T13:00", "--no-upload",
                     now=utc(2026, 10, 25))
@@ -1182,6 +1367,7 @@ def test_backfill_whole_pieces_only(rig):
 
 
 def test_backfill_days_and_hours_one_call_per_kind(rig):
+    """!@brief Backfill makes one dump call per kind; re-running is a no-op."""
     code = rig.main("backfill", "--start", "2026-10-21", "--end", "2026-10-22",
                     now=utc(2026, 10, 25))
     assert code == 0
@@ -1201,6 +1387,12 @@ def test_backfill_days_and_hours_one_call_per_kind(rig):
 
 
 def klist_text(expires, renew_until):
+    """!@brief MIT ``klist`` output for a TGT with the given times.
+    @param expires     aware expiry time.
+    @param renew_until aware renewable-until time.
+    @return the text, times in host local time as klist prints
+            them.
+    """
     fmt = "%m/%d/%Y %H:%M:%S"
     local = lambda m: datetime.fromtimestamp(m.timestamp()).strftime(fmt)
     return ("Ticket cache: FILE:/x\nDefault principal: anorman@FNAL.GOV\n\n"
@@ -1211,6 +1403,10 @@ def klist_text(expires, renew_until):
 
 
 def test_creds_without_a_ticket_asks_for_kinit(rig):
+    """!
+    @brief No Kerberos ticket: kinit alert with the exact command; htgettoken
+    still runs with ``--nooidc`` and no tty.
+    """
     now = utc(2026, 10, 22, 18)
     (rig.ctl / "jwt.exp").write_text(str(int(now.timestamp()) + 7200))
     assert rig.main("creds", now=now) == 1
@@ -1226,6 +1422,9 @@ def test_creds_without_a_ticket_asks_for_kinit(rig):
 
 
 def test_creds_renews_a_ticket_close_to_expiry(rig):
+    """!@brief A ticket near expiry is renewed with ``kinit -R``; bearer expiry
+    is reported.
+    """
     now = utc(2026, 10, 22, 18)
     (rig.ctl / "klist.out").write_text(klist_text(now + timedelta(hours=2),
                                                   now + timedelta(days=5)))
@@ -1247,6 +1446,9 @@ def test_creds_renews_a_ticket_close_to_expiry(rig):
 
 
 def test_creds_leaves_a_fresh_ticket_alone_and_warns_on_renew_until(rig):
+    """!
+    @brief A fresh ticket is not renewed, but a near renew-until is alerted.
+    """
     now = utc(2026, 10, 22, 18)
     (rig.ctl / "klist.out").write_text(klist_text(now + timedelta(hours=20),
                                                   now + timedelta(hours=10)))
@@ -1259,6 +1461,9 @@ def test_creds_leaves_a_fresh_ticket_alone_and_warns_on_renew_until(rig):
 
 
 def test_creds_uses_sso_only_with_real_values_and_never_leaks_them(rig, capfd):
+    """!@brief Real SSO credentials enable password approval, and the password
+    appears in no log, mail, run record or status file.
+    """
     now = utc(2026, 10, 22, 18)
     (rig.ctl / "klist.out").write_text(klist_text(now + timedelta(hours=20),
                                                   now + timedelta(days=5)))
@@ -1284,6 +1489,9 @@ def test_creds_uses_sso_only_with_real_values_and_never_leaks_them(rig, capfd):
 
 
 def test_creds_with_placeholder_values_uses_nooidc(rig):
+    """!
+    @brief Placeholder SSO values are ignored: ``--nooidc``, no password.
+    """
     now = utc(2026, 10, 22, 18)
     (rig.ctl / "klist.out").write_text(klist_text(now + timedelta(hours=20),
                                                   now + timedelta(days=5)))
@@ -1296,6 +1504,7 @@ def test_creds_with_placeholder_values_uses_nooidc(rig):
 
 
 def test_parse_klist_formats():
+    """!@brief MIT and Heimdal klist output parse to principal and times."""
     mit = ("Ticket cache: FILE:/tmp/krb5cc_1\nDefault principal: a@FNAL.GOV\n\n"
            "Valid starting       Expires              Service principal\n"
            "10/22/26 08:00:00  10/23/26 10:00:00  krbtgt/FNAL.GOV@FNAL.GOV\n"
@@ -1314,6 +1523,7 @@ def test_parse_klist_formats():
 
 
 def test_jwt_expiry():
+    """!@brief The JWT ``exp`` claim is decoded; garbage gives None."""
     body = base64.urlsafe_b64encode(b'{"exp": 1790000000}').decode().rstrip("=")
     assert publish.jwt_expiry("eyJhbGciOiJub25lIn0.{}.sig\n".format(body)) == \
         1790000000
@@ -1321,6 +1531,7 @@ def test_jwt_expiry():
 
 
 def test_redaction_hides_tokens_and_passwords():
+    """!@brief JWTs, Vault tokens and listed secrets are masked."""
     text = "token eyJabc.def.ghi and hvs.ABCDEFGHIJKL and pw hunter2"
     out = publish._redact(text, ["hunter2"])
     assert "eyJabc" not in out and "hvs.ABC" not in out and "hunter2" not in out
@@ -1330,6 +1541,10 @@ def test_redaction_hides_tokens_and_passwords():
 
 
 def test_token_job_month_next_and_no_overwrite(rig):
+    """!@brief ``token --next`` creates next month's blur token once; a repeat
+    leaves it untouched; bad months are usage errors; December uses
+    local time.
+    """
     rig.configure(tools={"shift": rig.real_shift}
                   if os.access(rig.real_shift, os.X_OK) else {})
     now = utc(2026, 10, 25, 14)
@@ -1349,6 +1564,7 @@ def test_token_job_month_next_and_no_overwrite(rig):
 
 
 def test_alert_rate_limit_per_key(rig):
+    """!@brief Alerts are rate-limited per key and counted."""
     now = utc(2026, 10, 22, 18)
     pub = publisher(rig, now=now)
     pub.alert("a", "first", "body")
@@ -1365,6 +1581,7 @@ def test_alert_rate_limit_per_key(rig):
 
 
 def test_a_broken_mailer_never_raises(rig):
+    """!@brief A missing mailer is logged, not raised, and not marked sent."""
     rig.configure(alerts={"mail_command": str(rig.root / "no-such-mailer")})
     pub = publisher(rig, now=utc(2026, 10, 22, 18))
     pub.alert("x", "subject", "body")          # logged, not raised
@@ -1372,6 +1589,7 @@ def test_a_broken_mailer_never_raises(rig):
 
 
 def test_a_busy_job_exits_75(rig):
+    """!@brief A job whose lock is held exits 75 without dumping."""
     import fcntl
     rig.state_dir.mkdir()
     with open(rig.state_dir / "hourly.lock", "w") as handle:
@@ -1384,6 +1602,10 @@ def test_a_busy_job_exits_75(rig):
 
 
 def test_dry_run_prints_commands_and_writes_nothing(rig, capsys):
+    """!
+    @brief ``-n`` prints every command (dump, token, shift, put, stat, mail)
+    and creates no file, token or log.
+    """
     rig.configure(hourly={"catchup_hours": 2})
     assert rig.main("-n", "hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     out = capsys.readouterr().out
@@ -1403,6 +1625,7 @@ def test_dry_run_prints_commands_and_writes_nothing(rig, capsys):
 
 
 def test_dry_run_starts_from_the_real_state(rig, capsys):
+    """!@brief A dry run plans from the real database without changing it."""
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     before = (rig.state_dir / "publish.db").read_bytes()
     capsys.readouterr()
@@ -1418,6 +1641,9 @@ def test_dry_run_starts_from_the_real_state(rig, capsys):
 
 
 def test_quiet_beam_passes_the_gate_on_polled_through(rig):
+    """!@brief ``polled_through_nova`` lets a quiet beam through, less
+    ``ingest_check.settle``.
+    """
     # Beam off since 09:00 CDT: the newest event stops, the polls go on.
     rig.watermark = nova(utc(2026, 10, 22, 14))
     rig.polled_through = nova(utc(2026, 10, 22, 18, 9))
@@ -1430,6 +1656,7 @@ def test_quiet_beam_passes_the_gate_on_polled_through(rig):
 
 
 def test_a_source_that_never_polled_or_is_stopped_blocks(rig):
+    """!@brief A source without a watermark or with ingest stopped blocks."""
     rig.watermark = None
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 75
     assert "has not completed an ingest poll" in rig.mails()[-1]["body"]
@@ -1439,6 +1666,9 @@ def test_a_source_that_never_polled_or_is_stopped_blocks(rig):
 
 
 def test_ingest_ready_again_clears_the_alert(rig):
+    """!
+    @brief Readiness clears the ingest alert, so the next stall mails at once.
+    """
     rig.watermark = nova(utc(2026, 10, 22, 17, 30))
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 75
     rig.watermark = 10 ** 18
@@ -1451,6 +1681,7 @@ def test_ingest_ready_again_clears_the_alert(rig):
 
 
 def test_dry_run_reads_ingest_once_and_does_not_wait(rig, monkeypatch, capsys):
+    """!@brief A dry run never sleeps waiting for ingest."""
     slept = []
     monkeypatch.setattr(publish, "_sleep", slept.append)
     rig.configure(ingest_check={"wait": 300})
@@ -1460,6 +1691,9 @@ def test_dry_run_reads_ingest_once_and_does_not_wait(rig, monkeypatch, capsys):
 
 
 def test_an_hour_leaving_the_catchup_window_incomplete_is_alerted(rig):
+    """!@brief An hour leaving the window incomplete is alerted once with a
+    backfill command.
+    """
     rig.configure(hourly={"catchup_hours": 2})
     rig.watermark = nova(utc(2026, 10, 22, 15, 30))          # stalled
     for hour in range(16, 20):
@@ -1476,12 +1710,16 @@ def test_an_hour_leaving_the_catchup_window_incomplete_is_alerted(rig):
 
 
 def test_a_fresh_install_does_not_report_hours_before_it(rig):
+    """!@brief Hours before the first run are not reported as expired."""
     rig.configure(hourly={"catchup_hours": 1})
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     assert not [m for m in rig.mails() if "backfill" in m["argv"][1]]
 
 
 def test_dumping_jobs_share_the_dump_lock(rig):
+    """!@brief Backfill and daily give up (75, ``busy``) while ``dump.lock`` is
+    held.
+    """
     import fcntl
     rig.configure(locks={"dump_wait": 0})
     rig.state_dir.mkdir()
@@ -1497,6 +1735,9 @@ def test_dumping_jobs_share_the_dump_lock(rig):
 
 
 def test_a_token_created_by_a_concurrent_run_is_used(rig):
+    """!@brief When another run creates the month's token first, that token is
+    used and no failure or creation is reported.
+    """
     # The other job wins the race: the file appears, 'token' refuses (2).
     racer = rig.bin / "racing-shift"
     racer.write_text("#!/bin/sh\nif [ \"$1\" = token ]; then\n"
@@ -1512,6 +1753,7 @@ def test_a_token_created_by_a_concurrent_run_is_used(rig):
 
 
 def test_a_timeout_kills_the_whole_process_group(rig, tmp_path):
+    """!@brief A timeout kills the child's grandchildren too."""
     pub = publisher(rig)
     marker = tmp_path / "grandchild-alive"
     script = ("(sleep 3; touch {}) & sleep 30".format(marker))
@@ -1523,12 +1765,19 @@ def test_a_timeout_kills_the_whole_process_group(rig, tmp_path):
 
 
 def test_dump_and_shift_run_with_timeouts(rig, monkeypatch):
+    """!
+    @brief Dump timeout scales per day of data; shift uses its own timeout.
+    """
     rig.configure(tools={"dump_timeout": 100, "shift_timeout": 7})
     pub = publisher(rig, now=utc(2026, 10, 22, 18, 10))
     seen = []
     real = pub.run
 
     def spy(cmd, **kwargs):
+        """!
+        @brief Record each command's name, subcommand and timeout, then run it.
+        @return the real :meth:`run` result.
+        """
         seen.append((os.path.basename(cmd[0]), cmd[1] if len(cmd) > 1
                      else "", kwargs.get("timeout")))
         return real(cmd, **kwargs)
@@ -1543,6 +1792,9 @@ def test_dump_and_shift_run_with_timeouts(rig, monkeypatch):
 
 
 def test_a_hung_dump_is_alerted_and_the_job_reported_stale(rig):
+    """!@brief A job lock held past ``stale_job_hours`` is alerted and shown
+    stale on the status page.
+    """
     import fcntl
     import time as _time
     rig.state_dir.mkdir()
@@ -1570,9 +1822,15 @@ def test_a_hung_dump_is_alerted_and_the_job_reported_stale(rig):
 
 
 def test_alerts_still_go_when_the_state_database_fails(rig, monkeypatch):
+    """!@brief With the database failing, alerts go and are rate-limited by a
+    stamp file.
+    """
     pub = publisher(rig, now=utc(2026, 10, 22, 18))
 
     def full(*args, **kwargs):
+        """!@brief Fake ``alert_due`` of a full disk.
+        @throws sqlite3.OperationalError always.
+        """
         raise sqlite3.OperationalError("database or disk is full")
     monkeypatch.setattr(pub.state, "alert_due", full)
     stamp = pub._stamp_path("disk-test")
@@ -1589,7 +1847,11 @@ def test_alerts_still_go_when_the_state_database_fails(rig, monkeypatch):
 
 
 def test_an_unwritable_state_database_is_mailed(rig, monkeypatch):
+    """!@brief An unwritable state database fails the run (1) and is mailed."""
     def full(self, job, when):
+        """!@brief Fake ``run_start`` of a full disk.
+        @throws sqlite3.OperationalError always.
+        """
         raise sqlite3.OperationalError("database or disk is full")
     monkeypatch.setattr(publish.State, "run_start", full)
     monkeypatch.setattr(publish.State, "alert_due",
@@ -1608,6 +1870,7 @@ def test_an_unwritable_state_database_is_mailed(rig, monkeypatch):
 
 
 def test_a_failed_status_write_leaves_no_temporary_file(rig, monkeypatch):
+    """!@brief A failing status render leaves no @c *.tmp.* file."""
     monkeypatch.setattr(publish, "render_html", lambda status: 12345)
     pub = publisher(rig, now=utc(2026, 10, 22, 18))
     with pytest.raises(TypeError):
@@ -1617,6 +1880,7 @@ def test_a_failed_status_write_leaves_no_temporary_file(rig, monkeypatch):
 
 
 def test_disk_alert_is_sent_before_the_status_is_written(rig, monkeypatch):
+    """!@brief The disk alert goes before the status files are written."""
     rig.configure(alerts={"disk_warn_percent": 0})
     monkeypatch.setattr(publish, "render_html", lambda status: 12345)
     pub = publisher(rig, now=utc(2026, 10, 22, 18))
@@ -1628,6 +1892,9 @@ def test_disk_alert_is_sent_before_the_status_is_written(rig, monkeypatch):
 @pytest.mark.parametrize("code,meaning", [(6, "exists"),
                                           (9, "checksum mismatch")])
 def test_upload_exists_or_checksum_failure_then_retry(rig, code, meaning):
+    """!@brief fdp-put exit 6/9 fails that batch but not the stage; a retry
+    succeeds.
+    """
     rig.configure(hourly={"catchup_hours": 2})
     rig.set_codes("fdp-put", code)
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == \
@@ -1649,6 +1916,7 @@ def test_upload_exists_or_checksum_failure_then_retry(rig, code, meaning):
 
 
 def test_a_batch_partial_twice_is_alerted(rig):
+    """!@brief One partial upload is not mailed; the second in a row is."""
     rig.configure(fdp={"enabled": False})
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     rig.configure(fdp={"enabled": True})
@@ -1667,6 +1935,9 @@ def test_a_batch_partial_twice_is_alerted(rig):
 
 
 def test_upload_auth_failure_is_not_mailed_twice_for_one_cause(rig):
+    """!
+    @brief Upload exit 4 is not mailed while a credentials alert is active.
+    """
     pub = publisher(rig, now=utc(2026, 10, 22, 18))
     pub.alert("kinit-needed", "kinit needed", "body")
     rig.set_codes("fdp-put", 4, 4)
@@ -1677,6 +1948,7 @@ def test_upload_auth_failure_is_not_mailed_twice_for_one_cause(rig):
 
 
 def test_alert_backoff_doubles_and_clears(rig):
+    """!@brief Alert intervals double (1 h, 2 h, 4 h) and reset on resolve."""
     t0 = utc(2026, 10, 22, 18)
     sends = []
     for minutes in (0, 60, 110, 180, 300, 420):
@@ -1695,6 +1967,10 @@ def test_alert_backoff_doubles_and_clears(rig):
 
 
 def test_sso_password_mode_backs_off_after_a_failure(rig):
+    """!
+    @brief A failed SSO password attempt is held off until the back-off ends
+    or the env file changes.
+    """
     now = utc(2026, 10, 22, 18)
     (rig.ctl / "klist.out").write_text(klist_text(now + timedelta(hours=20),
                                                   now + timedelta(days=5)))
@@ -1720,6 +1996,9 @@ def test_sso_password_mode_backs_off_after_a_failure(rig):
 
 
 def test_env_script_last_status_is_ignored_but_unreadable_is_reported(rig):
+    """!@brief The env script's exit status is ignored; an unreadable script is
+    exit 125 and mailed.
+    """
     rig.env_script.write_text(ENV_SCRIPT + "[ -d /no/such/dir ] && echo x\n")
     assert rig.main("hourly", now=utc(2026, 10, 22, 18, 10)) == 0
     assert rig.log("fdp-put.log")[0]["sourced"] == "yes"
@@ -1732,6 +2011,7 @@ def test_env_script_last_status_is_ignored_but_unreadable_is_reported(rig):
 
 
 def test_backfill_help_shows_no_doubled_default(capsys):
+    """!@brief ``backfill -h`` does not print a doubled default."""
     with pytest.raises(SystemExit):
         publish.build_parser().parse_args(["backfill", "-h"])
     out = capsys.readouterr().out
@@ -1742,6 +2022,7 @@ def test_backfill_help_shows_no_doubled_default(capsys):
 
 
 def test_config_precedence_cli_env_dotenv_yaml(rig, tmp_path):
+    """!@brief Precedence is CLI > environment > .env > YAML."""
     rig.configure(data_root="/from/yaml", prefix="yaml")
     dotenv = tmp_path / "publish.env"
     dotenv.write_text("DARPA_SPILL_PUBLISH_DATA_ROOT=/from/dotenv\n"
@@ -1752,6 +2033,9 @@ def test_config_precedence_cli_env_dotenv_yaml(rig, tmp_path):
     path = rig.write_config()
 
     def settings(argv, environ):
+        """!@brief Load settings for *argv* with *environ*.
+        @return the merged settings.
+        """
         args = publish.build_parser().parse_args(["-c", str(path)] + argv)
         return publish.load_settings(args, environ)
 
@@ -1780,6 +2064,7 @@ def test_config_precedence_cli_env_dotenv_yaml(rig, tmp_path):
 
 
 def test_bad_configuration_is_a_usage_error(rig, capsys):
+    """!@brief Unknown keys and bad values are exit 2."""
     rig.configure(fdp={"enabled": True})
     rig.config["fdp"]["paralel"] = 3
     assert rig.main("status", now=utc(2026, 10, 22)) == 2
@@ -1793,6 +2078,7 @@ def test_bad_configuration_is_a_usage_error(rig, capsys):
 
 
 def test_example_config_matches_the_defaults():
+    """!@brief ``config/publish.yaml`` equals :data:`publish.DEFAULTS`."""
     path = os.path.join(os.path.dirname(__file__), "..", "config",
                         "publish.yaml")
     args = publish.build_parser().parse_args(["-c", path, "status"])
@@ -1805,6 +2091,7 @@ def test_example_config_matches_the_defaults():
 
 
 def test_status_job_renders_errors_and_jobs(rig):
+    """!@brief ``status`` renders job results, grid errors and disk usage."""
     rig.set_codes("dump", 1)
     rig.main("hourly", now=utc(2026, 10, 22, 18, 10))
     assert rig.main("status", now=utc(2026, 10, 22, 18, 15)) == 0
@@ -1820,6 +2107,7 @@ def test_status_job_renders_errors_and_jobs(rig):
 
 
 def test_count_rows(tmp_path):
+    """!@brief Row counts for CSV and JSON dumps."""
     csv_path = tmp_path / "a.csv"
     csv_path.write_text("# c1\n# c2\nnova_time,source\n1,a\n2,a\n3,a\n")
     assert publish.count_rows(str(csv_path), "csv") == 3
@@ -1836,6 +2124,9 @@ def test_count_rows(tmp_path):
 
 
 def test_check_reports_a_table(rig, capsys):
+    """!@brief ``check`` prints a table; a group/other-readable token directory
+    fails it.
+    """
     (rig.root / "certs").mkdir()
     rig.data.mkdir()
     code = rig.main("check", now=utc(2026, 10, 22))
@@ -1858,6 +2149,7 @@ def test_check_reports_a_table(rig, capsys):
 
 
 def test_version_and_usage(capsys):
+    """!@brief ``-V`` prints the version; no subcommand is a usage error."""
     assert publish.main(["-V"], environ={}) == 0
     assert "darpa-spill-publish" in capsys.readouterr().out
     assert publish.main([], environ={}) == 2

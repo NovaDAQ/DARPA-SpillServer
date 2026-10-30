@@ -1,0 +1,41 @@
+# Doxygen configuration for DARPA-SpillServer.
+# Generate:  doxygen Doxyfile      -> build/doxygen/html/index.html
+# Only non-default settings are listed; run "doxygen -x Doxyfile" to compare.
+
+PROJECT_NAME           = "DARPA-SpillServer"
+PROJECT_BRIEF          = "NOvA spill timing server, publisher and reversible timestamp blur (dts1)"
+OUTPUT_DIRECTORY       = build/doxygen
+STRIP_FROM_PATH        = .
+JAVADOC_AUTOBRIEF      = YES
+PYTHON_DOCSTRING       = YES
+OPTIMIZE_OUTPUT_JAVA   = YES
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+SOURCE_BROWSER         = YES
+RECURSIVE              = YES
+INPUT                  = README.md \
+                         Design.md \
+                         docs \
+                         src/darpa_spillserver \
+                         contrib \
+                         deploy/gateway \
+                         tests \
+                         bootstrap.sh \
+                         start.sh \
+                         stop.sh
+FILE_PATTERNS          = *.py *.sh *.md
+EXCLUDE_PATTERNS       = */__pycache__/* */*.egg-info/*
+USE_MDFILE_AS_MAINPAGE = README.md
+# The docs use GitHub heading anchors in their tables of contents.
+MARKDOWN_ID_STYLE      = GITHUB
+# Shell has no Doxygen parser: treat it as C after filtering (see the filter).
+EXTENSION_MAPPING      = sh=C
+FILTER_PATTERNS        = "*.sh=sed -E -f docs/doxygen/sh_filter.sed"
+FILTER_SOURCE_FILES    = NO
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = NO
+WARN_IF_UNDOCUMENTED   = YES
+WARN_LOGFILE           = build/doxygen/warnings.log
+QUIET                  = YES

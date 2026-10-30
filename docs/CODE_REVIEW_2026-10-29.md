@@ -32,7 +32,7 @@ The TDU mirror identifies `NovaDAQ/TDUWeb` on `Darpa-Modifications` as authorita
 | [#4](https://github.com/NovaDAQ/DARPA-SpillServer/issues/4) | [P2] CSV alias loses repeated filters and corrupts encoded query values | Implemented |
 | [#5](https://github.com/NovaDAQ/DARPA-SpillServer/issues/5) | [P2] Export ceiling silently produces a successful incomplete dataset | Implemented |
 | [#6](https://github.com/NovaDAQ/DARPA-SpillServer/issues/6) | [P2] Parsing exact GPS strings loses NOvA ticks through float conversion | Implemented |
-| [#7](https://github.com/NovaDAQ/DARPA-SpillServer/issues/7) | [P2] Maximum Gaussian draw rounds the uniform to one and crashes shifting | Implemented |
+| [#7](https://github.com/NovaDAQ/DARPA-SpillServer/issues/7) | [P2] Maximum Gaussian draw rounds the uniform to one and crashes shifting | Fixed on main by 98246cf (exact upper half); this PR keeps that implementation and adds a regression |
 | [#8](https://github.com/NovaDAQ/DARPA-SpillServer/issues/8) | [P2] Automatic backfill treats a recent or gapped ring as empty | Implemented |
 | [#9](https://github.com/NovaDAQ/DARPA-SpillServer/issues/9) | [P1] A transient retention failure kills the poller while health still says running | Implemented |
 | [#10](https://github.com/NovaDAQ/DARPA-SpillServer/issues/10) | [P2] Split dumps omit completed quiet hours after the last stored event | Implemented |
@@ -66,3 +66,13 @@ The TDU mirror identifies `NovaDAQ/TDUWeb` on `Darpa-Modifications` as authorita
 - #15: log-derived deltas use the unique hardware predecessor, including rows outside the selected type/range. Missing or ambiguous numbering leaves delta unknown.
 
 OIDC remains deferred. GitHub issues remain open until the draft PR is merged; implementation here is not a deployment claim.
+
+## Merge with main (2026-10-30)
+
+`main` advanced 18 commits after the review baseline (Doxygen pass, 98246cf exact upper-half Gaussian draw, 41e7c3d broken-pipe exit). Merging it into this branch conflicted in 13 files (21 regions). Resolution policy:
+
+- Code: this branch's fixes are kept; `main`'s Doxygen blocks are carried over and reworded where the fix changed the documented behaviour (`_probe_earliest`, `_gps_string_to_nova`, `_maybe_prune`, `_query_server`, `_shift_json_stream`, `api._resolve_selection`, `signals.resolve_selection`).
+- `_gauss_draw` (#7): `main`'s implementation is kept. It evaluates the upper half as `-x(1-u)` with exact `1-u`, which removes both the `log(0)` endpoint and the far-tail precision loss for k >= 2^52; this branch's endpoint-only fallback is dropped. The branch's k = 2^53 - 1 regression test is retained and passes against `main`'s code.
+- Tests: `main`'s docstrings plus this branch's assertions and renamed tests.
+
+Merged suite: **615 passed**, 2 dependency deprecation warnings (90.26 s), Python 3.12.1.

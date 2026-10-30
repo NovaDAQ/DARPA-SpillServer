@@ -1,4 +1,8 @@
-"""The HTTP API.
+"""!
+@file src/darpa_spillserver/api.py
+@brief HTTP API router: event queries, export, reference tables, source administration.
+
+The HTTP API.
 
 Design.md asks for a structured data table selectable by time range and by
 accelerator event number in the operators' hex notation (``$74``, ``$8f``),
@@ -27,6 +31,17 @@ comma-separated) to restrict it to named TDUs; leaving it out means every
 source.  ``/api/sources`` lists them, and its ``PATCH`` form changes one at
 runtime --- allowed only to a caller holding the admin token, or a signed-in
 member of ``admin.allowed_groups``.
+
+Documentation note: FastAPI copies a route handler's docstring into the
+OpenAPI ``description`` served at ``/docs``, and a pydantic model's docstring
+into its schema description.  Those docstrings are therefore left as plain
+runtime text, and their Doxygen tags live in ``##`` comments above the
+``def``/``class`` instead.
+
+Concurrency: every handler is a coroutine on the server's event loop.  All
+SQLite access goes through ``asyncio.to_thread`` so a slow query never stalls
+the loop (and with it the ingest poller, which shares the loop).  Streaming
+responses iterate the store's generator from Starlette's threadpool.
 """
 
 from __future__ import annotations
@@ -58,27 +73,44 @@ from .storage import SpillStore
 
 __all__ = ["build_router"]
 
+## Module logger.
 log = logging.getLogger(__name__)
 
 
 def _error(status: int, message: str, hint: Optional[str] = None) -> HTTPException:
-    """Build an HTTPException whose body explains how to fix the problem."""
+    """!
+    @brief Build an HTTPException whose body explains how to fix the problem.
+
+    The body is ``{"error": message, "hint": hint}``; FastAPI wraps it as
+    ``{"detail": {...}}``.  Callers ``raise`` the result.
+
+    @param status HTTP status code.
+    @param message what went wrong.
+    @param hint optional advice on how to correct the request.
+    @return the exception, not yet raised.
+    """
     detail: Dict[str, Any] = {"error": message}
     if hint:
         detail["hint"] = hint
     return HTTPException(status_code=status, detail=detail)
 
 
+## @brief Request body of ``PATCH /api/sources/{name}``.
+#
+# The class docstring is the OpenAPI schema description, so it is kept as
+# plain text.  Both fields are optional; ``None`` means "leave unchanged".
 class SourceUpdate(BaseModel):
     """A change to one source.  Omitted fields are left as they are."""
 
+    ## New enabled state, or None to keep the current one.
     enabled: Optional[bool] = Field(
         None, description="Start (true) or stop (false) recording from it.")
+    ## New TDU base URL, or None to keep the current one.
     base_url: Optional[str] = Field(
         None, description="New TDU URL, e.g. http://tdu-near-master-ppc-04:8080")
 
 
-#: Header carrying the admin token on requests that change configuration.
+## Header carrying the admin token on requests that change configuration.
 ADMIN_HEADER = "X-Admin-Token"
 
 
@@ -87,29 +119,64 @@ def build_router(
     store: SpillStore,
     state: Any,
 ) -> APIRouter:
-    """Assemble the API router.
+    """!
+    @brief Assemble the API router.
 
-    :param config: merged server configuration.
-    :param store: the event archive.
-    :param state: the application state object, carrying ``ingest``,
+    Assemble the API router.
+
+    Route handlers are closures over *config*, *store* and *state*, so the
+    same factory can be instantiated per test application without globals.
+
+    @param config merged server configuration.
+    @param store the event archive.
+    @param state the application state object, carrying ``ingest``,
         ``authenticator``, ``admin_token`` and ``started_at``.
+    @return an ``APIRouter`` mounted under ``/api``.
     """
     router = APIRouter(prefix="/api", tags=["spills"])
     authenticator = state.authenticator
     ingest = state.ingest
 
     async def current_user(request: Request):
+        """!
+        @brief FastAPI dependency: the authenticated principal for a read route.
+
+        Delegates to the configured authenticator; with ``auth.enabled`` false
+        that is the no-op authenticator, which admits everyone.
+
+        @param request the incoming request.
+        @return the principal the authenticator resolved.
+        @throws HTTPException 401 from the authenticator when sign-in is
+            required and missing.
+        """
         return await authenticator.require_user(request)
 
     async def require_admin(request: Request) -> str:
-        """Allow a configuration change, returning who made it.
+        """!
+        @brief FastAPI dependency guarding the source-changing routes.
+
+        Allow a configuration change, returning who made it.
 
         The token is compared in constant time.  It travels in a header
         rather than a cookie, so a page on another site cannot make a
         browser send it.
+
+        Order of checks: (1) neither token nor SSO admin groups configured
+        means the feature is off (403); (2) a supplied header is judged
+        against the token and is final either way, so a wrong token does
+        not fall through to SSO; (3) otherwise an SSO principal in one of
+        ``admin.allowed_groups`` is accepted; (4) otherwise 401.
+
+        @param request the incoming request.
+        @return a short description of the caller, recorded as ``updated_by``.
+        @throws HTTPException 403 if changes are disabled, the token is wrong,
+            or the SSO user is in none of the allowed groups; 401 if no
+            credential was offered.
         """
         token = state.admin_token
         groups = list(config.admin.allowed_groups)
+        # Group-based admin is only meaningful when SSO actually produces
+        # principals with groups.
         via_sso = config.auth.enabled and bool(groups)
         if not token and not via_sso:
             raise _error(
@@ -121,6 +188,7 @@ def build_router(
 
         supplied = request.headers.get(ADMIN_HEADER, "")
         if token and supplied:
+            # compare_digest: timing does not leak how many leading bytes match.
             if hmac.compare_digest(supplied.encode(), token.encode()):
                 host = request.client.host if request.client else "?"
                 return "admin token from {}".format(host)
@@ -143,7 +211,17 @@ def build_router(
         )
 
     async def resolve_sources(requested: Optional[Sequence[str]]) -> List[str]:
-        """Validate ``source=`` values; an empty result means every source."""
+        """!
+        @brief Validate ``source=`` values; an empty result means every source.
+
+        Accepts repeated parameters and comma-separated lists, in any mix.
+        A name is valid if it is configured *or* still present in the archive,
+        so data from a source removed from the configuration stays queryable.
+
+        @param requested raw ``source`` query values, or None.
+        @return de-duplicated names in request order; ``[]`` for "all".
+        @throws HTTPException 400 naming any unknown source.
+        """
         names: List[str] = []
         for text in requested or []:
             names.extend(t.strip() for t in str(text).split(",") if t.strip())
@@ -160,15 +238,24 @@ def build_router(
                 "Known sources: {}. See /api/sources.".format(
                     ", ".join(sorted(known)) or "(none)"),
             )
+        # dict.fromkeys de-duplicates while preserving first-seen order.
         return list(dict.fromkeys(names))
 
     # ---------------------------------------------------------------- health
 
+    ## @brief GET /api/health: liveness probe; no auth, no database access.
+    # @return ``{"status": "ok", "time": <ISO 8601 UTC>}``.
     @router.get("/health", summary="Liveness check", tags=["status"])
     async def health() -> Dict[str, Any]:
         """Return OK if the process is serving. Never requires authentication."""
         return {"status": "ok", "time": datetime.now(tz=UTC).isoformat()}
 
+    ## @brief GET /api/status: configuration, archive extent and ingest health.
+    # Unauthenticated by design (monitoring scrapes it).  Five separate
+    # archive reads, each off-loop via asyncio.to_thread; they are not one
+    # transaction, so counts may be mutually inconsistent by a poll's worth.
+    # @param request the incoming request (unused).
+    # @return status document; see docs/API.md.
     @router.get("/status", summary="Server and ingest status", tags=["status"])
     async def status(request: Request) -> Dict[str, Any]:
         """Report configuration, archive extent and ingest health.
@@ -199,11 +286,13 @@ def build_router(
                 "earliest": convert(earliest.nova_time).as_dict() if earliest else None,
                 "latest": convert(latest.nova_time).as_dict() if latest else None,
                 "by_type": {
+                    # Ordered by enum value so the output is stable.
                     spill_type.name: count for spill_type, count in sorted(
                         by_type.items(), key=lambda item: item[0].value
                     )
                 },
                 "by_source": by_source,
+                # 0 means "keep forever"; report it as null.
                 "retention_days": config.storage.retention_days or None,
             },
             "ingest": ingest.summary(),
@@ -216,6 +305,11 @@ def build_router(
 
     # --------------------------------------------------------------- sources
 
+    ## @brief GET /api/sources: every source with URL, enabled state,
+    # runtime overrides, ingest health and archived event count.
+    # Unauthenticated.  ``archived_only`` lists names present in the archive
+    # but no longer configured.
+    # @return sources document; see docs/API.md.
     @router.get("/sources", summary="The TDUs this server records from",
                 tags=["sources"])
     async def sources() -> Dict[str, Any]:
@@ -235,6 +329,8 @@ def build_router(
             "archived_only": sorted(set(counts) - set(ingest.names())),
             "ingest_enabled": ingest.running,
             "admin": {
+                # Mirrors the first test in require_admin: either credential
+                # path makes the PATCH routes usable.
                 "enabled": bool(state.admin_token) or (
                     config.auth.enabled and bool(config.admin.allowed_groups)),
                 "token_header": ADMIN_HEADER,
@@ -243,6 +339,10 @@ def build_router(
             },
         }
 
+    ## @brief GET /api/admin/check: verify admin credentials without changing
+    # anything.  Used by the /config page to validate a typed-in token.
+    # @param who caller description from require_admin.
+    # @return ``{"ok": true, "as": who}``.
     @router.get("/admin/check", summary="Check admin credentials",
                 tags=["sources"])
     async def admin_check(who: str = Depends(require_admin)) -> Dict[str, Any]:
@@ -250,8 +350,22 @@ def build_router(
         return {"ok": True, "as": who}
 
     def _describe_one(name: str) -> Dict[str, Any]:
+        """!
+        @brief The ``ingest.describe()`` entry for one source.
+        @param name source name; must exist (callers have just updated it).
+        @return that source's description dict.
+        """
         return next(e for e in ingest.describe() if e["name"] == name)
 
+    ## @brief PATCH /api/sources/{name}: enable/disable a source or change its
+    # URL at runtime.  Admin only.  The override is persisted in the archive
+    # and outranks the configuration file until reset.
+    # @param name source name from the path.
+    # @param update body: ``enabled`` and/or ``base_url``.
+    # @param who caller description from require_admin, stored as updated_by.
+    # @return ``{"source": <description>}``.
+    # @throws HTTPException 400 for an empty or invalid change, 404 for an
+    #   unknown source.
     @router.patch("/sources/{name}", summary="Change a source at runtime",
                   tags=["sources"])
     async def update_source(
@@ -274,10 +388,18 @@ def build_router(
                 updated_by=who,
             )
         except SourceError as exc:
+            # SourceError covers both "no such source" and "bad value";
+            # distinguish them by whether the name exists.
             status_code = 404 if name not in ingest.sources else 400
             raise _error(status_code, str(exc))
         return {"source": _describe_one(name)}
 
+    ## @brief POST /api/sources/{name}/reset: drop runtime overrides so the
+    # source reverts to the configuration file.  Admin only.
+    # @param name source name from the path.
+    # @param who caller description from require_admin.
+    # @return ``{"source": <description>}``.
+    # @throws HTTPException 404 for an unknown source.
     @router.post("/sources/{name}/reset",
                  summary="Return a source to the configuration file",
                  tags=["sources"])
@@ -293,6 +415,9 @@ def build_router(
 
     # -------------------------------------------------------------- registry
 
+    ## @brief GET /api/signals: the static signal registry (hex, name,
+    # carrier, event word, decoded spill type).  Unauthenticated.
+    # @return ``{"signals": [...]}``.
     @router.get("/signals", summary="Accelerator signals this server knows",
                 tags=["reference"])
     async def signals() -> Dict[str, Any]:
@@ -317,6 +442,9 @@ def build_router(
             ]
         }
 
+    ## @brief GET /api/types: the SpillType enumeration with the signals that
+    # decode to each; ``ambiguous`` marks many-to-one types.  Unauthenticated.
+    # @return ``{"types": [...]}``.
     @router.get("/types", summary="Decoded spill types", tags=["reference"])
     async def types() -> Dict[str, Any]:
         """List the spill-type enumeration stored by the hardware.
@@ -339,6 +467,11 @@ def build_router(
 
     # ------------------------------------------------------------ conversion
 
+    ## @brief GET /api/time/convert: render one instant in every timescale.
+    # @param t time expression (see /api/time/help).
+    # @param tz IANA zone for inputs without an offset; default query.timezone.
+    # @return NOvA ticks, UNIX, UTC and GPS for the instant.
+    # @throws HTTPException 400 for an unparseable time or zone.
     @router.get("/time/convert", summary="Convert a time between timescales",
                 tags=["reference"])
     async def time_convert(
@@ -360,6 +493,11 @@ def build_router(
                          "See /api/time/help for the accepted forms.")
         return convert(nova).as_dict()
 
+    ## @brief GET /api/time/help: the accepted time-expression forms.
+    # Deliberately has no docstring: adding one would add a description to
+    # the published OpenAPI schema.  The list is static text and must be kept
+    # in step with novatime.parse_instant by hand.
+    # @return default zone, examples and the range note.
     @router.get("/time/help", summary="Accepted time expressions",
                 tags=["reference"])
     async def time_help() -> Dict[str, Any]:
@@ -392,6 +530,14 @@ def build_router(
 
     # ----------------------------------------------------------------- latest
 
+    ## @brief GET /api/latest: newest archived event, optionally filtered.
+    # Filters by the signal's decoded *type*, not its raw code, so for a
+    # many-to-one type it may return a sibling signal's event.
+    # @param signal optional signal (``$8F``, ``one-hertz``).
+    # @param source optional source names; repeatable or comma-separated.
+    # @param user authenticated principal (dependency; unused).
+    # @return ``{"event": <row>}``.
+    # @throws HTTPException 400 for a bad signal/source, 404 if nothing matches.
     @router.get("/latest", summary="The most recent stored event", tags=["spills"])
     async def latest(
         signal: Optional[str] = Query(None, description="Restrict to one signal, e.g. $8F"),
@@ -402,6 +548,9 @@ def build_router(
         """Return the newest archived event, optionally of one signal or
         from given sources."""
         selected_sources = await resolve_sources(source)
+        # The same selection rule as /api/events, newest first, without a
+        # whole-archive count.  `or None` normalises "no source= given" ([])
+        # to the store's "every source" (None).
         spill_types, codes, _, explicit = _resolve_selection([signal] if signal else None, None)
         page = await asyncio.to_thread(
             store.query, spill_types=spill_types, signal_codes=codes,
@@ -420,6 +569,26 @@ def build_router(
 
     # ----------------------------------------------------------------- events
 
+    ## @brief GET /api/events: the main paged query, JSON or CSV.
+    # Half-open range ``[start, end)``; signals, types and sources each
+    # combine as a union and the three intersect.  ``limit`` defaults to
+    # query.default_limit and may not exceed query.max_limit.  Responses are
+    # streamed and carry ``X-Total-Count``.
+    # @param request the incoming request (unused; kept for url_for symmetry).
+    # @param start range start, inclusive.
+    # @param end range end, exclusive; a bare date covers the whole day.
+    # @param signal signals, repeatable or comma-separated.
+    # @param type decoded spill types, by name or number.
+    # @param source source names.
+    # @param format ``json`` or ``csv``.
+    # @param limit maximum rows on this page.
+    # @param offset rows to skip.
+    # @param order ``asc`` or ``desc`` by time.
+    # @param tz zone for inputs without an offset.
+    # @param columns CSV column subset.
+    # @param user authenticated principal (dependency; unused).
+    # @return a StreamingResponse in the requested format.
+    # @throws HTTPException 400 for any invalid parameter.
     @router.get("/events", summary="Query events by time range and signal",
                 tags=["spills"])
     async def events(
@@ -467,6 +636,7 @@ def build_router(
         zone = _resolve_zone(tz, config)
 
         try:
+            # Both bounds in NOvA 64 MHz ticks.
             start_nova, end_nova = parse_range(start, end, tz=zone)
         except NovaTimeError as exc:
             raise _error(400, str(exc), "See /api/time/help for accepted forms.")
@@ -474,6 +644,8 @@ def build_router(
         spill_types, signal_codes, requested, unrestricted_types = _resolve_selection(signal, type)
         selected_sources = await resolve_sources(source)
 
+        # Reject rather than clamp, so a client never mistakes a truncated
+        # page for the whole answer.
         effective_limit = limit or config.query.default_limit
         if effective_limit > config.query.max_limit:
             raise _error(
@@ -488,6 +660,8 @@ def build_router(
         selected_columns = _resolve_columns(columns)
         descending = order == "desc"
 
+        # One page plus the total match count (for X-Total-Count and
+        # meta.truncated), read off the event loop.
         page = await asyncio.to_thread(
             store.query,
             start_nova=start_nova,
@@ -518,6 +692,7 @@ def build_router(
         )
 
         if format == "csv":
+            # Timestamped filename so successive downloads do not collide.
             filename = "spills_{}.csv".format(int(time.time()))
             comments = _csv_comments(meta)
             return StreamingResponse(
@@ -535,20 +710,43 @@ def build_router(
             headers={"X-Total-Count": str(page.total)},
         )
 
+    ## @brief GET /api/events.csv: 307 redirect to /api/events with
+    # ``format=csv`` forced.  Hidden from the schema.
+    # @param request the incoming request; its query string is carried over.
+    # @param user authenticated principal (dependency; unused).
+    # @return a 307 RedirectResponse.
     @router.get("/events.csv", summary="Query events, always as CSV",
                 tags=["spills"], include_in_schema=False)
     async def events_csv(request: Request, user=Depends(current_user)):
         """Convenience alias so a browser or ``curl -O`` gets a file."""
+        # multi_items() keeps every value of a repeated parameter, and
+        # urlencode re-escapes values that the request decoded.
         params = [(key, value) for key, value in request.query_params.multi_items()
                   if key != "format"]
         params.append(("format", "csv"))
         scope_query = urlencode(params)
         from fastapi.responses import RedirectResponse
+        # 307 preserves the method; url_for honours root_path.
         return RedirectResponse(
             url=str(request.url_for("events")) + "?" + scope_query,
             status_code=307,
         )
 
+    ## @brief GET /api/export: stream every matching event, unpaged.
+    # Same selection semantics as /api/events; capped at
+    # query.max_export_rows, beyond which the stream ends silently (a
+    # warning is logged server-side only).  No total count is computed.
+    # @param start range start, inclusive.
+    # @param end range end, exclusive.
+    # @param signal signals, repeatable or comma-separated.
+    # @param type decoded spill types.
+    # @param source source names.
+    # @param format ``csv`` (default) or ``json``.
+    # @param tz zone for inputs without an offset.
+    # @param columns CSV column subset.
+    # @param user authenticated principal (dependency; unused).
+    # @return a StreamingResponse.
+    # @throws HTTPException 400 for any invalid parameter.
     @router.get("/export", summary="Stream a whole range without paging",
                 tags=["spills"])
     async def export(
@@ -590,7 +788,14 @@ def build_router(
                 counted.total, max_rows), "Narrow the range or use darpa-spill-dump.")
 
         def bounded():
-            """Yield events, stopping at the export ceiling."""
+            """!
+            @brief Yield events, stopping at the export ceiling.
+
+            Runs in Starlette's threadpool as the response body is consumed,
+            so the SQLite cursor lives for the duration of the download.
+
+            @return a generator of stored events, at most ``max_rows`` long.
+            """
             for index, event in enumerate(
                 store.iter_query(
                     start_nova=start_nova,
@@ -607,6 +812,8 @@ def build_router(
                     raise RuntimeError("archive grew beyond the export ceiling; retry a narrower range")
                 yield event
 
+        # page_total/returned None: an export never counts, so meta carries
+        # no total/truncated fields.
         meta = _build_meta(
             config=config, state=state,
             start_nova=start_nova, end_nova=end_nova,
@@ -638,6 +845,13 @@ def build_router(
 
 
 def _resolve_zone(tz: Optional[str], config: Config):
+    """!
+    @brief Resolve the zone used for time inputs that carry no offset.
+    @param tz per-request ``tz=`` value, or None for ``query.timezone``.
+    @param config server configuration.
+    @return a tzinfo.
+    @throws HTTPException 400 for an unknown zone name.
+    """
     try:
         return get_timezone(tz or config.query.timezone)
     except NovaTimeError as exc:
@@ -646,6 +860,12 @@ def _resolve_zone(tz: Optional[str], config: Config):
 
 
 def _resolve_columns(columns: Optional[str]) -> Optional[Sequence[str]]:
+    """!
+    @brief Parse and validate the ``columns=`` CSV subset.
+    @param columns comma-separated column names, or None/empty for all.
+    @return the requested names in order, or None for every column.
+    @throws HTTPException 400 naming any unknown column.
+    """
     if not columns:
         return None
     requested = [name.strip() for name in columns.split(",") if name.strip()]
@@ -663,7 +883,17 @@ def _resolve_selection(
     signals_requested: Optional[Sequence[str]],
     types_requested: Optional[Sequence[str]],
 ) -> "tuple[List[SpillType], List[int], List[str], List[SpillType]]":
-    """Translate shared selection validation into an API error."""
+    """!
+    @brief Turn the ``signal``/``type`` parameters into store filters.
+
+    Delegates to signals.resolve_selection, which is shared with the query
+    CLI and darpa-spill-dump so that every interface selects identically.
+
+    @param signals_requested raw ``signal`` values (repeatable, comma lists).
+    @param types_requested raw ``type`` values (repeatable, comma lists).
+    @return ``(spill_types, signal_codes, requested, unrestricted_types)``.
+    @throws HTTPException 400 for an unrecognised signal or type.
+    """
     try:
         return resolve_selection(signals_requested, types_requested)
     except ValueError as exc:
@@ -685,7 +915,24 @@ def _build_meta(
     order: str,
     timezone_name: str,
 ) -> Dict[str, Any]:
-    """Assemble the metadata block that accompanies every result."""
+    """!
+    @brief Assemble the metadata block that accompanies every result.
+
+    @param config server configuration (unused; kept for call symmetry).
+    @param state application state; ``state.ingest`` supplies degraded sources.
+    @param start_nova range start, NOvA ticks, inclusive.
+    @param end_nova range end, NOvA ticks, exclusive.
+    @param requested human-readable selection, e.g. ``["$74", "NUMI"]``.
+    @param spill_types decoded types in the selection (for the ambiguity note).
+    @param sources selected source names; empty means all.
+    @param page_total total matches, or None for an unpaged export.
+    @param returned rows on this page, or None for an export.
+    @param limit page size (or the export ceiling).
+    @param offset rows skipped.
+    @param order ``asc`` or ``desc``.
+    @param timezone_name zone used for unqualified inputs.
+    @return the ``meta`` dict; includes ``warnings`` only when non-empty.
+    """
     meta: Dict[str, Any] = {
         "generated": datetime.now(tz=UTC).isoformat(),
         "range": {
@@ -708,10 +955,14 @@ def _build_meta(
 
     warnings: List[str] = []
 
+    # Many-to-one decoded types (e.g. BNB_TCLK <- $1D, $1F) cannot be split
+    # for records without a raw event word.
     note = ambiguity_note(spill_types)
     if note:
         warnings.append(note)
 
+    # A source polled without the history route yields only a sample; say so
+    # whenever such a source contributes to the result.
     degraded = state.ingest.degraded_sources(list(sources) or None)
     if degraded:
         warnings.append(
@@ -731,10 +982,14 @@ def _build_meta(
 
 
 def _csv_comments(meta: Dict[str, Any]) -> List[str]:
-    """Render the metadata block as CSV comment lines.
+    """!
+    @brief Render the metadata block as CSV comment lines.
 
     A CSV file outlives the HTTP response that produced it, so the query and
     any caveat are written into the file itself.
+
+    @param meta the dict from _build_meta.
+    @return comment lines without the leading ``#`` (iter_csv adds it).
     """
     lines = [
         "DARPA Spill Information Server",

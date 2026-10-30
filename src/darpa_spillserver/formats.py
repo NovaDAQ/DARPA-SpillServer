@@ -1,4 +1,8 @@
-"""Rendering query results as CSV and JSON.
+"""!
+@file src/darpa_spillserver/formats.py
+@brief Streaming CSV and JSON rendering of query results.
+
+Rendering query results as CSV and JSON.
 
 Design.md asks for a structured data table in CSV and JSON.  Both are produced
 from one canonical row shape (:func:`event_row`) so the two formats can never
@@ -43,7 +47,14 @@ __all__ = [
     "render_json",
 ]
 
-#: Canonical column order, shared by CSV and JSON.
+## Canonical column order, shared by CSV and JSON.
+## This order is the default column layout of every darpa-spill-dump file.
+## The timestamp blur (shift.py) keeps whatever header a file carries, so it
+## does not depend on this order, but it recomputes the time columns listed
+## in its DERIVED_COLUMNS from nova_time: a new nova_time-derived column
+## added here must be added there too, or a shifted file would leak the
+## true time through it.  Append new columns at the end rather than
+## reordering, so existing readers keep working.
 COLUMNS: Sequence[str] = (
     "nova_time",
     "utc",
@@ -70,12 +81,19 @@ COLUMNS: Sequence[str] = (
 
 
 def event_row(event: SpillEvent) -> Dict[str, Any]:
-    """Render one event as a flat dictionary keyed by :data:`COLUMNS`.
+    """!
+    @brief Render one event as a flat dictionary keyed by :data:`COLUMNS`.
 
     When the hardware did not preserve the raw event word, ``signal`` and
     ``signal_name`` are empty rather than guessed.  A type such as
     ``BNB_TCLK`` maps to both ``$1D`` and ``$1F``, and inventing one of them
     would put a value in the table that the instrument never measured.
+
+    @details Every time column is derived from ``nova_time`` alone via
+    novatime.convert(); nothing else in the row depends on the clock.  That
+    is what lets the shift tool move ``nova_time`` and recompute the rest.
+    @param event Stored event.
+    @return Dict with exactly the COLUMNS keys, in COLUMNS order.
     """
     times = convert(event.nova_time)
     signal = (
@@ -115,13 +133,23 @@ def iter_csv(
     header: bool = True,
     comments: Optional[Sequence[str]] = None,
 ) -> Iterator[str]:
-    """Stream *events* as CSV text.
+    """!
+    @brief Stream *events* as CSV text.
 
     :param columns: subset and order of :data:`COLUMNS` to emit.
     :param header: whether to emit the column-name row.
     :param comments: lines written before the header, each prefixed with
         ``#``.  Used to record the query that produced the file and any
         caveat about it, so a saved CSV explains itself later.
+
+    @param events Events to render, consumed lazily.
+    @param columns Subset and order of COLUMNS; None means all.
+    @param header Emit the column-name row.
+    @param comments Lines emitted as ``# <line>`` before the header.  Not
+                    escaped: a line must not contain a newline.
+    @return Generator of text chunks (one per comment block, header, row).
+    @throws ValueError if *columns* names a column not in COLUMNS (raised
+            on the first next(), since this is a generator).
     """
     selected = list(columns or COLUMNS)
     unknown = [name for name in selected if name not in COLUMNS]
@@ -132,12 +160,21 @@ def iter_csv(
             )
         )
 
+    # One reusable buffer: the csv module only writes to file objects, so each
+    # row is written into it and drained, keeping memory O(one row).
+    # "\n" line endings (not csv's default "\r\n") keep files diff- and
+    # byte-stable across platforms.
     buffer = io.StringIO()
     writer = csv.DictWriter(
         buffer, fieldnames=selected, extrasaction="ignore", lineterminator="\n"
     )
 
     def drain() -> str:
+        """!
+        @brief Return and clear everything written to the buffer so far.
+
+        @return Buffered text.
+        """
         text = buffer.getvalue()
         buffer.seek(0)
         buffer.truncate(0)
@@ -164,12 +201,22 @@ def iter_json(
     meta: Optional[Dict[str, Any]] = None,
     indent: Optional[int] = None,
 ) -> Iterator[str]:
-    """Stream *events* as a JSON object with ``meta`` and ``events`` keys.
+    """!
+    @brief Stream *events* as a JSON object with ``meta`` and ``events`` keys.
 
     The envelope is assembled by hand rather than with a single
     :func:`json.dumps` so that the event array never has to exist in memory
     all at once.  Only individual rows are serialised at a time.
+
+    @param events Events to render, consumed lazily.
+    @param meta Optional metadata object emitted first; non-JSON values are
+                rendered with str().
+    @param indent None for compact output; otherwise the indent width.
+    @return Generator of text chunks forming one JSON object.
     """
+    # Hand-rolled pretty-printing: the envelope keys sit at one pad, each row
+    # object at two.  The meta object's own inner lines are left as
+    # json.dumps produced them (not re-indented).
     separator = "\n" if indent else ""
     pad = " " * (indent or 0)
 
@@ -182,6 +229,8 @@ def iter_json(
 
     first = True
     for event in events:
+        # Commas go before every row but the first, so nothing needs to know
+        # in advance whether another row is coming.
         prefix = "" if first else ","
         first = False
         record = event_row(event)
@@ -193,6 +242,8 @@ def iter_json(
         else:
             yield prefix + row
 
+    # Close the array on its own line only if it had rows; an empty array
+    # stays "[]".
     if indent and not first:
         yield separator + pad
     yield "]" + separator + "}"
@@ -204,7 +255,16 @@ def render_csv(
     header: bool = True,
     comments: Optional[Sequence[str]] = None,
 ) -> str:
-    """Collect :func:`iter_csv` into a single string (tests, small results)."""
+    """!
+    @brief Collect :func:`iter_csv` into a single string (tests, small results).
+
+    @param events Events to render.
+    @param columns Subset and order of COLUMNS; None means all.
+    @param header Emit the column-name row.
+    @param comments Lines emitted as ``# <line>`` before the header.
+    @return The complete CSV text.
+    @throws ValueError if *columns* names an unknown column.
+    """
     return "".join(iter_csv(events, columns=columns, header=header, comments=comments))
 
 
@@ -213,19 +273,32 @@ def render_json(
     meta: Optional[Dict[str, Any]] = None,
     indent: Optional[int] = None,
 ) -> str:
-    """Collect :func:`iter_json` into a single string (tests, small results)."""
+    """!
+    @brief Collect :func:`iter_json` into a single string (tests, small results).
+
+    @param events Events to render.
+    @param meta Optional metadata object.
+    @param indent None for compact output; otherwise the indent width.
+    @return The complete JSON text.
+    """
     return "".join(iter_json(events, meta=meta, indent=indent))
 
 
 def ambiguity_note(spill_types: Sequence[SpillType]) -> Optional[str]:
-    """Describe any signal ambiguity implied by querying *spill_types*.
+    """!
+    @brief Describe any signal ambiguity implied by querying *spill_types*.
 
     Returns ``None`` when every requested type maps to exactly one signal.
     Otherwise returns a sentence naming the types whose stored records cannot
     be narrowed further, so the caller can put it in the response metadata
     instead of leaving the user to discover it.
+
+    @param spill_types Types requested by the query (duplicates allowed).
+    @return The note text, or None if no requested type is ambiguous.
     """
     ambiguous = []
+    # dict.fromkeys de-duplicates while keeping the caller's order, so the
+    # note reads in the order the types were asked for.
     for spill_type in dict.fromkeys(spill_types):
         options = signals_for_type(spill_type)
         if len(options) > 1:

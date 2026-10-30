@@ -1,4 +1,8 @@
-"""Backfill the archive from a TDU's ring buffer (``darpa-spill-backfill``).
+"""!
+@file src/darpa_spillserver/backfill.py
+@brief ``darpa-spill-backfill``: fill the archive from a TDU's ring buffer in bounded time windows.
+
+Backfill the archive from a TDU's ring buffer (``darpa-spill-backfill``).
 
 The ingest poller only ever moves forward.  Its ``ingest.backfill`` setting
 applies on a cold start and nowhere else, so once a source has any rows at
@@ -20,6 +24,9 @@ Inserts are idempotent, keyed on ``(nova_time, spill_type, signal_code)``, so
 running this over a range the archive already covers costs time and changes
 nothing.  It is safe to run against a live archive while the poller is
 running; SQLite is in WAL mode and the two writers do not block each other.
+
+Runs as a single asyncio task: sources are processed sequentially, windows
+within a source sequentially; SQLite inserts go through ``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -40,11 +47,12 @@ from .tdu_client import TDUClient, TDUError
 
 __all__ = ["main", "backfill_source"]
 
+## Module logger.
 log = logging.getLogger(__name__)
 
-#: Seconds of TDU time requested per call.  Small enough that one window is
-#: well inside the server's output cap and history timeout even on the busiest
-#: TDU, large enough that a long range does not turn into thousands of calls.
+## Seconds of TDU time requested per call.  Small enough that one window is
+## well inside the server's output cap and history timeout even on the busiest
+## TDU, large enough that a long range does not turn into thousands of calls.
 DEFAULT_WINDOW = 300.0
 
 
@@ -65,20 +73,40 @@ async def backfill_source(
     batch_limit: int = 20000,
     progress=None,
 ) -> "tuple[int, int, int]":
-    """Walk *start_nova* to *end_nova* in windows, inserting what is found.
+    """!
+    @brief Walk *start_nova* to *end_nova* in windows, inserting what is found.
 
     Returns ``(fetched, inserted, windows)``.
+
+    Adaptive: a window the TDU reports as truncated is halved (down to one
+    second) and re-read; the width is not grown back afterwards.  ``fetched``
+    and ``windows`` include such re-reads.
+
+    @param client an open TDUClient for the source.
+    @param store archive to insert into.
+    @param start_nova range start, NOvA ticks, inclusive.
+    @param end_nova range end, NOvA ticks, exclusive.
+    @param window_seconds initial window width in seconds.
+    @param batch_limit ``limit`` sent with each request.
+    @param progress optional callback ``(lo, hi, end, fetched, inserted)``
+        invoked after each completed window.
+    @return ``(fetched, inserted, windows)``.
+    @throws TDUError if a window request fails (no per-window retry here
+        beyond the client's own).
     """
     _validate_window(window_seconds, batch_limit)
     window_ticks = int(window_seconds * TICKS_PER_SECOND)
     fetched = inserted = windows = 0
     cursor = start_nova
 
+    # Half-open windows [cursor, upper) tile the range exactly.
     while cursor < end_nova:
         upper = min(cursor + window_ticks, end_nova)
         result = await client.fetch_history(
             since_nova=cursor, until_nova=upper, limit=batch_limit
         )
+        # Insert even a truncated window: the rows are genuine, and the
+        # narrower re-read will skip them as duplicates.
         added = await asyncio.to_thread(store.insert_events, result.events)
 
         fetched += len(result.events)
@@ -110,6 +138,14 @@ async def backfill_source(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """!
+    @brief Build the ``darpa-spill-backfill`` command-line parser.
+
+    Unlike the server's parser, only ``--config`` and ``--database`` feed the
+    configuration; the rest are tool options.
+
+    @return the parser.
+    """
     parser = argparse.ArgumentParser(
         prog="darpa-spill-backfill",
         description="Fill the archive from a TDU's ring buffer, backwards in "
@@ -158,13 +194,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def _probe_earliest(client: TDUClient, end_nova: int,
                           lookback_seconds: float = 30 * 86400) -> Optional[int]:
-    """Find the earliest event in a bounded lookback using contiguous windows.
+    """!
+    @brief Find the earliest event in a bounded lookback using contiguous
+    windows.
 
     Empty intervals are not evidence that the ring begins later: a quiet
     beam or a restarted monitor can leave gaps. Scan oldest first, in five
     minute requests, and stop at the first nonempty interval. Supply --start
     to avoid discovery when the desired range is already known. Errors abort
     discovery rather than masquerading as an empty ring.
+
+    Note that the ring can span more than the current TCRMonitor run.  That
+    process resets its event counter on start but does not clear the segment,
+    so slots beyond the current insert point still hold the previous run's
+    events.  Their timestamps are genuine; only the ``Number`` sequence
+    restarts.  Discovery deliberately reaches into that older data, because
+    it is real accelerator history that is otherwise lost when the ring
+    wraps over it.
+
+    @param client an open TDUClient.
+    @param end_nova reference "now" in NOvA ticks.
+    @param lookback_seconds how far before end_nova to begin the scan; the
+        default 30 days can cost 8,640 requests.
+    @return NOvA time of the earliest event found, or None if the whole
+        lookback is empty.
+    @throws TDUError the TDU fails, or bulk history becomes unavailable.
     """
     cursor = max(0, end_nova - int(lookback_seconds * TICKS_PER_SECOND))
     window = int(DEFAULT_WINDOW * TICKS_PER_SECOND)
@@ -180,6 +234,12 @@ async def _probe_earliest(client: TDUClient, end_nova: int,
 
 
 async def _run(args: argparse.Namespace, config: Config) -> int:
+    """!
+    @brief Backfill every selected source in turn.
+    @param args parsed command line.
+    @param config merged configuration (storage, TDU and source settings).
+    @return process exit status: 0 on success, 2 on a usage error.
+    """
     store = SpillStore(config.storage.path, timeout=config.storage.timeout)
     sources = config.tdu.resolved_sources()
     if args.source:
@@ -195,6 +255,8 @@ async def _run(args: argparse.Namespace, config: Config) -> int:
 
     try:
         for source in sources:
+            # Uses the configured URL, not any runtime override saved by the
+            # server in source_overrides.
             client = TDUClient(
                 base_url=source.base_url,
                 timeout=config.tdu.timeout,
@@ -204,12 +266,15 @@ async def _run(args: argparse.Namespace, config: Config) -> int:
                 name=source.name,
             )
             async with client:
+                # Without windowed history there is nothing to walk.
                 if not await client.supports_history():
                     print("{}: no bulk history route; cannot backfill from "
                           "this TDU. See contrib/tduweb/README.md.".format(
                               source.name), file=sys.stderr)
                     continue
 
+                # Times are parsed with parse_range's default zone (UTC), not
+                # query.timezone.  "now" is re-evaluated per source.
                 try:
                     _, end_nova = parse_range(None, args.end)
                 except NovaTimeError as exc:
@@ -245,7 +310,18 @@ async def _run(args: argparse.Namespace, config: Config) -> int:
                           "requested".format(windows, args.window))
                     continue
 
+                # _s binds the loop variable at definition time (unused, but
+                # guards against the late-binding closure pitfall).
                 def report(lo, hi, end, fetched, inserted, _s=source):
+                    """!
+                    @brief Progress line, rewritten in place with ``\\r``.
+                    @param lo window start (ticks).
+                    @param hi window end (ticks).
+                    @param end range end (ticks).
+                    @param fetched events fetched so far.
+                    @param inserted rows inserted so far.
+                    @param _s the source (bound at definition).
+                    """
                     if args.quiet:
                         return
                     done = (hi - start_nova) / float(end - start_nova) * 100
@@ -275,6 +351,16 @@ async def _run(args: argparse.Namespace, config: Config) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """!
+    @brief Entry point for ``darpa-spill-backfill``.
+
+    Configuration comes from load_config with only ``-c`` forwarded, so the
+    YAML file and ``DARPA_SPILL_*`` environment apply; ``--database`` then
+    overrides ``storage.path``.
+
+    @param argv command line (default ``sys.argv[1:]``).
+    @return exit status: 0 success, 1 interrupted, 2 configuration/usage error.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -296,6 +382,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
 
+    # Command line beats the configuration file and environment.
     if args.database:
         config.storage.path = args.database
 
@@ -310,6 +397,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("error: {}".format(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        # Each window commits independently, so partial progress is kept.
         print("\ninterrupted; rows already inserted are kept", file=sys.stderr)
         return 1
 

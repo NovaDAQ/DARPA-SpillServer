@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+## @file deploy/gateway/backfill-history.sh
+## @brief Publish a historical date range one local day per
+##        darpa-spill-publish backfill call, yielding to cron jobs.
+## @details
+##   Each day is dumped, shifted (dts1 blur, the month's token) and uploaded
+##   by run-publish.sh backfill.  This is also the re-publish step after
+##   contrib/logbackfill/unpublish_pieces.py has withdrawn pieces.
+##   Usage:   backfill-history.sh FIRST_DAY LAST_DAY [backfill options]
+##            backfill-history.sh 2026-09-17 2026-10-22
+##   Args:    FIRST_DAY, LAST_DAY  YYYY-MM-DD local dates, inclusive.
+##            Further arguments are passed to darpa-spill-publish backfill.
+##   Env:     RUN_PUBLISH            path of run-publish.sh
+##            BACKFILL_BUSY_RETRIES  retries of a day that exits 75 (6)
+##            PUBLISH_STATE_DIR      where the job lock files live
+##            BACKFILL_YIELD_MAX     max seconds to wait for cron jobs (3600)
+##   Exit:    0 every day succeeded; 1 at least one day failed; 2 usage.
+##   Requires GNU date (date -d) and flock.
 #
 # backfill-history.sh -- publish a historical range one local day at a time.
 #
@@ -19,6 +36,7 @@
 # darpa-spill-publish itself, so the script can be re-run after a failure.
 # Exit status: 0 if every day succeeded, 1 otherwise.
 
+# No -e: a failed day must not end the walk; failures are counted instead.
 set -uo pipefail
 
 if [ $# -lt 2 ]; then
@@ -39,6 +57,12 @@ YIELD_MAX="${BACKFILL_YIELD_MAX:-3600}"
 # jobs hold {state_dir}/<job>.lock while they wait (up to 30 min) for the
 # dump lock, and a backfill day takes longer than that, so without this they
 # keep giving up ("busy") for as long as the backfill runs.
+## @fn yield_to_cron()
+## @brief Wait while a cron hourly or daily publish job holds its job lock.
+## @details A held lock is detected by failing to take it non-blocking
+##          (flock -n FILE true takes and immediately releases it).  The
+##          wait budget BACKFILL_YIELD_MAX is shared across both jobs.
+## @return always 0; after the budget is spent it proceeds anyway.
 yield_to_cron() {
     local waited=0 job
     for job in hourly daily; do
@@ -56,6 +80,7 @@ yield_to_cron() {
     done
 }
 
+# Compare as epoch seconds; GNU date parses YYYY-MM-DD as local midnight.
 failed=0
 day="$FIRST"
 while [ "$(date -d "$day" +%s)" -le "$(date -d "$LAST" +%s)" ]; do
@@ -78,6 +103,8 @@ while [ "$(date -d "$day" +%s)" -le "$(date -d "$LAST" +%s)" ]; do
         0) ;;
         *) failed=$((failed + 1)) ;;
     esac
+    # Step from noon, not midnight, so the date arithmetic stays clear of
+    # the local DST transition hours (America/Chicago).
     day="$(date -d "$day 12:00 next day" +%F)"
 done
 echo "== $(date '+%F %T') done; $failed day(s) did not finish cleanly"
