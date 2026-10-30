@@ -233,7 +233,9 @@ def iter_json(
         # in advance whether another row is coming.
         prefix = "" if first else ","
         first = False
-        row = json.dumps(event_row(event), default=str, indent=indent)
+        record = event_row(event)
+        record["nova_time_exact"] = str(event.nova_time)
+        row = json.dumps(record, default=str, indent=indent)
         if indent:
             row = "\n" + "\n".join(pad * 2 + line for line in row.splitlines())
             yield prefix + row

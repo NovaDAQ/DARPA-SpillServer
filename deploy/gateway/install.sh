@@ -226,7 +226,7 @@ awk -v added="$TMP/added" '
         k = f[i]; for (i++; i <= n; i++) k = k " " f[i]
         return k
     }
-    NR == FNR { if ($0 !~ /^[ \t]*$/) have[key($0)] = 1; print; next }
+    FILENAME == ARGV[1] { if ($0 !~ /^[ \t]*$/) have[key($0)] = 1; print; next }
     /^[ \t]*$/ { next }
     !(key($0) in have) {
         if (!started) { print ""; started = 1 }

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import sys
 import time
 from typing import List, Optional, Sequence
@@ -53,6 +54,14 @@ log = logging.getLogger(__name__)
 ## well inside the server's output cap and history timeout even on the busiest
 ## TDU, large enough that a long range does not turn into thousands of calls.
 DEFAULT_WINDOW = 300.0
+
+
+def _validate_window(window_seconds: float, batch_limit: int) -> None:
+    if (not math.isfinite(window_seconds)
+            or window_seconds < 1 / TICKS_PER_SECOND):
+        raise ValueError("--window must be finite and at least one NOvA tick")
+    if batch_limit < 1:
+        raise ValueError("--limit must be at least 1")
 
 
 async def backfill_source(
@@ -85,6 +94,7 @@ async def backfill_source(
     @throws TDUError if a window request fails (no per-window retry here
         beyond the client's own).
     """
+    _validate_window(window_seconds, batch_limit)
     window_ticks = int(window_seconds * TICKS_PER_SECOND)
     fetched = inserted = windows = 0
     cursor = start_nova
@@ -168,6 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "TDU still holds, found by probing")
     parser.add_argument("--end", metavar="TIME", default="now",
                         help="end of the range (default: now)")
+    parser.add_argument("--lookback", type=float, default=30 * 86400,
+                        metavar="SECONDS", help="maximum discovery lookback (default: 30 days); --start skips discovery")
     parser.add_argument("--window", type=float, default=DEFAULT_WINDOW,
                         metavar="SECONDS",
                         help="seconds of TDU time per request")
@@ -180,87 +192,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _probe_earliest(client: TDUClient, end_nova: int) -> Optional[int]:
+async def _probe_earliest(client: TDUClient, end_nova: int,
+                          lookback_seconds: float = 30 * 86400) -> Optional[int]:
     """!
-    @brief Find where the TDU's ring begins, to within a few minutes.
+    @brief Find the earliest event in a bounded lookback using contiguous
+    windows.
 
-    Steps backwards in doubling strides until a narrow window comes back
-    empty, then binary-searches the bracket between the last stride that had
-    data and the first that did not. Doubling alone would under-report by up
-    to half the distance, which on a multi-day ring is many hours of history
-    silently left behind.
+    Empty intervals are not evidence that the ring begins later: a quiet
+    beam or a restarted monitor can leave gaps. Scan oldest first, in five
+    minute requests, and stop at the first nonempty interval. Supply --start
+    to avoid discovery when the desired range is already known. Errors abort
+    discovery rather than masquerading as an empty ring.
 
     Note that the ring can span more than the current TCRMonitor run.  That
     process resets its event counter on start but does not clear the segment,
     so slots beyond the current insert point still hold the previous run's
     events.  Their timestamps are genuine; only the ``Number`` sequence
-    restarts.  This probe deliberately reaches into that older data, because
+    restarts.  Discovery deliberately reaches into that older data, because
     it is real accelerator history that is otherwise lost when the ring
     wraps over it.
 
-    Assumes occupancy is monotone in look-back (data back to some point,
-    none before).  A gap in beam longer than the 60 s probe window can stop
-    the search early.
-
     @param client an open TDUClient.
     @param end_nova reference "now" in NOvA ticks.
-    @return estimated earliest held time in NOvA ticks, or None if even
-        one hour back is empty.
+    @param lookback_seconds how far before end_nova to begin the scan; the
+        default 30 days can cost 8,640 requests.
+    @return NOvA time of the earliest event found, or None if the whole
+        lookback is empty.
+    @throws TDUError the TDU fails, or bulk history becomes unavailable.
     """
-    # Each probe asks for a 60 s window with limit 5: cheap on the TDU.
-    probe_ticks = int(60 * TICKS_PER_SECOND)
-
-    async def has_data(seconds_back: float) -> bool:
-        """!
-        @brief Whether the TDU holds any event in the 60 s starting
-        *seconds_back* before end_nova.
-        @param seconds_back look-back in seconds.
-        @return True if at least one event came back; False on none or error.
-        """
-        point = end_nova - int(seconds_back * TICKS_PER_SECOND)
-        if point < 0:
-            return False
-        try:
-            result = await client.fetch_history(
-                since_nova=point, until_nova=point + probe_ticks, limit=5
-            )
-        except TDUError as exc:
-            log.debug("probe at -%.0f s failed: %s", seconds_back, exc)
-            return False
-        return bool(result.events)
-
-    # Expand until a window is empty, keeping the last one that was not.
-    # Strides 1 h, 2 h, 4 h, ... up to 30 days.
-    good = 0.0
-    bad: Optional[float] = None
-    back = 3600.0
-    while back <= 30 * 24 * 3600:
-        if await has_data(back):
-            good = back
-            back *= 2
-        else:
-            bad = back
-            break
-
-    if good == 0.0:
-        return None
-    if bad is None:
-        # Data at every stride up to the cap: bracket against the next one.
-        bad = back
-
-    # Narrow the bracket. Ten steps takes the uncertainty below a minute for
-    # any ring this side of a month.
-    for _ in range(10):
-        if bad - good < 300:
-            break
-        middle = (good + bad) / 2
-        if await has_data(middle):
-            good = middle
-        else:
-            bad = middle
-
-    # Conservative: the earliest point *known* to hold data.
-    return end_nova - int(good * TICKS_PER_SECOND)
+    cursor = max(0, end_nova - int(lookback_seconds * TICKS_PER_SECOND))
+    window = int(DEFAULT_WINDOW * TICKS_PER_SECOND)
+    while cursor < end_nova:
+        upper = min(cursor + window, end_nova)
+        result = await client.fetch_history(since_nova=cursor, until_nova=upper, limit=5)
+        if result.route != "/spill_history":
+            raise TDUError("bulk history became unavailable during discovery")
+        if result.events:
+            return min(e.nova_time for e in result.events)
+        cursor = upper
+    return None
 
 
 async def _run(args: argparse.Namespace, config: Config) -> int:
@@ -321,7 +291,7 @@ async def _run(args: argparse.Namespace, config: Config) -> int:
                     if not args.quiet:
                         print("{}: probing for the start of the ring..."
                               .format(source.name))
-                    probed = await _probe_earliest(client, end_nova)
+                    probed = await _probe_earliest(client, end_nova, args.lookback)
                     if probed is None:
                         print("{}: the TDU returned nothing; skipping"
                               .format(source.name), file=sys.stderr)
@@ -399,6 +369,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     try:
+        _validate_window(args.window, args.limit)
+        if not math.isfinite(args.lookback) or args.lookback <= 0:
+            raise ValueError("--lookback must be finite and positive")
+    except ValueError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
+
+    try:
         config = load_config(argv=(["-c", args.config] if args.config else []))
     except ConfigError as exc:
         print("error: {}".format(exc), file=sys.stderr)
@@ -415,6 +393,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         return asyncio.run(_run(args, config))
+    except TDUError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         # Each window commits independently, so partial progress is kept.
         print("\ninterrupted; rows already inserted are kept", file=sys.stderr)

@@ -168,39 +168,26 @@ async def test_a_truncated_window_is_narrowed_not_skipped(store):
 
 
 @respx.mock
-async def test_probe_finds_the_edge_by_bisection():
+async def test_probe_finds_the_earliest_bounded_window():
     """!
-    @brief Doubling alone under-reports by up to half the distance, which on a
-    multi-day ring is hours of history left behind.
+    @brief Discovery scans the lookback oldest first in contiguous windows and
+    returns the first event it finds, not an estimate from sparse probes.
     """
     mock_info()
-    now = START + int(200 * 3600 * TICKS_PER_SECOND)
-    edge = now - int(50 * 3600 * TICKS_PER_SECOND)   # data begins 50 h back
-
+    end = START + 1200 * TICKS_PER_SECOND
+    edge = START + 601 * TICKS_PER_SECOND
     def handler(request):
         """!
         @brief Return one event at `since` when since lies inside the ring (>=
         edge), nothing otherwise.
         """
         since = int(request.url.params["since"])
-        if since >= edge:
-            return httpx.Response(200, json={
-                "events": [{"Time": since, "Type": 4, "Number": 1}], "count": 1})
-        return httpx.Response(200, json={"events": [], "count": 0})
-
+        until = int(request.url.params["until"])
+        rows = [{"Time": edge, "Type": 4, "Number": 1}] if since <= edge < until else []
+        return httpx.Response(200, json={"events": rows, "count": len(rows)})
     respx.get(BASE_URL + HISTORY_ROUTE).mock(side_effect=handler)
-
     async with TDUClient(BASE_URL) as client:
-        found = await _probe_earliest(client, now)
-
-    assert found is not None
-    off_by_seconds = abs(found - edge) / float(TICKS_PER_SECOND)
-    assert off_by_seconds < 300, (
-        "bisection should land within five minutes, got {:.0f} s".format(
-            off_by_seconds)
-    )
-    # A pure doubling search would have stopped at 32 h, 18 h short.
-    assert off_by_seconds < 18 * 3600
+        assert await _probe_earliest(client, end, 1200) == edge
 
 
 @respx.mock
@@ -209,11 +196,12 @@ async def test_probe_returns_none_when_the_ring_is_empty():
     @brief _probe_earliest returns None when no probe window finds any event.
     """
     mock_info()
-    respx.get(BASE_URL + HISTORY_ROUTE).mock(
+    route = respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json={"events": [], "count": 0})
     )
     async with TDUClient(BASE_URL) as client:
-        assert await _probe_earliest(client, START) is None
+        assert await _probe_earliest(client, START, 600) is None
+    assert route.call_count == 2
 
 
 def test_default_window_is_modest():
@@ -222,3 +210,23 @@ def test_default_window_is_modest():
     cap allows.
     """
     assert 60.0 <= DEFAULT_WINDOW <= 900.0
+
+
+@pytest.mark.parametrize("window", [0, -1, float('nan'), float('inf'), 1e-12])
+async def test_invalid_window_is_rejected_before_io(window):
+    with pytest.raises(ValueError, match="window"):
+        await backfill_source(None, None, START, START + 100, window_seconds=window)
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+async def test_invalid_limit_is_rejected_before_io(limit):
+    with pytest.raises(ValueError, match="limit"):
+        await backfill_source(None, None, START, START + 100, batch_limit=limit)
+
+
+def test_cli_rejects_invalid_window_before_opening_archive(tmp_path):
+    from darpa_spillserver.backfill import main
+
+    database = tmp_path / "must-not-exist.db"
+    assert main(["--window", "0", "-d", str(database)]) == 2
+    assert not database.exists()

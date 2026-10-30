@@ -24,7 +24,8 @@ range then dumps, shifts and uploads them afresh.
 
 FDP is done first: if it fails, nothing local is touched and the script can
 simply be run again.  It refuses to run while any darpa-spill-publish job is
-running, as section 8 requires.
+running, as section 8 requires, and holds the publisher dump and upload locks
+throughout withdrawal so scheduled jobs cannot begin conflicting work.
 
 PIECES is a file with one piece per line, ``STREAM KIND LABEL`` (e.g.
 ``all hourly 2026-10-21T00-0500`` or ``numi daily 2026-10-21``); anything
@@ -70,6 +71,8 @@ failed (nothing local changed).
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import sqlite3
@@ -137,6 +140,27 @@ def publish_jobs() -> List[str]:
     return pids
 
 
+@contextmanager
+def publisher_locks(state_db: str):
+    """Exclude dump/shift and upload jobs throughout the withdrawal."""
+    held = []
+    try:
+        # Match the publisher's lock files; acquire in this order everywhere
+        # a withdrawal needs both. No publisher holds upload while taking dump.
+        for name in ("dump", "upload"):
+            path = os.path.join(os.path.dirname(state_db) or ".", name + ".lock")
+            handle = open(path, "a+")
+            held.append(handle)
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError("publisher {} lock is busy; try again later".format(name))
+        yield
+    finally:
+        for handle in reversed(held):
+            handle.close()
+
+
 def main(argv: Sequence[str] = None) -> int:
     """!@brief Withdraw every piece listed in the PIECES file.
 
@@ -173,7 +197,24 @@ def main(argv: Sequence[str] = None) -> int:
     args = parser.parse_args(argv)
 
     # A concurrent publish could re-upload a piece between the fdp-rm and the
-    # state-row delete, or record a piece this run is about to remove.
+    # state-row delete, or record a piece this run is about to remove, so a
+    # real withdrawal holds the publisher locks for its whole duration.
+    if args.dry_run:
+        return _withdraw(args)
+    try:
+        with publisher_locks(args.state_db):
+            return _withdraw(args)
+    except (OSError, RuntimeError) as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 1
+
+
+def _withdraw(args) -> int:
+    """!@brief Remove the listed pieces from FDP, local disk and state.
+
+    @param args parsed command line from main().
+    @return 0 on success, 1 on an error reported to stderr.
+    """
     running = publish_jobs()
     if running and not args.dry_run:
         print("error: darpa-spill-publish is running (pid {}); try again when "

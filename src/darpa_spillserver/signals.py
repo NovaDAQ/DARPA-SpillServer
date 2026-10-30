@@ -420,3 +420,28 @@ def parse_spill_type(text: str) -> SpillType:
         "{!r} is not a spill type; expected a name such as BNB_TCLK or an "
         "integer 0..{}".format(text, len(SpillType) - 1)
     )
+
+
+def resolve_selection(signals_requested=None, types_requested=None):
+    """!
+    @brief Resolve ``signal``/``type`` selections into store filters.
+
+    Explicit types union with exact signals. Unknown raw codes (-1) match
+    through their decoded type; an explicit type also admits any raw code.
+
+    @param signals_requested signal tokens (repeatable, comma lists), or None.
+    @param types_requested type tokens (repeatable, comma lists), or None.
+    @return ``(spill_types, signal_codes, labels, unrestricted_types)``, each
+        de-duplicated in first-seen order.
+    @throws ValueError an unrecognised signal or type.
+    """
+    def tokens(values):
+        return [token.strip() for value in values or []
+                for token in str(value).split(",") if token.strip()]
+
+    signals = [parse_signal(t) for t in tokens(signals_requested)]
+    explicit = [parse_spill_type(t) for t in tokens(types_requested)]
+    types = list(dict.fromkeys([s.spill_type for s in signals] + explicit))
+    codes = list(dict.fromkeys([s.code for s in signals] + [-1])) if signals else []
+    labels = [s.hex for s in signals] + [t.name for t in explicit]
+    return types, codes, labels, list(dict.fromkeys(explicit))

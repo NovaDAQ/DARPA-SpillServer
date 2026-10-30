@@ -84,7 +84,17 @@ for i, a in enumerate(argv):
     if a == "-k":
         continue
     out.append(a)
-from darpa_spillserver.dump import main
+from darpa_spillserver import dump
+from datetime import datetime
+clock_file = os.path.join(CTL, "clock")
+if os.path.exists(clock_file):
+    instant = datetime.fromisoformat(open(clock_file).read())
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz)
+    dump.datetime = Clock
+main = dump.main
 rc = main(["-d", {db!r}] + out, environ={{}})
 sys.exit(code if code is not None else rc)
 '''
@@ -398,6 +408,8 @@ class Rig:
         @param environ extra environment variables.
         @return the exit status.
         """
+        # The dump subprocess must use the same simulated clock as publisher.
+        (self.ctl / "clock").write_text(now.isoformat())
         env = dict(self.environ)
         env.update(environ or {})
         return publish.main(["-c", str(self.write_config())] + list(argv),

@@ -535,6 +535,25 @@ def test_info(dumps, token_file, capsys):
     assert main(["info", shifted, "--token-file", str(other)], environ={}) == 1
 
 
+@pytest.mark.parametrize("sigma,cut", [(1280000, 3840000), (1, 32000000)])
+def test_maximum_gaussian_draw_uses_exact_open_interval(sigma, cut):
+    """!
+    @brief k = 2**53 - 1, whose u rounds to 1.0 in binary64, matches an
+    all-decimal evaluation instead of raising in log(0).
+    """
+    from decimal import Decimal, localcontext, ROUND_HALF_EVEN
+    from darpa_spillserver.shift import as241_decimal
+
+    k = 2**53 - 1
+    with localcontext() as context:
+        context.prec = 80
+        uniform = (Decimal(k) + Decimal('0.5')) / Decimal(2**53)
+        exact = as241_decimal(uniform) * sigma
+        expected = (None if abs(exact) > cut else
+                    int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)))
+    assert _gauss_draw(k, sigma, cut) == expected
+
+
 def test_broken_pipe_exits_quietly(monkeypatch, capsys):
     """!
     @brief A reader closing stdout early (``| head``) gives exit 141 and no

@@ -736,6 +736,8 @@ def transform_row(row: Dict[str, Any], offsets: OffsetFunction,
     # CSV cells are written back as text; JSON values keep their type.
     out = (lambda v: str(v)) if text else (lambda v: v)
     row["nova_time"] = out(shifted)
+    if "nova_time_exact" in row:
+        row["nova_time_exact"] = str(shifted)
 
     pps = _as_int(row.get("pps_offset"), "pps_offset") if "pps_offset" in row else None
     if pps is not None:
@@ -1058,8 +1060,10 @@ def _shift_json_stream(head, src, out, offsets, sign, force, path) -> int:
     Memory is O(1) in the number of events.  The meta line is re-serialised
     with json.dumps(default=str), as darpa-spill-dump writes it; each event
     line is parsed, transformed and re-serialised the same way, keeping its
-    trailing comma; the closing "]" line and everything after it are copied
-    verbatim.
+    trailing comma.  The closing "]" is copied verbatim; the trailer after
+    it (at most 1 MiB) is validated as JSON, with an optional summary whose
+    ``returned`` count must match, before it is written.  A truncated or
+    malformed document raises, so shift_file never commits it.
     @param head The first three lines, already read and matched by _dump_layout.
     @param src Input text stream, positioned after those lines.
     @param out Output text stream.
@@ -1079,27 +1083,63 @@ def _shift_json_stream(head, src, out, offsets, sign, force, path) -> int:
     out.write("{\n")
     out.write('"meta": ' + json.dumps(meta, default=str) + ",\n")
     out.write(head[2])
+    def finish(trailer, count):
+        # Only the small document trailer is buffered; events remain streamed.
+        rest = src.read(1024 * 1024 + 1)
+        if len(rest) > 1024 * 1024:
+            raise ShiftError("{}: JSON trailer is too large".format(path))
+        trailer += rest
+        document = json.loads('{"events": []' + trailer)
+        if document.get("events") != []:
+            raise ShiftError("{}: duplicate events in JSON trailer".format(path))
+        summary = document.get("summary")
+        if summary is not None and (not isinstance(summary, dict)
+                or summary.get("returned", count) != count):
+            raise ShiftError("{}: summary does not match event count".format(path))
+        out.write(trailer)
+        return count
+
     if head[2] == '"events": [],\n':
-        # No events: the remainder is the closing of the document.
-        out.writelines(src)
+        # No events: the comma has already been written as part of head[2],
+        # and the remainder must be the validated close of the document.
+        rest = src.read(1024 * 1024 + 1)
+        if len(rest) > 1024 * 1024:
+            raise ShiftError("{}: JSON trailer is too large".format(path))
+        document = json.loads('{"events": [],' + rest)
+        if document.get("events") != []:
+            raise ShiftError("{}: duplicate events in JSON trailer".format(path))
+        summary = document.get("summary")
+        if summary is not None and (not isinstance(summary, dict)
+                or summary.get("returned", 0) != 0):
+            raise ShiftError("{}: summary does not match event count".format(path))
+        out.write(rest)
         return 0
     count = 0
+    previous_comma = False
     for line in src:
-        stripped = line.rstrip("\n")
-        if stripped == "":
+        stripped = line.strip()
+        if not stripped:
             continue
         if stripped.startswith("]"):
-            # End of the events array: copy the rest unchanged.
-            out.write(line)
-            out.writelines(src)
-            break
+            if previous_comma:
+                raise ShiftError("{}: trailing comma in events".format(path))
+            # Preserve the exact closing-array layout, then validate the
+            # remainder as a small JSON object with an empty event list.
+            closing = line.index("]")
+            out.write(line[:closing + 1])
+            return finish(line[closing + 1:], count)
         # Every event line but the last ends with ","; keep it as found.
+        if count and not previous_comma:
+            raise ShiftError("{}: missing comma between events".format(path))
         comma = stripped.endswith(",")
         row = json.loads(stripped[:-1] if comma else stripped)
+        if not isinstance(row, dict):
+            raise ShiftError("{}: event must be an object".format(path))
         transform_row(row, offsets, sign, text=False)
         out.write(json.dumps(row, default=str) + ("," if comma else "") + "\n")
+        previous_comma = comma
         count += 1
-    return count
+    raise ShiftError("{}: unexpected EOF in events array".format(path))
 
 
 def shift_file(in_path: str, out_path: str, token: Token, sign: int,

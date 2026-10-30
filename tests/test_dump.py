@@ -279,14 +279,21 @@ def test_remote_matches_local(populated, populated_client, tmp_path):
     start, end = BASE, BASE + 61 * SECOND
 
     remote_csv, local_csv = str(tmp_path / "r.csv"), str(tmp_path / "l.csv")
-    dump_range(remote, [CsvSink(remote_csv, COLUMNS)], start, end,
-               window_seconds=5, page_size=3)
-    dump_range(local, [CsvSink(local_csv, COLUMNS)], start, end,
-               window_seconds=5, page_size=3)
-    # Sinks commit on close; do it by hand as main() would.
-    assert len(read_csv(remote_csv + ".part")) == 65
-    with open(remote_csv + ".part") as a, open(local_csv + ".part") as b:
-        assert a.read() == b.read()
+    remote_sink, local_sink = CsvSink(remote_csv, COLUMNS), CsvSink(local_csv, COLUMNS)
+    try:
+        dump_range(remote, [remote_sink], start, end,
+                   window_seconds=5, page_size=3)
+        dump_range(local, [local_sink], start, end,
+                   window_seconds=5, page_size=3)
+        # Sinks commit on close, as main() does before reading output files.
+        remote_sink.close({})
+        local_sink.close({})
+        assert len(read_csv(remote_csv)) == 65
+        with open(remote_csv) as a, open(local_csv) as b:
+            assert a.read() == b.read()
+    finally:
+        remote_sink.abort()
+        local_sink.abort()
 
 
 class _Recording:
@@ -625,12 +632,20 @@ def test_split_by_hour_into_month_and_day_directories(two_days, tmp_path):
         "2026-10/12/neardet-signals-all-2026-10-12-0600.csv"]
 
 
-def test_split_path_collision_is_refused(tmp_path, capsys):
+def test_split_path_collision_is_refused(tmp_path, capsys, monkeypatch):
     """!
     @brief When the path template cannot tell the two fall-back 01:00 hours
     apart the dump exits 2 naming both and writes nothing; adding {offset}
     resolves it.
     """
+    class Clock(dump.datetime):
+        """!@brief Pins "now" after the fall-back night so both hours are past."""
+
+        @classmethod
+        def now(cls, tz=None):
+            """!@brief 2026-11-02 00:00 in *tz*."""
+            return cls(2026, 11, 2, tzinfo=tz)
+    monkeypatch.setattr(dump, "datetime", Clock)
     from darpa_spillserver.storage import SpillStore
     store = SpillStore(str(tmp_path / "fall.db"))
     # One event in each of the two 01:00 hours of 2026-11-01 in Chicago.
@@ -718,15 +733,16 @@ def test_split_by_hour_and_skip_empty(two_days, tmp_path):
         "h_2026-10-12T00.csv", "h_2026-10-12T06.csv"]
 
 
-def test_split_skips_pieces_after_the_archive(two_days, tmp_path):
+def test_split_includes_quiet_pieces_after_the_archive(two_days, tmp_path):
     """!
-    @brief Pieces after the newest archived event are not written.
+    @brief Completed pieces after the newest archived event are still written,
+    empty, so quiet historical intervals are not silently missing.
     """
     main(["-d", two_days.path, "-q", "--timezone", "UTC",
           "--start", "2026-10-12", "--end", "2026-10-20",
           "--split", "day", "--json", str(tmp_path / "d.json")], environ={})
     assert sorted(f.name for f in tmp_path.glob("d_*.json")) == [
-        "d_2026-10-12.json", "d_2026-10-13.json"]
+        "d_2026-10-{:02d}.json".format(day) for day in range(12, 21)]
 
 
 def test_split_usage_errors(two_days, tmp_path):
@@ -789,9 +805,8 @@ def test_empty_pieces_are_not_walked(two_days, tmp_path, monkeypatch):
     # Only the count requests (limit 1): the whole-range count and one per
     # piece. No window is read.
     assert set(calls) == {1}
-    # 00:00 on the 12th to 18:00 on the 13th, the last archived event;
-    # later hours have not been recorded yet and are not written.
-    assert len(list(tmp_path.glob("n_*.csv"))) == 43
+    # Historical quiet hours after the last archived event are still emitted.
+    assert len(list(tmp_path.glob("n_*.csv"))) == 48
 
 
 def test_broken_stdout_pipe_exits_quietly(populated, tmp_path, monkeypatch,
