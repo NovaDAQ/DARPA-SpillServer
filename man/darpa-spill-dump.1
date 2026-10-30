@@ -129,8 +129,10 @@ can name two pieces alike on the autumn changeover; the dump then refuses
 to start, with exit status 2, before writing anything.  Placeholders need
 .BR \-\-split .
 .PP
-Pieces that begin after the newest event in the archive are not written;
-pieces before it are, even when empty, so a week gives seven files.
+Requested historical pieces are written even after the newest archived event.
+Only pieces starting in the future are omitted. Empty files describe the
+archive and do not establish ingest coverage; the publisher checks that
+separately.
 .B \-\-skip\-empty
 drops pieces with no matching events.  A piece is committed as soon as it is
 read: if the dump fails partway, the finished pieces are kept and listed, and

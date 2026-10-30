@@ -25,6 +25,7 @@ own offset (``...Z``, ``+01:00``) always win over the default.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Optional, Union
@@ -492,29 +493,26 @@ def _unix_string_to_nova(token: str) -> int:
 
 
 def _gps_string_to_nova(token: str) -> int:
-    if ":" in token:
-        week_text, _, tow_text = token.partition(":")
-        try:
-            seconds = int(week_text) * 604800 + int(float(tow_text))
-            nsec = int(round((float(tow_text) % 1) * 1e9))
-        except ValueError:
-            raise NovaTimeError(
-                "{!r} is not a GPS week:TOW pair".format(token)
-            ) from None
-    else:
-        try:
-            value = float(token)
-        except ValueError:
-            raise NovaTimeError("{!r} is not a GPS time".format(token)) from None
-        seconds = int(value)
-        nsec = int(round((value - seconds) * 1e9))
-
-    ticks = gps_to_nova(seconds, nsec)
+    try:
+        # Precision scales with the supplied decimal, including its fraction.
+        with localcontext() as context:
+            context.prec = max(50, len(token) + 20)
+            if ":" in token:
+                week, tow = token.split(":", 1)
+                value = Decimal(int(week)) * 604800 + Decimal(tow)
+            else:
+                value = Decimal(token)
+            if not value.is_finite() or value < 0:
+                raise ValueError("GPS time must be finite and nonnegative")
+            seconds = int(value)
+            fraction_ticks = int(((value - seconds) * TICKS_PER_SECOND).to_integral_value(
+                rounding=ROUND_HALF_EVEN))
+    except (ValueError, InvalidOperation, OverflowError):
+        raise NovaTimeError("{!r} is not a GPS time".format(token)) from None
+    ticks = gps_to_nova(seconds, 0)
     if ticks is None:
-        raise NovaTimeError(
-            "GPS time {} predates the NOvA epoch".format(token)
-        )
-    return ticks
+        raise NovaTimeError("GPS time {} predates the NOvA epoch".format(token))
+    return ticks + fraction_ticks
 
 
 def _require_nonnegative(token: str, what: str) -> int:

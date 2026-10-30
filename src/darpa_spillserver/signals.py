@@ -328,3 +328,21 @@ def parse_spill_type(text: str) -> SpillType:
         "{!r} is not a spill type; expected a name such as BNB_TCLK or an "
         "integer 0..{}".format(text, len(SpillType) - 1)
     )
+
+
+def resolve_selection(signals_requested=None, types_requested=None):
+    """Return types, raw codes, labels and types unrestricted by raw code.
+
+    Explicit types union with exact signals. Unknown raw codes (-1) match
+    through their decoded type; an explicit type also admits any raw code.
+    """
+    def tokens(values):
+        return [token.strip() for value in values or []
+                for token in str(value).split(",") if token.strip()]
+
+    signals = [parse_signal(t) for t in tokens(signals_requested)]
+    explicit = [parse_spill_type(t) for t in tokens(types_requested)]
+    types = list(dict.fromkeys([s.spill_type for s in signals] + explicit))
+    codes = list(dict.fromkeys([s.code for s in signals] + [-1])) if signals else []
+    labels = [s.hex for s in signals] + [t.name for t in explicit]
+    return types, codes, labels, list(dict.fromkeys(explicit))

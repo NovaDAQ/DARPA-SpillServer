@@ -420,6 +420,8 @@ class SpillStore:
         offset: int = 0,
         descending: bool = False,
         sources: Optional[Sequence[str]] = None,
+        unrestricted_types: Optional[Sequence[SpillType]] = None,
+        count_total: bool = True,
     ) -> QueryResult:
         """Return events matching the given filters.
 
@@ -431,6 +433,11 @@ class SpillStore:
         request for signal ``$8F`` narrows to that signal's code *and* its
         type, while a request naming only a type matches every signal that
         decodes to it.
+
+        *unrestricted_types* bypasses the raw-code predicate for explicitly
+        selected types. With *count_total=False*, total is only the observed
+        offset plus returned rows, and truncated is false; use this for latest
+        lookups that do not expose pagination metadata.
 
         *sources* restricts to events from those TDUs; ``None`` means all.
         """
@@ -449,8 +456,12 @@ class SpillStore:
             params.extend(int(t) for t in spill_types)
         if signal_codes:
             placeholders = ", ".join("?" for _ in signal_codes)
-            where.append("signal_code IN ({})".format(placeholders))
+            predicate = "signal_code IN ({})".format(placeholders)
             params.extend(int(c) for c in signal_codes)
+            if unrestricted_types:
+                predicate += " OR spill_type IN ({})".format(", ".join("?" for _ in unrestricted_types))
+                params.extend(int(t) for t in unrestricted_types)
+            where.append("(" + predicate + ")")
         if sources:
             placeholders = ", ".join("?" for _ in sources)
             where.append("source IN ({})".format(placeholders))
@@ -460,7 +471,7 @@ class SpillStore:
 
         total = self.connection.execute(
             "SELECT COUNT(*) AS n FROM events" + clause, params
-        ).fetchone()["n"]
+        ).fetchone()["n"] if count_total else None
 
         order = "DESC" if descending else "ASC"
         rows = self.connection.execute(
@@ -470,6 +481,8 @@ class SpillStore:
         ).fetchall()
 
         events = [SpillEvent.from_row(row) for row in rows]
+        if total is None:
+            total = offset + len(events)
         return QueryResult(
             events=events,
             total=total,
@@ -487,6 +500,7 @@ class SpillStore:
         chunk: int = 5_000,
         descending: bool = False,
         sources: Optional[Sequence[str]] = None,
+        unrestricted_types: Optional[Sequence[SpillType]] = None,
     ) -> Iterator[SpillEvent]:
         """Stream every matching event, a page at a time.
 
@@ -505,6 +519,7 @@ class SpillStore:
                 offset=offset,
                 descending=descending,
                 sources=sources,
+                unrestricted_types=unrestricted_types,
             )
             if not page.events:
                 return

@@ -27,7 +27,7 @@ def _capture(monkeypatch):
 def test_verifies_by_default(monkeypatch, capsys):
     seen = _capture(monkeypatch)
     assert query_cli.main(["-s", "https://gw:8443", "--last"]) == 0
-    assert seen == {"url": "https://gw:8443/api/latest", "verify": True}
+    assert seen == {"url": "https://gw:8443/api/events", "verify": True}
 
 
 def test_ca_bundle_and_insecure(monkeypatch, capsys):

@@ -27,7 +27,7 @@ from . import __version__
 from .config import ConfigError, load_config
 from .formats import COLUMNS, event_row, iter_csv, iter_json
 from .novatime import NovaTimeError, convert, get_timezone, parse_range
-from .signals import SIGNALS, parse_signal, parse_spill_type, signals_for_type
+from .signals import SIGNALS, signals_for_type, resolve_selection
 from .storage import SpillStore, StoreError
 
 __all__ = ["main"]
@@ -162,17 +162,19 @@ def _query_server(args, columns) -> int:
         params.append(("type", spill_type))
     for name in _source_names(args):
         params.append(("source", name))
-    if args.limit:
+    if args.limit and not args.last:
         params.append(("limit", str(args.limit)))
     if args.timezone:
         params.append(("tz", args.timezone))
-    if args.desc:
+    if args.desc and not args.last:
         params.append(("order", "desc"))
     params.append(("format", "csv" if args.format == "csv" else "json"))
     if columns and args.format == "csv":
         params.append(("columns", ",".join(columns)))
 
-    url = args.server.rstrip("/") + ("/api/latest" if args.last else "/api/events")
+    if args.last:
+        params.extend([("limit", "1"), ("order", "desc")])
+    url = args.server.rstrip("/") + "/api/events"
     verify = False if args.insecure else (args.ca_bundle or True)
     try:
         response = httpx.get(url, params=params, timeout=60.0, verify=verify)
@@ -201,7 +203,7 @@ def _query_server(args, columns) -> int:
             if "events" in body:
                 rows = body["events"]
                 meta = body.get("meta", {})
-                if meta.get("truncated"):
+                if meta.get("truncated") and not args.last:
                     print("note: {} of {} matching events shown; raise "
                           "--limit to see more".format(
                               meta.get("returned"), meta.get("total")),
@@ -211,6 +213,10 @@ def _query_server(args, columns) -> int:
             _print_table(rows, stream)
         else:
             text = response.text
+            if args.last and args.format == "json":
+                body = response.json()
+                rows = body.get("events", [])
+                text = json.dumps({"event": rows[0] if rows else body.get("event")})
             if args.format == "csv" and args.no_header:
                 # The API always sends the column-name row; drop the first
                 # line that is not a '#' comment.
@@ -294,18 +300,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     try:
-        spill_types = [parse_spill_type(t) for t in (args.types or [])]
-        signal_objects = [parse_signal(s) for s in (args.signal or [])]
+        spill_types, signal_codes, _, explicit_types = resolve_selection(args.signal, args.types)
     except ValueError as exc:
-        print("error: {}\nrun --list-signals to see what is accepted".format(exc),
-              file=sys.stderr)
+        print("error: {}\nrun --list-signals to see what is accepted".format(exc), file=sys.stderr)
         return 2
-
-    signal_codes = [s.code for s in signal_objects]
-    spill_types.extend(s.spill_type for s in signal_objects)
-    if signal_codes:
-        from .storage import UNKNOWN_SIGNAL
-        signal_codes.append(UNKNOWN_SIGNAL)
 
     try:
         start_nova, end_nova = parse_range(args.start, args.end, tz=zone)
@@ -329,23 +327,15 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
                           ", ".join(unknown), database,
                           ", ".join(known) or "(none)"), file=sys.stderr)
                 return 2
-        if args.last:
-            event = store.latest(
-                spill_types[0] if len(spill_types) == 1 else None,
-                sources or None,
-            )
-            events = [event] if event is not None else []
-        else:
-            page = store.query(
-                start_nova=start_nova,
-                end_nova=end_nova,
-                spill_types=list(dict.fromkeys(spill_types)) or None,
-                signal_codes=list(dict.fromkeys(signal_codes)) or None,
-                limit=args.limit or default_limit,
-                descending=args.desc,
-                sources=sources or None,
-            )
-            events = page.events
+        page = store.query(
+            start_nova=start_nova, end_nova=end_nova,
+            spill_types=spill_types, signal_codes=signal_codes,
+            unrestricted_types=explicit_types,
+            limit=1 if args.last else (args.limit or default_limit),
+            descending=args.last or args.desc, sources=sources or None,
+            count_total=not args.last)
+        events = page.events
+        if not args.last:
             if page.truncated:
                 print(
                     "note: {} of {} matching events shown; raise --limit to "

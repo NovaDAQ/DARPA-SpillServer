@@ -48,10 +48,9 @@ from .formats import COLUMNS, ambiguity_note, event_row, iter_csv, iter_json
 from .novatime import UTC, NovaTimeError, convert, get_timezone, nova_now, parse_instant, parse_range
 from .signals import (
     SIGNALS,
+    resolve_selection,
     SpillType,
     describe_type,
-    parse_signal,
-    parse_spill_type,
     signals_for_type,
 )
 from .poller import SourceError
@@ -403,22 +402,21 @@ def build_router(
         """Return the newest archived event, optionally of one signal or
         from given sources."""
         selected_sources = await resolve_sources(source)
-        spill_type = None
-        if signal:
-            try:
-                spill_type = parse_signal(signal).spill_type
-            except ValueError as exc:
-                raise _error(400, str(exc), "See /api/signals for the full list.")
-
-        event = await asyncio.to_thread(
-            store.latest, spill_type, selected_sources or None)
+        spill_types, codes, _, explicit = _resolve_selection([signal] if signal else None, None)
+        page = await asyncio.to_thread(
+            store.query, spill_types=spill_types, signal_codes=codes,
+            sources=selected_sources or None, limit=1, descending=True,
+            unrestricted_types=explicit, count_total=False)
+        event = page.events[0] if page.events else None
         if event is None:
             raise _error(
                 404,
                 "the archive holds no matching events yet",
                 "Check /api/status to see whether ingest is running.",
             )
-        return {"event": event_row(event)}
+        record = event_row(event)
+        record["nova_time_exact"] = str(event.nova_time)
+        return {"event": record}
 
     # ----------------------------------------------------------------- events
 
@@ -473,7 +471,7 @@ def build_router(
         except NovaTimeError as exc:
             raise _error(400, str(exc), "See /api/time/help for accepted forms.")
 
-        spill_types, signal_codes, requested = _resolve_selection(signal, type)
+        spill_types, signal_codes, requested, unrestricted_types = _resolve_selection(signal, type)
         selected_sources = await resolve_sources(source)
 
         effective_limit = limit or config.query.default_limit
@@ -496,6 +494,7 @@ def build_router(
             end_nova=end_nova,
             spill_types=spill_types or None,
             signal_codes=signal_codes or None,
+            unrestricted_types=unrestricted_types or None,
             limit=effective_limit,
             offset=offset,
             descending=descending,
@@ -576,10 +575,19 @@ def build_router(
         except NovaTimeError as exc:
             raise _error(400, str(exc), "See /api/time/help for accepted forms.")
 
-        spill_types, signal_codes, requested = _resolve_selection(signal, type)
+        spill_types, signal_codes, requested, unrestricted_types = _resolve_selection(signal, type)
         selected_sources = await resolve_sources(source)
         selected_columns = _resolve_columns(columns)
         max_rows = config.query.max_export_rows
+
+        counted = await asyncio.to_thread(
+            store.query, start_nova=start_nova, end_nova=end_nova,
+            spill_types=spill_types, signal_codes=signal_codes,
+            unrestricted_types=unrestricted_types, sources=selected_sources,
+            limit=0)
+        if counted.total > max_rows:
+            raise _error(400, "export has {} rows, exceeding the maximum of {}".format(
+                counted.total, max_rows), "Narrow the range or use darpa-spill-dump.")
 
         def bounded():
             """Yield events, stopping at the export ceiling."""
@@ -589,14 +597,14 @@ def build_router(
                     end_nova=end_nova,
                     spill_types=spill_types or None,
                     signal_codes=signal_codes or None,
+                    unrestricted_types=unrestricted_types or None,
                     sources=selected_sources or None,
                 )
             ):
                 if index >= max_rows:
-                    log.warning(
-                        "export truncated at query.max_export_rows (%d)", max_rows
-                    )
-                    return
+                    # The archive grew after the preflight count. Abort the
+                    # stream rather than emit a successful incomplete export.
+                    raise RuntimeError("archive grew beyond the export ceiling; retry a narrower range")
                 yield event
 
         meta = _build_meta(
@@ -654,63 +662,12 @@ def _resolve_columns(columns: Optional[str]) -> Optional[Sequence[str]]:
 def _resolve_selection(
     signals_requested: Optional[Sequence[str]],
     types_requested: Optional[Sequence[str]],
-) -> "tuple[List[SpillType], List[int], List[str]]":
-    """Turn the ``signal``/``type`` parameters into store filters.
-
-    Returns ``(spill_types, signal_codes, human_readable_request)``.
-
-    A named signal contributes *both* its raw code and its decoded type.  The
-    archive holds raw codes only for records ingested from a TDU that supplies
-    event words; older records carry the type alone.  Filtering on the union
-    means a query for ``$8F`` finds both, instead of silently returning
-    nothing on an archive built before the history route existed.
-    """
-    spill_types: List[SpillType] = []
-    signal_codes: List[int] = []
-    requested: List[str] = []
-
-    for text in signals_requested or []:
-        for token in str(text).split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                signal = parse_signal(token)
-            except ValueError as exc:
-                raise _error(400, str(exc),
-                             "See /api/signals for every accepted signal.")
-            signal_codes.append(signal.code)
-            spill_types.append(signal.spill_type)
-            requested.append(signal.hex)
-
-    for text in types_requested or []:
-        for token in str(text).split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                spill_type = parse_spill_type(token)
-            except ValueError as exc:
-                raise _error(400, str(exc),
-                             "See /api/types for every accepted type.")
-            spill_types.append(spill_type)
-            requested.append(spill_type.name)
-            # A type names every signal that decodes to it, so that a query by
-            # type still matches records that do carry a raw code.
-            for signal in signals_for_type(spill_type):
-                signal_codes.append(signal.code)
-
-    if signal_codes:
-        # Records with no raw event word store -1; include them so a query by
-        # signal does not hide everything the older ingest path collected.
-        from .storage import UNKNOWN_SIGNAL
-        signal_codes.append(UNKNOWN_SIGNAL)
-
-    return (
-        list(dict.fromkeys(spill_types)),
-        list(dict.fromkeys(signal_codes)),
-        requested,
-    )
+) -> "tuple[List[SpillType], List[int], List[str], List[SpillType]]":
+    """Translate shared selection validation into an API error."""
+    try:
+        return resolve_selection(signals_requested, types_requested)
+    except ValueError as exc:
+        raise _error(400, str(exc), "See /api/signals and /api/types.") from None
 
 
 def _build_meta(

@@ -27,8 +27,9 @@ holds is recognised as a duplicate rather than stored twice:
 * ``pps_offset`` is ``nova_time`` modulo one second, as the TDU reports it.
 * ``event_number`` is the TDU's own, recovered as described below, or NULL
   where it cannot be.
-* ``delta`` is the time since the previous event of any type in the log, i.e.
-  since hardware event ``event_number - 1``, which is how the TDU defines it.
+* ``delta`` is the time since the uniquely identified hardware event
+  ``event_number - 1``, including other types. Missing or ambiguous numbers
+  leave it NULL; timestamp neighbours are not hardware predecessors.
 * ``route`` is ``nsstduapp_log``, so every row this adds can be found, or
   removed, with ``WHERE route = 'nsstduapp_log'``.
 
@@ -212,15 +213,23 @@ def to_events(logged: Logged, numbers: Sequence[Optional[int]], source: str,
               types: Sequence[int], start: int, end: int) -> List[SpillEvent]:
     """Rows for the wanted *types* in ``[start, end)``.
 
-    ``delta`` is taken over every logged event, wanted or not, in or out of
-    range, since it is the gap to the previous hardware event.
+    ``delta`` uses the uniquely identified hardware predecessor, including
+    events outside the requested types/range. Gaps and reset ambiguity are
+    left unknown rather than inferred from timestamp order.
     """
     now = int(time.time())
     events = []
-    previous = None
+    by_number = {}
+    for (timestamp, _), number in zip(logged, numbers):
+        if number is not None:
+            if number in by_number:
+                by_number[number] = None  # restart/duplicate: no unique predecessor
+            else:
+                by_number[number] = timestamp
     for (nova_time, spill_type), event_number in zip(logged, numbers):
-        delta = None if previous is None else nova_time - previous
-        previous = nova_time
+        predecessor = by_number.get(event_number - 1) if event_number is not None else None
+        delta = (nova_time - predecessor if predecessor is not None
+                 and by_number.get(event_number) == nova_time else None)
         if spill_type not in types or not start <= nova_time < end:
             continue
         events.append(SpillEvent(

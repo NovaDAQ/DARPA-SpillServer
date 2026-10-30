@@ -127,43 +127,29 @@ async def test_a_truncated_window_is_narrowed_not_skipped(store):
 
 
 @respx.mock
-async def test_probe_finds_the_edge_by_bisection():
-    """Doubling alone under-reports by up to half the distance, which on a
-    multi-day ring is hours of history left behind."""
+async def test_probe_finds_the_earliest_bounded_window():
     mock_info()
-    now = START + int(200 * 3600 * TICKS_PER_SECOND)
-    edge = now - int(50 * 3600 * TICKS_PER_SECOND)   # data begins 50 h back
-
+    end = START + 1200 * TICKS_PER_SECOND
+    edge = START + 601 * TICKS_PER_SECOND
     def handler(request):
         since = int(request.url.params["since"])
-        if since >= edge:
-            return httpx.Response(200, json={
-                "events": [{"Time": since, "Type": 4, "Number": 1}], "count": 1})
-        return httpx.Response(200, json={"events": [], "count": 0})
-
+        until = int(request.url.params["until"])
+        rows = [{"Time": edge, "Type": 4, "Number": 1}] if since <= edge < until else []
+        return httpx.Response(200, json={"events": rows, "count": len(rows)})
     respx.get(BASE_URL + HISTORY_ROUTE).mock(side_effect=handler)
-
     async with TDUClient(BASE_URL) as client:
-        found = await _probe_earliest(client, now)
-
-    assert found is not None
-    off_by_seconds = abs(found - edge) / float(TICKS_PER_SECOND)
-    assert off_by_seconds < 300, (
-        "bisection should land within five minutes, got {:.0f} s".format(
-            off_by_seconds)
-    )
-    # A pure doubling search would have stopped at 32 h, 18 h short.
-    assert off_by_seconds < 18 * 3600
+        assert await _probe_earliest(client, end, 1200) == edge
 
 
 @respx.mock
 async def test_probe_returns_none_when_the_ring_is_empty():
     mock_info()
-    respx.get(BASE_URL + HISTORY_ROUTE).mock(
+    route = respx.get(BASE_URL + HISTORY_ROUTE).mock(
         return_value=httpx.Response(200, json={"events": [], "count": 0})
     )
     async with TDUClient(BASE_URL) as client:
-        assert await _probe_earliest(client, START) is None
+        assert await _probe_earliest(client, START, 600) is None
+    assert route.call_count == 2
 
 
 def test_default_window_is_modest():

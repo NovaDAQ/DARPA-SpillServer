@@ -19,7 +19,13 @@ the other two, always against a running server (`darpa-spill-dump -s
 server.url`); it has no local-archive mode.
 
 Another command, `darpa-spill-backfill`, writes *into* the archive from a
-TDU's ring buffer; it is covered in [API.md](API.md).
+TDU's ring buffer; it is covered in [API.md](API.md). Without `--start`,
+it scans contiguous five-minute windows from the oldest end of a bounded
+lookback and stops at the first event. `--lookback SECONDS` defaults to 30 days
+(up to 8,640 requests for a quiet or recently started ring). Empty gaps do not
+end discovery, and network errors abort it. Use an explicit `--start` to skip
+these probes or a shorter lookback when the retained interval is known.
+History older than the lookback is not discovered automatically.
 
 Every example below was run against the Near Detector gateway in October 2026,
 and the output shown is what it printed. Full option lists are in the man
@@ -479,10 +485,11 @@ does not overwrite itself: `2026-11-01T01-0500` and `2026-11-01T01-0600`.
 
 ### Empty pieces
 
-Every piece up to the newest archived event is written, even if empty, so a
-week always gives seven files and a missing file always means something.
-Pieces that start after the newest event (the future, or a stalled ingest)
-are not written. `--skip-empty` drops empty pieces as well:
+Every requested historical piece is written, even after the newest archived
+event, so completed quiet hours produce empty files. Pieces starting in the
+future are omitted. An empty file describes the archive; it does not prove
+that ingest covered that interval. The publisher separately checks ingest
+coverage before publication. `--skip-empty` drops empty pieces:
 
 ```console
 $ darpa-spill-dump -s https://novadaq-near-gateway-01.fnal.gov:8443 -k --type SUPER_CYCLE \

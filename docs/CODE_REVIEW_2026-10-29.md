@@ -21,26 +21,26 @@ Four fresh worktrees were created on `review/core-20261029`, `review/web-2026102
 
 The TDU mirror identifies `NovaDAQ/TDUWeb` on `Darpa-Modifications` as authoritative. No hardware, remote deployment, live FDP upload/removal, credential refresh, or email alert was exercised. Python 2.5 hardware execution and Mathematica notebook regeneration were not available in this validation; these are not claimed as tested.
 
-## Findings and initial fixes
+## Findings and fixes
 
-17 actionable issues were filed, including the pre-existing test failure. Eight are addressed by the initial fix branch; the remaining nine stay open for follow-up. “Implemented” below means code and regression coverage are in this PR, not deployed or merged.
+17 actionable issues were filed, including the pre-existing test failure. All 17 are implemented in the draft PR. “Implemented” below means code and regression coverage are in this PR, not deployed or merged.
 
-| Issue | Finding | Initial fix status |
+| Issue | Finding | Fix status |
 | --- | --- | --- |
-| [#2](https://github.com/NovaDAQ/DARPA-SpillServer/issues/2) | [P2] Latest-event queries discard exact signal and multi-selection filters | Open |
-| [#3](https://github.com/NovaDAQ/DARPA-SpillServer/issues/3) | [P2] Local query and dump omit explicitly requested types when combined with a signal | Open |
+| [#2](https://github.com/NovaDAQ/DARPA-SpillServer/issues/2) | [P2] Latest-event queries discard exact signal and multi-selection filters | Implemented |
+| [#3](https://github.com/NovaDAQ/DARPA-SpillServer/issues/3) | [P2] Local query and dump omit explicitly requested types when combined with a signal | Implemented |
 | [#4](https://github.com/NovaDAQ/DARPA-SpillServer/issues/4) | [P2] CSV alias loses repeated filters and corrupts encoded query values | Implemented |
-| [#5](https://github.com/NovaDAQ/DARPA-SpillServer/issues/5) | [P2] Export ceiling silently produces a successful incomplete dataset | Open |
-| [#6](https://github.com/NovaDAQ/DARPA-SpillServer/issues/6) | [P2] Parsing exact GPS strings loses NOvA ticks through float conversion | Open |
+| [#5](https://github.com/NovaDAQ/DARPA-SpillServer/issues/5) | [P2] Export ceiling silently produces a successful incomplete dataset | Implemented |
+| [#6](https://github.com/NovaDAQ/DARPA-SpillServer/issues/6) | [P2] Parsing exact GPS strings loses NOvA ticks through float conversion | Implemented |
 | [#7](https://github.com/NovaDAQ/DARPA-SpillServer/issues/7) | [P2] Maximum Gaussian draw rounds the uniform to one and crashes shifting | Implemented |
-| [#8](https://github.com/NovaDAQ/DARPA-SpillServer/issues/8) | [P2] Automatic backfill treats a recent or gapped ring as empty | Open |
+| [#8](https://github.com/NovaDAQ/DARPA-SpillServer/issues/8) | [P2] Automatic backfill treats a recent or gapped ring as empty | Implemented |
 | [#9](https://github.com/NovaDAQ/DARPA-SpillServer/issues/9) | [P1] A transient retention failure kills the poller while health still says running | Implemented |
-| [#10](https://github.com/NovaDAQ/DARPA-SpillServer/issues/10) | [P2] Split dumps omit completed quiet hours after the last stored event | Open |
+| [#10](https://github.com/NovaDAQ/DARPA-SpillServer/issues/10) | [P2] Split dumps omit completed quiet hours after the last stored event | Implemented |
 | [#11](https://github.com/NovaDAQ/DARPA-SpillServer/issues/11) | [P1] Gateway installer skips installing cron jobs when the existing crontab is empty | Implemented |
-| [#12](https://github.com/NovaDAQ/DARPA-SpillServer/issues/12) | [P2] Browser query table rounds 64-bit NOvA timestamps | Open |
+| [#12](https://github.com/NovaDAQ/DARPA-SpillServer/issues/12) | [P2] Browser query table rounds 64-bit NOvA timestamps | Implemented |
 | [#13](https://github.com/NovaDAQ/DARPA-SpillServer/issues/13) | [P2] Backfill accepts zero or negative windows and cannot advance | Implemented |
-| [#14](https://github.com/NovaDAQ/DARPA-SpillServer/issues/14) | [P2] Streaming shifter commits truncated JSON as a successful output | Open |
-| [#15](https://github.com/NovaDAQ/DARPA-SpillServer/issues/15) | [P2] Log backfill computes delta from timestamp order instead of hardware event order | Open |
+| [#14](https://github.com/NovaDAQ/DARPA-SpillServer/issues/14) | [P2] Streaming shifter commits truncated JSON as a successful output | Implemented |
+| [#15](https://github.com/NovaDAQ/DARPA-SpillServer/issues/15) | [P2] Log backfill computes delta from timestamp order instead of hardware event order | Implemented |
 | [#16](https://github.com/NovaDAQ/DARPA-SpillServer/issues/16) | [P1] Withdrawal script does not hold publisher locks while deleting files and state | Implemented |
 | [#17](https://github.com/NovaDAQ/DARPA-SpillServer/issues/17) | [P2] Default retention settings leave ingest_log growing without bound | Implemented |
 | [#18](https://github.com/NovaDAQ/DARPA-SpillServer/issues/18) | [P2] Remote/local dump comparison reads unflushed temporary files | Implemented |
@@ -50,10 +50,19 @@ The TDU mirror identifies `NovaDAQ/TDUWeb` on `Darpa-Modifications` as authorita
 - Isolated Python 3.12.1 virtual environment, with the sibling `nova-time-decoder` 1.2.0 installed as documented. Runtime dependencies were resolved from the package metadata.
 - Baseline: **537 passed, 1 failed**. The failure reads unflushed `.part` files; issue #18 now compares committed outputs.
 - Core focused suite: **121 passed**. API focused suite: **57 passed**. Cron merge: **2 passed**. Withdrawal locking: **3 passed**.
-- Full integrated suite: **557 passed**, 2 dependency warnings (81.43 seconds).
+- Initial integrated suite: **557 passed**, 2 dependency warnings (81.43 seconds).
+- Final integrated suite after all remaining fixes: **605 passed**, 2 dependency warnings (87.38 seconds), including 48 new remaining-finding regressions. `git diff --check` passes. Publisher subprocess tests share the simulated publisher clock for deterministic future/DST cases.
 - Cron tests execute the actual merge program against temporary crontabs; withdrawal tests use separate local processes to verify lock exclusion and release. No real cron jobs or FDP data were changed.
 - Remaining warnings originate in dependency deprecations (Starlette HTTPX, FastAPI root_path, and pytest-asyncio fixture-loop defaults).
 
-## Follow-up order
+## Remaining-finding implementation
 
-Address the remaining data-integrity issues before treating a dump as an authoritative complete snapshot: export truncation (#5), quiet-period files (#10), log-derived hardware deltas (#15), and incomplete shifted JSON (#14). Then unify query selection (#2/#3), repair automatic backfill discovery (#8), and preserve exact GPS/browser timestamps (#6/#12).
+- #2/#3: shared selection resolution unions explicit types with exact signals and legacy unknown-code rows. Latest selection honors all CLI filters and ranges; remote `--last` retains its JSON envelope and supports CSV. The latest API avoids a whole-archive count.
+- #5: exports above the configured ceiling fail before streaming. Concurrent growth beyond the ceiling fails the stream rather than completing a partial export.
+- #6/#12: decimal GPS parsing rounds directly to ticks; API JSON includes `nova_time_exact` for browser rendering without integer precision loss. CSV columns are unchanged; shifting updates the optional exact field.
+- #8: bounded, contiguous five-minute discovery windows preserve recent and gapped ring history. The default 30-day lookback can cost 8,640 requests; explicit `--start` bypasses discovery and `--lookback` controls its extent. Network failures abort discovery.
+- #10: historical quiet split intervals produce empty files; future intervals are omitted. Empty files do not establish ingest coverage; the publisher retains its separate coverage gate.
+- #14: streamed JSON must close its events array and document with valid separators and a consistent optional summary before the output is committed. Invalid input leaves existing output untouched.
+- #15: log-derived deltas use the unique hardware predecessor, including rows outside the selected type/range. Missing or ambiguous numbering leaves delta unknown.
+
+OIDC remains deferred. GitHub issues remain open until the draft PR is merged; implementation here is not a deployment claim.

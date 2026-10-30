@@ -156,8 +156,15 @@ header, so a saved file explains the query that produced it.
 ### `GET /api/export`
 
 Same filters as `/api/events`, but streams the whole range with no paging,
-bounded only by `query.max_export_rows`. Use it for bulk extraction; use
-`/api/events` for interactive queries.
+bounded by `query.max_export_rows`. Requests above this ceiling return HTTP
+400 before streaming; narrow the range or use `darpa-spill-dump`. If concurrent
+ingest pushes the stream over the ceiling, the stream fails rather than
+returning a successful partial document. Use `/api/events` for interactive
+queries.
+
+JSON event records from `/api/events`, `/api/export`, and `/api/latest` include
+`nova_time_exact`, a decimal string that preserves every 64 MHz tick in
+JavaScript. The numeric `nova_time` and canonical CSV columns remain available.
 
 ### `GET /api/latest`
 
@@ -283,7 +290,7 @@ nowhere else, so once a source has rows the poller never reaches back past
 them. `darpa-spill-backfill` fills that gap.
 
 ```bash
-darpa-spill-backfill -c config/spillserver.yaml            # everything the ring holds
+darpa-spill-backfill -c config/spillserver.yaml            # discover within the last 30 days
 darpa-spill-backfill --start=-6h --end=now                 # a specific range
 darpa-spill-backfill --source tdu-near-master-ppc-01 -n    # dry run, one source
 ```
@@ -301,7 +308,14 @@ Inserts are idempotent, so re-running over a covered range costs time and
 changes nothing. It is safe to run against a live archive while the poller
 is running.
 
-### What "everything the ring holds" means
+Without `--start`, discovery scans contiguous five-minute windows, oldest
+first, across `--lookback SECONDS` (default 30 days). This can require 8,640
+requests for an empty or recently started ring. Gaps do not stop discovery;
+request failures abort it. Use `--start` to skip discovery or reduce
+`--lookback` when the retained interval is known. Older history requires an
+explicit start or a longer lookback.
+
+### Ring history and restarted event counters
 
 Measured on `tdu-near-master-ppc-01`, 2026-09-23: a 32 MB segment of 2,097,152
 slots, holding about **120 hours** of events. That is more than the current

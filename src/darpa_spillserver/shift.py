@@ -370,6 +370,8 @@ def transform_row(row: Dict[str, Any], offsets: OffsetFunction,
         raise ShiftError("nova_time {} would go negative".format(t))
     out = (lambda v: str(v)) if text else (lambda v: v)
     row["nova_time"] = out(shifted)
+    if "nova_time_exact" in row:
+        row["nova_time_exact"] = str(shifted)
 
     pps = _as_int(row.get("pps_offset"), "pps_offset") if "pps_offset" in row else None
     if pps is not None:
@@ -560,24 +562,61 @@ def _shift_json_stream(head, src, out, offsets, sign, force, path) -> int:
     out.write("{\n")
     out.write('"meta": ' + json.dumps(meta, default=str) + ",\n")
     out.write(head[2])
-    if head[2] == '"events": [],\n':
-        out.writelines(src)
+    def finish(trailer, count):
+        # Only the small document trailer is buffered; events remain streamed.
+        rest = src.read(1024 * 1024 + 1)
+        if len(rest) > 1024 * 1024:
+            raise ShiftError("{}: JSON trailer is too large".format(path))
+        trailer += rest
+        document = json.loads('{"events": []' + trailer)
+        if document.get("events") != []:
+            raise ShiftError("{}: duplicate events in JSON trailer".format(path))
+        summary = document.get("summary")
+        if summary is not None and (not isinstance(summary, dict)
+                or summary.get("returned", count) != count):
+            raise ShiftError("{}: summary does not match event count".format(path))
+        out.write(trailer)
+        return count
+
+    if head[2] == '\"events\": [],\n':
+        # The comma has already been written as part of head[2].
+        rest = src.read(1024 * 1024 + 1)
+        if len(rest) > 1024 * 1024:
+            raise ShiftError("{}: JSON trailer is too large".format(path))
+        document = json.loads('{"events": [],' + rest)
+        if document.get("events") != []:
+            raise ShiftError("{}: duplicate events in JSON trailer".format(path))
+        summary = document.get("summary")
+        if summary is not None and (not isinstance(summary, dict)
+                or summary.get("returned", 0) != 0):
+            raise ShiftError("{}: summary does not match event count".format(path))
+        out.write(rest)
         return 0
     count = 0
+    previous_comma = False
     for line in src:
-        stripped = line.rstrip("\n")
-        if stripped == "":
+        stripped = line.strip()
+        if not stripped:
             continue
         if stripped.startswith("]"):
-            out.write(line)
-            out.writelines(src)
-            break
+            if previous_comma:
+                raise ShiftError("{}: trailing comma in events".format(path))
+            # Preserve the exact closing-array layout, then validate the
+            # remainder as a small JSON object with an empty event list.
+            closing = line.index("]")
+            out.write(line[:closing + 1])
+            return finish(line[closing + 1:], count)
+        if count and not previous_comma:
+            raise ShiftError("{}: missing comma between events".format(path))
         comma = stripped.endswith(",")
         row = json.loads(stripped[:-1] if comma else stripped)
+        if not isinstance(row, dict):
+            raise ShiftError("{}: event must be an object".format(path))
         transform_row(row, offsets, sign, text=False)
         out.write(json.dumps(row, default=str) + ("," if comma else "") + "\n")
+        previous_comma = comma
         count += 1
-    return count
+    raise ShiftError("{}: unexpected EOF in events array".format(path))
 
 
 def shift_file(in_path: str, out_path: str, token: Token, sign: int,

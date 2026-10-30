@@ -58,8 +58,8 @@ from .novatime import (
     nova_to_datetime,
     parse_range,
 )
-from .signals import parse_signal, parse_spill_type
-from .storage import UNKNOWN_SIGNAL, SpillStore, StoreError
+from .signals import resolve_selection
+from .storage import SpillStore, StoreError
 
 __all__ = ["main", "dump_range", "split_range", "segment_path",
            "label_fields", "SPLIT_FIELDS", "MONTH_ABBREVIATIONS", "CsvSink",
@@ -91,11 +91,12 @@ class DumpError(RuntimeError):
 class LocalReader:
     """Read windows straight from a SQLite archive."""
 
-    def __init__(self, store: SpillStore, spill_types, signal_codes, sources):
+    def __init__(self, store: SpillStore, spill_types, signal_codes, sources, unrestricted_types=None):
         self.store = store
         self.spill_types = spill_types or None
         self.signal_codes = signal_codes or None
         self.sources = sources or None
+        self.unrestricted_types = unrestricted_types
         self.description = "sqlite:" + str(store.path)
 
     def extent(self) -> Tuple[Optional[int], Optional[int]]:
@@ -110,6 +111,7 @@ class LocalReader:
             start_nova=start_nova, end_nova=end_nova,
             spill_types=self.spill_types, signal_codes=self.signal_codes,
             limit=limit, offset=0, sources=self.sources,
+            unrestricted_types=self.unrestricted_types,
         )
         return [event_row(e) for e in page.events], page.total
 
@@ -640,16 +642,9 @@ def _open_reader(args, environ) -> Tuple[Any, str]:
 
     # Validate the selection locally before touching the archive.
     try:
-        signals = [parse_signal(s) for s in args.signal]
-        spill_types = [parse_spill_type(t) for t in args.types]
+        spill_types, signal_codes, _, explicit_types = resolve_selection(args.signal, args.types)
     except ValueError as exc:
         raise DumpError("{}; run darpa-spill-query --list-signals".format(exc))
-    signal_codes = [s.code for s in signals]
-    spill_types.extend(s.spill_type for s in signals)
-    if signal_codes:
-        # Records stored without a raw event word match on type alone, as
-        # in darpa-spill-query and the API.
-        signal_codes.append(UNKNOWN_SIGNAL)
 
     database = args.database
     legacy_source = None
@@ -681,7 +676,7 @@ def _open_reader(args, environ) -> Tuple[Any, str]:
                             "has: {}".format(", ".join(unknown), database,
                                              ", ".join(known) or "(none)"))
     reader = LocalReader(store, list(dict.fromkeys(spill_types)),
-                         list(dict.fromkeys(signal_codes)), sources)
+                         list(dict.fromkeys(signal_codes)), sources, explicit_types)
     return reader, zone
 
 
@@ -782,8 +777,8 @@ def main(argv: Optional[Sequence[str]] = None,
 
         pieces = split_range(req_start, req_end, args.split, zone)
         if args.split:
-            # Pieces wholly after the snapshot have not happened yet.
-            pieces = [p for p in pieces if p[0] < snap_end]
+            # The latest event does not bound time: a completed quiet hour
+            # still needs an empty file. Only omit intervals in the future.
             # A template that drops part of the label, such as {hour}
             # without {offset} on the autumn changeover, would send two
             # pieces to one file; refuse before anything is written.
@@ -799,6 +794,8 @@ def main(argv: Optional[Sequence[str]] = None,
                                  seen[path], label, path))
                         return 2
                     seen[path] = label
+            now_nova = datetime_to_nova(datetime.now(timezone.utc))
+            pieces = [p for p in pieces if p[0] < now_nova]
 
         _, expected_total = (reader.fetch(snap_start, snap_end, 1)
                              if snap_end > snap_start else (None, 0))
