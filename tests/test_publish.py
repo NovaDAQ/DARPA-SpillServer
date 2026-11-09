@@ -358,7 +358,7 @@ class Rig:
             "fdp": {"env_script": str(self.env_script),
                     "ca_path": str(tmp_path / "certs"),
                     "token_file": str(self.tokens / "fdp_bt_test"),
-                    "raw_dest": "/amsc/novaend/raw",
+                    "raw_dest": "/amsc/public/novaend/raw",
                     "shifted_dest": "/amsc/public/novaend/shifted"},
             "credentials": {
                 "krb5ccname": "FILE:" + str(self.tokens / "krb5cc_test"),
@@ -556,7 +556,7 @@ def publisher(rig, now=None, dry_run=False):
 
 def test_paths_for_a_normal_hour(rig):
     """!@brief Hourly raw/shifted paths follow D3/D4, and each tree maps to its
-    own FDP area (raw private, shifted public).
+    own FDP area (fdp.raw_dest, fdp.shifted_dest).
     """
     pub = publisher(rig)
     paths = pub.file_paths("numi", "2026-10-22T13-0500")
@@ -565,7 +565,7 @@ def test_paths_for_a_normal_hour(rig):
     assert shifted == str(rig.data / "shifted/oct/2026-oct-22/"
                           "nd-numi-2026-10-22T13-0500.shifted.csv")
     assert paths["json"][0].endswith("nd-numi-2026-10-22T13-0500.json")
-    assert pub.remote_dir(raw, "raw") == "/amsc/novaend/raw/oct/2026-oct-22"
+    assert pub.remote_dir(raw, "raw") == "/amsc/public/novaend/raw/oct/2026-oct-22"
     assert pub.remote_dir(shifted, "shifted") == \
         "/amsc/public/novaend/shifted/oct/2026-oct-22"
 
@@ -713,9 +713,9 @@ def test_hourly_dumps_shifts_uploads_and_reports(rig):
         assert put["sourced"] == "yes"
         assert "--replace" not in argv
     dests = sorted(p["argv"][-1] for p in puts)
-    assert dests == ["/amsc/novaend/raw/oct/2026-oct-22/",
+    assert dests == ["/amsc/public/novaend/raw/oct/2026-oct-22/",
                      "/amsc/public/novaend/shifted/oct/2026-oct-22/"]
-    raw_put = [p for p in puts if p["argv"][-1].startswith("/amsc/novaend/raw")][0]
+    raw_put = [p for p in puts if p["argv"][-1].startswith("/amsc/public/novaend/raw")][0]
     assert len([a for a in raw_put["argv"] if a.endswith((".csv", ".json"))]) == 6
 
     # The token of October was created (and announced) for October data.
@@ -1028,7 +1028,7 @@ def test_upload_auth_or_network_failure_then_retry(rig, code):
     assert status["jobs"]["upload"]["result"] == "ok"
 
 
-RAW_DIR = "/amsc/novaend/raw/oct/2026-oct-22/"
+RAW_DIR = "/amsc/public/novaend/raw/oct/2026-oct-22/"
 SHIFTED_DIR = "/amsc/public/novaend/shifted/oct/2026-oct-22/"
 ZOMBIE_ERROR = ("raw upload: removed incomplete remote copy (size -1, "
                 "adler32 none); will retry")
@@ -1319,8 +1319,8 @@ def test_upload_groups_by_destination_directory(rig):
     assert rig.main("upload", now=utc(2026, 10, 23, 6, 20)) == 0
     puts = rig.log("fdp-put.log")
     dests = sorted(p["argv"][-1] for p in puts)
-    assert dests == ["/amsc/novaend/raw/oct/2026-oct-22/",
-                     "/amsc/novaend/raw/oct/2026-oct-23/",
+    assert dests == ["/amsc/public/novaend/raw/oct/2026-oct-22/",
+                     "/amsc/public/novaend/raw/oct/2026-oct-23/",
                      "/amsc/public/novaend/shifted/oct/2026-oct-22/",
                      "/amsc/public/novaend/shifted/oct/2026-oct-23/"]
     for put in puts:

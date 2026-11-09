@@ -38,7 +38,7 @@ Usage::
 
 **Raw versus shifted (blurred) copies.**  Every published piece exists
 twice: the *raw* file with true timestamps, uploaded to the group-only
-``--raw-dest`` (``/amsc/novaend/raw``), and the *shifted* file, the raw file
+``--raw-dest`` (``/amsc/public/novaend/raw``), and the *shifted* file, the raw file
 passed through ``darpa-spill-shift apply`` (transform dts1: each event's
 time moved by a keyed pseudorandom offset, Gaussian sigma 50 us), uploaded
 to the anonymously readable ``--shifted-dest``
@@ -185,10 +185,11 @@ def main(argv: Sequence[str] = None) -> int:
     parser.add_argument("--state-db",
                         default="/data/DARPA-spilldata/publish/state/publish.db")
     parser.add_argument("--data-root", default="/data/DARPA-spilldata")
-    # Raw (true times) is group-private; shifted (dts1-blurred) is public.
+    # Raw (true times) and shifted (dts1-blurred) are both public since
+    # 2026-11-09; raw files sent before then are also in /amsc/novaend/raw.
     # The defaults match fdp.raw_dest / fdp.shifted_dest in
     # deploy/gateway/publish.yaml and must stay in step with it.
-    parser.add_argument("--raw-dest", default="/amsc/novaend/raw")
+    parser.add_argument("--raw-dest", default="/amsc/public/novaend/raw")
     parser.add_argument("--shifted-dest", default="/amsc/public/novaend/shifted")
     parser.add_argument("--env-script", default="~/anorman-fdp/env.sh")
     parser.add_argument("--token-file",
@@ -246,7 +247,7 @@ def _withdraw(args) -> int:
     remotes: List[str] = []
     locals_: List[str] = []
     for raw_path, shifted_path in rows:
-        # Raw copy -> private raw destination.
+        # Raw copy -> raw destination (--raw-dest).
         remotes.append(remote(raw_path, args.data_root, "raw", args.raw_dest))
         locals_.append(raw_path)
         # Shifted copy -> public shifted destination.  NULL when the piece
