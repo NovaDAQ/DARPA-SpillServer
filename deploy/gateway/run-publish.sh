@@ -8,7 +8,7 @@
 ##   darpa-spill-publish; this script only fixes PATH, HOME, locale, umask
 ##   and cwd.  The shift stage produces the timestamp-blurred ("shifted",
 ##   transform dts1) copy of every raw dump; upload sends raw files to
-##   fdp.raw_dest (group-private) and shifted files to fdp.shifted_dest
+##   fdp.raw_dest and shifted files to fdp.shifted_dest
 ##   (public), both set in publish.yaml.
 ##   Usage:   run-publish.sh <subcommand> [options]
 ##            run-publish.sh hourly -v

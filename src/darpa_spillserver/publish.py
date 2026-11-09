@@ -76,7 +76,7 @@ token* blurs *which file* and keeps the blurred and unblurred copies apart:
 - Every copy of an event (hourly file, daily file, a re-run) is blurred
   with the same token, hence with the same offset, so comparing or
   averaging copies reveals nothing (D7).
-- Raw files live under ``raw/`` and go only to ``fdp.raw_dest`` (private);
+- Raw files live under ``raw/`` and go only to ``fdp.raw_dest``;
   shifted files live under ``shifted/`` with a ``.shifted.`` infix and go
   only to ``fdp.shifted_dest`` (public); see Publisher.templates() and
   Publisher.remote_dir().
@@ -279,7 +279,7 @@ DEFAULTS: Dict[str, Any] = {
         "ca_path": "/home/novadaq/anorman-fdp/certificates",
         "token_file": "/home/novadaq/anorman-fdp/tokens/"
                       "fdp_bt_u46550_amsc_novaendwrite",
-        "raw_dest": "/amsc/novaend/raw",
+        "raw_dest": "/amsc/public/novaend/raw",
         "shifted_dest": "/amsc/public/novaend/shifted",
         "parallel": 4,
         "timeout": 3600.0,
@@ -1812,8 +1812,8 @@ class Publisher:
         # shifted/, with the same day directories, and the shifted name
         # carries ".shifted." before the extension (darpa-spill-shift's
         # own default output name).  The tree decides where a copy is
-        # uploaded (remote_dir: raw/ -> fdp.raw_dest, private; shifted/
-        # -> fdp.shifted_dest, public); the infix keeps a blurred file
+        # uploaded (remote_dir: raw/ -> fdp.raw_dest; shifted/
+        # -> fdp.shifted_dest); the infix keeps a blurred file
         # recognisable by name wherever it is copied.
         return {fmt: (os.path.join(self.data_root, "raw", day_dir,
                                    name + "." + fmt),
@@ -2310,7 +2310,7 @@ class Publisher:
         @param local local file path.
         @param area  ``raw`` or ``shifted``; selects both the local tree
                      (``data_root/area``) and the destination.
-        @return e.g. ``/amsc/novaend/raw/oct/2026-oct-22``, or None if *local*
+        @return e.g. ``/amsc/public/novaend/raw/oct/2026-oct-22``, or None if *local*
                 is not under ``data_root/area``.
         """
         dest = self.cfg["fdp"]["raw_dest" if area == "raw" else "shifted_dest"]
