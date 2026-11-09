@@ -111,7 +111,7 @@ fdp:
   # Bearer token for the amsc issuer, novaendwrite role; written by 'creds'.
   token_file: /home/novadaq/anorman-fdp/tokens/fdp_bt_u46550_amsc_novaendwrite
   # Remote roots; the local {mon}/{year}-{mon}-{day}/ layout is kept (D9).
-  raw_dest: /amsc/novaend/raw
+  raw_dest: /amsc/public/novaend/raw
   shifted_dest: /amsc/public/novaend/shifted
   # fdp-put -j: parallel transfers.
   parallel: 4

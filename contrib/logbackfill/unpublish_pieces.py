@@ -88,7 +88,7 @@ def main(argv: Sequence[str] = None) -> int:
     parser.add_argument("--state-db",
                         default="/data/DARPA-spilldata/publish/state/publish.db")
     parser.add_argument("--data-root", default="/data/DARPA-spilldata")
-    parser.add_argument("--raw-dest", default="/amsc/novaend/raw")
+    parser.add_argument("--raw-dest", default="/amsc/public/novaend/raw")
     parser.add_argument("--shifted-dest", default="/amsc/public/novaend/shifted")
     parser.add_argument("--env-script", default="~/anorman-fdp/env.sh")
     parser.add_argument("--token-file",

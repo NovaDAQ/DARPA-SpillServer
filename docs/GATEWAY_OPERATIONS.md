@@ -103,13 +103,18 @@ covers 25 hours. The spring day (14 March 2027) has 23 hours and no
 
 | Local | Remote (D9) |
 |---|---|
-| `/data/DARPA-spilldata/raw/oct/2026-oct-22/` | `/amsc/novaend/raw/oct/2026-oct-22/` |
+| `/data/DARPA-spilldata/raw/oct/2026-oct-22/` | `/amsc/public/novaend/raw/oct/2026-oct-22/` |
 | `/data/DARPA-spilldata/shifted/oct/2026-oct-22/` | `/amsc/public/novaend/shifted/oct/2026-oct-22/` |
 
 The `novaendwrite` role can write only under `/amsc/novaend` and
 `/amsc/public/novaend`. dCache forbids overwriting, and the pipeline never
 passes `--replace`: a file, once uploaded, is final. The older manual uploads
 under `/amsc/novaend/{numi,booster,all-accelerator}-timing/` are not touched.
+
+Raw files have gone to `/amsc/public/novaend/raw` since 2026-11-09 (1.5.3).
+Raw files published before that are also in the earlier private area,
+`/amsc/novaend/raw`, which is no longer written; all raw files from
+2026-09-17 on were backfilled to the public area the same day.
 
 **Upload verification.** `fdp-put`'s exit status alone never marks a file
 uploaded. A PUT that fails part-way (seen live: `PUT ...: SSL connect error`
@@ -138,8 +143,8 @@ To look at FDP by hand:
 
 ```bash
 source ~/anorman-fdp/env.sh
-fdp-ls /amsc/novaend/raw/oct/2026-oct-22
-fdp-stat --checksum /amsc/novaend/raw/oct/2026-oct-22/nd-all-2026-10-22T13-0500.csv
+fdp-ls /amsc/public/novaend/raw/oct/2026-oct-22
+fdp-stat --checksum /amsc/public/novaend/raw/oct/2026-oct-22/nd-all-2026-10-22T13-0500.csv
 fdp-token show
 ```
 
@@ -585,5 +590,5 @@ with open(sys.argv[1],"rb") as f:
     for b in iter(lambda: f.read(1<<20), b""): a=zlib.adler32(b,a)
 print("%08x" % a)' /data/DARPA-spilldata/raw/oct/2026-oct-22/nd-all-2026-10-22T13-0500.csv
 source ~/anorman-fdp/env.sh
-fdp-stat --checksum /amsc/novaend/raw/oct/2026-oct-22/nd-all-2026-10-22T13-0500.csv
+fdp-stat --checksum /amsc/public/novaend/raw/oct/2026-oct-22/nd-all-2026-10-22T13-0500.csv
 ```

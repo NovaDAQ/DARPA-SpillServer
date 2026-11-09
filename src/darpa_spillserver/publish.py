@@ -242,7 +242,7 @@ DEFAULTS: Dict[str, Any] = {
         "ca_path": "/home/novadaq/anorman-fdp/certificates",
         "token_file": "/home/novadaq/anorman-fdp/tokens/"
                       "fdp_bt_u46550_amsc_novaendwrite",
-        "raw_dest": "/amsc/novaend/raw",
+        "raw_dest": "/amsc/public/novaend/raw",
         "shifted_dest": "/amsc/public/novaend/shifted",
         "parallel": 4,
         "timeout": 3600.0,

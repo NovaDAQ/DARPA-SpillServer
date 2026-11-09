@@ -15,7 +15,8 @@ NOvA Near Detector.
 |---|---|---|---|
 | Public, shifted | `/amsc/public/novaend/shifted/<mon>/<YYYY>-<mon>-<DD>/` | anyone, anonymously | timestamps blurred with a Gaussian of σ = 50 µs |
 | Public, tokens | `/amsc/public/novaend/tokens/` | anyone, anonymously | the monthly tokens that undo the blur |
-| Private, raw | `/amsc/novaend/raw/<mon>/<YYYY>-<mon>-<DD>/` | `novaend` group (bearer token) | the true timestamps |
+| Public, raw | `/amsc/public/novaend/raw/<mon>/<YYYY>-<mon>-<DD>/` | anyone, anonymously | the true timestamps |
+| Private, raw (to 2026-11-09) | `/amsc/novaend/raw/<mon>/<YYYY>-<mon>-<DD>/` | `novaend` group (bearer token) | the true timestamps; no longer written |
 | Private, tokens | `/amsc/novaend/tokens/` | `novaend` group | the same monthly tokens |
 
 `<mon>` is the lowercase English month (`sep`, `oct`, ...); for example
@@ -67,17 +68,20 @@ If `curl` reports a certificate error, your CA bundle lacks the InCommon IGTF
 chain that amsc.fnal.gov uses; add `--capath /etc/grid-security/certificates`
 (or another directory holding the IGTF CAs).
 
-### Private files (novaend members)
+### Raw files
 
-With the Fermi Data Platform tools and a `novaendread` or `novaendwrite`
-token:
+Since 2026-11-09 the raw files (true timestamps) are public too, under
+`/amsc/public/novaend/raw/`, with every day from 2026-09-17 on. Download
+them like the shifted ones:
 
 ```bash
-fdp-get /amsc/novaend/raw/oct/2026-oct-22/nd-all-2026-10-22T14-0500.csv .
-fdp-get -R /amsc/novaend/raw/oct/2026-oct-22 ./raw-2026-oct-22
+fdp-get /amsc/public/novaend/raw/oct/2026-oct-22/nd-all-2026-10-22T14-0500.csv .
+fdp-get -R /amsc/public/novaend/raw/oct/2026-oct-22 ./raw-2026-oct-22
 ```
 
-or with `curl` and a bearer token file:
+The earlier private copies under `/amsc/novaend/raw/` are no longer written.
+novaend members can still read them with a `novaendread` or `novaendwrite`
+token:
 
 ```bash
 curl -L -H "Authorization: Bearer $(cat "$BEARER_TOKEN_FILE")" -O \
